@@ -1,0 +1,21 @@
+[package]
+name = "scada-protocol"
+description = "Generated scada.driver.v1 / scada.introspect.v1 types and the bounded length-prefixed framing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

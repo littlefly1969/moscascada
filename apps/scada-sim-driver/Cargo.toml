@@ -1,0 +1,21 @@
+[package]
+name = "scada-sim-driver"
+description = "Simulated driver process for VS-001 (separate process, blocking Unix socket client)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scada-sim-driver"
+path = "src/main.rs"
+
+[dependencies]
+scada-protocol.workspace = true
+
+[lints]
+workspace = true

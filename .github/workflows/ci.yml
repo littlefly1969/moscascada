@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install buf
+        run: npm install --global @bufbuild/buf@1.75.0
+      - name: Checks
+        run: ./scripts/check.sh
+
+  fuzz-smoke:
+    # Separate from the stable gate: cargo-fuzz needs nightly (libFuzzer + sanitizers).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Seed corpus
+        run: mkdir -p fuzz/corpus && cp -r fuzz/seeds/* fuzz/corpus/
+      - name: frame_decode (60 s)
+        run: cd fuzz && cargo +nightly fuzz run -O frame_decode corpus/frame_decode -- -max_total_time=60
+      - name: batch_validation (60 s)
+        run: cd fuzz && cargo +nightly fuzz run -O batch_validation corpus/batch_validation -- -max_total_time=60

@@ -1,0 +1,69 @@
+// Read-only test/diagnostic introspection of a running kernel. Disabled unless the
+// kernel is started with --introspection-socket. Same framing as scada.driver.v1.
+// Not a public API: it exists so multi-process tests and benchmarks can observe the
+// logical state, the digest and the runtime counters.
+syntax = "proto3";
+
+package scada.introspect.v1;
+
+message IntrospectRequest {
+  bool include_tags = 1;
+  // Must be 1. Also guarantees a non-empty encoding (zero-length frames are invalid).
+  uint32 introspect_version = 2;
+}
+
+enum Quality {
+  QUALITY_UNSPECIFIED = 0;
+  QUALITY_UNKNOWN = 1;
+  QUALITY_GOOD = 2;
+  QUALITY_UNCERTAIN_SOURCE_UNAVAILABLE = 3;
+}
+
+message TagState {
+  uint32 tag_id = 1;
+  oneof value {
+    bool bool_value = 2;
+    sint64 i64_value = 3;
+  }
+  Quality quality = 4;
+  uint64 revision = 5;
+}
+
+enum LinkState {
+  LINK_STATE_UNSPECIFIED = 0;
+  LINK_STATE_NEVER_CONNECTED = 1;
+  LINK_STATE_CONNECTED = 2;
+  LINK_STATE_DISCONNECTED = 3;
+}
+
+message SourceState {
+  uint32 source_id = 1;
+  LinkState link_state = 2;
+  uint64 link_generation = 3;
+  optional fixed64 source_epoch = 4;
+  optional uint64 last_accepted_source_sequence = 5;
+}
+
+message RuntimeCounters {
+  uint64 connections_accepted = 1;
+  uint64 connections_refused_limit = 2;
+  uint64 handshakes_rejected = 3;
+  uint64 protocol_errors = 4;
+  uint64 batches_applied = 5;
+  uint64 batches_duplicate = 6;
+  uint64 batches_rejected = 7;
+  // Times a producer had to wait because the sequencer input queue was full.
+  uint64 input_queue_full_waits = 8;
+  uint32 input_queue_capacity = 9;
+  uint32 active_connections = 10;
+}
+
+message IntrospectResponse {
+  bytes kernel_instance_id = 1;
+  bytes state_digest = 2;
+  uint64 last_operation_sequence = 3;
+  bytes config_fingerprint = 4;
+  repeated TagState tags = 5;
+  repeated SourceState sources = 6;
+  RuntimeCounters counters = 7;
+}
