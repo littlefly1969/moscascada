@@ -7,6 +7,7 @@
 //! - `convert/*`: protocol batch -> core batch.
 //! - `apply/{order}/{n}`: one Delta of n changed i64 observations on a source with 128
 //!   channels, input in canonical (sorted), reversed or shuffled channel order.
+//!
 //! Inputs are built in criterion's untimed setup (`iter_batched`).
 //!
 //! A/B between commits uses criterion baselines on the SAME crate and code path
