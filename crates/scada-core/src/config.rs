@@ -189,6 +189,14 @@ impl SourceMeta {
             .map(|&(_, t)| t as usize)
     }
 
+    /// Heap bytes of this source's metadata (channel table, dense index, name).
+    pub fn heap_bytes(&self) -> u128 {
+        (self.channels.capacity() as u128)
+            .saturating_mul(std::mem::size_of::<(ChannelId, u32)>() as u128)
+            .saturating_add((self.dense.capacity() as u128).saturating_mul(4))
+            .saturating_add(self.name.capacity() as u128)
+    }
+
     /// Whether the direct lookup table is in use (diagnostics, tests).
     pub fn has_dense_index(&self) -> bool {
         !self.dense.is_empty()
@@ -422,6 +430,21 @@ impl ValidatedConfig {
 
     pub fn tag_index(&self, tag_id: TagId) -> Option<usize> {
         self.tags.binary_search_by_key(&tag_id, |t| t.tag_id).ok()
+    }
+
+    /// Heap bytes of the validated configuration (tag and source metadata).
+    pub fn heap_bytes(&self) -> u128 {
+        let tags: u128 = self
+            .tags
+            .iter()
+            .map(|t| (std::mem::size_of::<TagMeta>() as u128).saturating_add(t.name.capacity() as u128))
+            .sum();
+        let sources: u128 = self
+            .sources
+            .iter()
+            .map(|s| (std::mem::size_of::<SourceMeta>() as u128).saturating_add(s.heap_bytes()))
+            .sum();
+        tags.saturating_add(sources)
     }
 
     pub fn source(&self, source_id: SourceId) -> Option<&SourceMeta> {

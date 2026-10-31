@@ -274,6 +274,22 @@ impl Kernel {
         Kernel { config, last_operation_sequence: 0, sources, cells, staging }
     }
 
+    /// Conservative upper bound, in bytes, of the heap the kernel state allocates for
+    /// `config` (RTDB cells, per-source runtime and deduplication copy, staging buffer).
+    /// All of it is allocated by [`Kernel::new`] and never grows (VS-002 E1). Allocator
+    /// overhead is not included.
+    pub fn storage_bound_bytes(config: &ValidatedConfig) -> u128 {
+        let tags = config.tags().len() as u128;
+        let max_obs = u128::from(config.limits().max_observations_per_batch);
+        let channels: u128 = config.sources().iter().map(|s| s.channel_count() as u128).sum();
+        let sources = config.sources().len() as u128;
+        let sz = |n: usize| n as u128;
+        tags.saturating_mul(sz(std::mem::size_of::<TagCell>()))
+            .saturating_add(sources.saturating_mul(sz(std::mem::size_of::<SourceRuntime>())))
+            .saturating_add(channels.saturating_mul(sz(std::mem::size_of::<(u32, Value)>())))
+            .saturating_add(max_obs.saturating_mul(sz(std::mem::size_of::<Staged>())))
+    }
+
     pub fn config(&self) -> &Arc<ValidatedConfig> {
         &self.config
     }
