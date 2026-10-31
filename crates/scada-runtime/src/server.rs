@@ -357,6 +357,8 @@ async fn data_phase(
     let probe = diag.is_some_and(|d| d.is_probe(source_id.0));
     let writer = writer_task(server.kernel_instance_id, max, wr, pending_rx, closed_tx, diag, probe);
     let reader = async move {
+        // C3: decoded batch reused across frames (observation buffer keeps its capacity).
+        let mut wire = pb::ObservationBatch::default();
         loop {
             let frame = tokio::select! {
                 r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => r,
@@ -365,8 +367,23 @@ async fn data_phase(
             let frame_done = diag::now(diag);
             let fatal = match frame {
                 Ok(false) => return,
-                Ok(true) => match DriverMessage::decode(buf.as_slice()) {
-                    Ok(DriverMessage { body: Some(driver_message::Body::Batch(b)) }) => {
+                Ok(true) => match convert::decode_driver_message(buf.as_slice(), &mut wire) {
+                    Ok(decoded) => {
+                        let b = match &decoded {
+                            convert::Decoded::Batch(b) => *b,
+                            convert::Decoded::Other(m) => match convert::as_batch(m) {
+                                Some(b) => b,
+                                None => {
+                                    Counters::inc(&server.counters.protocol_errors);
+                                    let msg = protocol_error(
+                                        ErrorCode::UnexpectedMessage,
+                                        "only ObservationBatch after Welcome",
+                                    );
+                                    let _ = pending_tx.send(Pending::Fatal(msg)).await;
+                                    return;
+                                }
+                            },
+                        };
                         let t_conv = diag::now(diag);
                         if let (Some(d), Some(t)) = (diag, frame_done) {
                             d.since(Stage::Decode, t);
@@ -413,7 +430,6 @@ async fn data_phase(
                         }
                         continue;
                     }
-                    Ok(_) => protocol_error(ErrorCode::UnexpectedMessage, "only ObservationBatch after Welcome"),
                     Err(_) => protocol_error(ErrorCode::MalformedMessage, "undecodable message"),
                 },
                 Err(e) => match e.code() {

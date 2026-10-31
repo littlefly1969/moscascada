@@ -14,11 +14,14 @@ path = "src/bin/scada-kernel.rs"
 [dependencies]
 scada-core.workspace = true
 scada-protocol.workspace = true
+# Same version as scada-protocol; used only for decode_varint / DecodeError in convert.rs (C3).
+prost.workspace = true
 serde.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "signal", "macros"] }
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true
 scada-sim-driver = { path = "../../apps/scada-sim-driver" }
 
