@@ -1,4 +1,4 @@
-# Architettura (VS-001 + VS-002)
+# Architettura (VS-001 + VS-002 + VS-003)
 
 ```text
  processi driver (invariati)               processo scada-kernel (scada-runtime)
@@ -33,7 +33,8 @@ Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, cloc
 |---|---|---|
 | `scada-core` | Configurazione validata, RTDB in RAM, `Kernel::apply`, snapshot, digest. Puro e sincrono. | `blake3` (feature `pure`) |
 | `scada-protocol` | Tipi generati da `proto/` (`prost`, compilati con `protox`), framing limitato. | `prost`, `bytes` |
-| `scada-runtime` | Lib + binario `scada-kernel`: config TOML, socket, sessioni, sequencer, introspezione, diagnostica, budget di memoria, cattura input. | core, protocol, `prost` (stessa versione, solo `decode_varint`), `tokio` (`rt`, `rt-multi-thread`, …), `serde`, `toml` |
+| `scada-runtime` | Lib + binario `scada-kernel`: config TOML, socket, sessioni, ingresso (VS-003), sequencer, introspezione, diagnostica, budget di memoria, cattura input. | core, protocol, sched, `prost` (stessa versione, solo `decode_varint`), `tokio` (`rt`, `rt-multi-thread`, …), `serde`, `toml` |
+| `scada-sched` | VS-003: modello puro dello scheduler di ingresso (`FairQueue`, RR/DRR) + simulatore delle politiche. Nessuna dipendenza. | — |
 | `scada-sim-driver` | Driver simulato + client bloccante; procedura di ripresa `resume` (D1). | protocol |
 | `scada-bench` | Benchmark E2E (`cell`, `mixed`, `saturation`, `e2e`) e microbenchmark Criterion (`benches/micro.rs`). Non distribuito. | core, protocol, sim-driver; dev: `criterion`, runtime |
 | `fuzz/` | Workspace separato per `cargo-fuzz` (nightly). | core, protocol, runtime |
@@ -47,10 +48,20 @@ Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, cloc
 5. Il thread sequencer preleva una richiesta per risveglio (`blocking_recv`) e la applica, **nell'ordine della coda**. Nessuna fusione, nessuna riscrittura di sequenze. Un drain limitato (`blocking_recv_many`) è stato misurato e rimosso: nessun vantaggio ripetibile e più attesa per la sorgente rara (ADR 0005).
 6. L'esito torna alla sessione via `oneshot`; il writer invia gli `InputAck` nell'ordine dei batch. Se ACK successivi sono già disponibili (senza attendere) li codifica nella stessa `write` (fino a `ack_coalesce_max`, C5). Ogni `write` ha la scadenza `ack_write_timeout_ms` (D2).
 
+## Ingresso verso il sequencer (VS-003, ADR 0010)
+
+`scada-runtime::ingress` astrae il passo 4–5 del percorso: `Ingress::submit` (lato sessioni, cancel-safe) e `Inbox::blocking_recv` (lato sequencer). Tre politiche esplicite in `[ipc] ingress_policy`:
+
+- `fifo` (default): la `mpsc` limitata di VS-002.
+- `source_capped`: un semaforo Tokio per sorgente (`per_source_pending_limit` permessi) prima della stessa `mpsc`.
+- `source_fair`: permesso della sorgente → permesso globale (`input_queue_capacity`) → `push` sotto `Mutex` in una `scada_sched::FairQueue` (una lane FIFO limitata per sorgente, anello delle lane non vuote con al più una presenza per lane, round-robin a una richiesta per turno, O(1)); il sequencer attende su `Condvar`. `Connect`/`Disconnect` entrano nella lane della propria sorgente come richieste di controllo (fuori dalla quota dati: la FIFO della lane è la barriera di disconnessione); l'introspezione ha una lane propria.
+
+I permessi viaggiano dentro la richiesta e sono rilasciati quando il sequencer la scarta dopo `apply`; ordine di acquisizione fisso (slot ACK → sorgente → globale → lock), nessun ciclo. Se il sequencer termina, il suo lato chiude i semafori e scarta le richieste in coda: nessuna sessione resta sospesa e nessun ACK viene inventato. `scada-sched` è un crate puro (nessun Tokio, clock, I/O, lock), verificato contro un oracle con proptest; contiene anche il simulatore a eventi discreti usato per progettare le varianti.
+
 ## Ordine e concorrenza
 
 - **Per sorgente**: una connessione = una sessione = un task. Reader e writer sono futures dello stesso task (`tokio::join!`), quindi **non** girano in parallelo fra loro nemmeno con `multi_thread`; il parallelismo multicore è **fra sessioni diverse**. L'ordine dei batch di una sorgente è quello del socket; la coda ACK è FIFO; il sequencer applica in ordine FIFO; nessun componente riordina. Test: `vs002.rs::ingestion_modes_preserve_order_and_give_the_same_normalized_state` (16 sorgenti, `current_thread` e `multi_thread(1/2/4)`).
-- **Fra sorgenti**: l'ordine è quello di ammissione nella coda del sequencer, che dipende dallo scheduling dei task e **non** equivale all'ordine reale di acquisizione, né è riproducibile fra due processi. Ciò che è riproducibile è lo stream già sequenziato: catturato con `--capture-inputs` e riapplicato a un kernel nuovo dà lo stesso digest (`captured_streams_replay_to_the_live_digest_in_every_mode`).
+- **Fra sorgenti** (`fifo`/`source_capped`; con `source_fair` è il round-robin fra lane, sezione precedente): l'ordine è quello di ammissione nella coda del sequencer, che dipende dallo scheduling dei task e **non** equivale all'ordine reale di acquisizione, né è riproducibile fra due processi. Ciò che è riproducibile è lo stream già sequenziato: catturato con `--capture-inputs` e riapplicato a un kernel nuovo dà lo stesso digest (`captured_streams_replay_to_the_live_digest_in_every_mode`).
 - `SourceDisconnected` di un link è sempre accodato dopo tutti i batch che quel link ha sottomesso (la sessione lo invia dopo la fine del reader e del writer). Un link superato (takeover) non muta lo stato: i suoi batch ricevono `LINK_SUPERSEDED`, la sua disconnessione è `Ignored(StaleLinkGeneration)`.
 
 ## Thread e memoria

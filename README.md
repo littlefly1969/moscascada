@@ -1,13 +1,15 @@
-# moscascada — SCADA Engine, vertical slices VS-001 + VS-002
+# moscascada — SCADA Engine, vertical slices VS-001 + VS-002 + VS-003
 
 Percorso `driver esterno → IPC → validazione → sequencer → state machine deterministica → RTDB in RAM`, in Rust stable, Linux-first.
 
 **Stato:** VS-001 e VS-002 implementate e verificate su Linux x86_64 (VM KVM, 4 vCPU). VS-002 rende multicore il bordo di ingestion (Tokio `multi_thread` opzionale, sequencer e `Kernel::apply` invariati, un solo writer), ottimizza il percorso IPC e il lookup nel core, aggiunge liveness del writer, chiusura del link superato, procedura di ripresa con fotografia fresca, bound configurativo della memoria e hardening del socket. ARM64: **NOT TESTED ON HARDWARE** (solo `cargo check`). Lo stato è solo in RAM: nessun ACK è durevole; nessuna garanzia hard real-time; nessuna ridondanza.
 
+**VS-003** (ADR 0010, [vs003.md](docs/benchmarks/vs003.md)): politica di ingresso esplicita verso l'unico writer, `[ipc] ingress_policy = "fifo"` (default, VS-002) | `"source_capped"` (quota per sorgente) | `"source_fair"` (lane per sorgente servite round-robin), con modello puro dello scheduler (`crates/scada-sched`), test di ordine/barriera/cancellazione/fair progress sotto ogni politica e campagna A/B/C misurata prima della scelta.
+
 Documenti:
 - [Contratto semantico](docs/contract.md) · [Architettura](docs/architecture.md)
-- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md)
-- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md)
+- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md) · [0010 ingresso fair (VS-003)](docs/adr/0010-fair-ingress.md)
+- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md) · [VS-003 (politiche di ingresso)](docs/benchmarks/vs003.md)
 - [Matrice di tracciabilità dei requisiti, limiti noti e valutazione critica](docs/traceability.md)
 
 ## Struttura
@@ -22,7 +24,8 @@ proto/baseline/scada-v1.0.binpb                 immagine Buf di riferimento per 
 buf.yaml                                        regole buf lint (STANDARD) e breaking (FILE)
 crates/scada-core/                              state machine pura + RTDB + digest (+ test unitari/property)
 crates/scada-protocol/                          tipi generati + framing limitato (+ test)
-crates/scada-runtime/                           binario scada-kernel: UDS, sessioni, sequencer (+ test multiprocesso)
+crates/scada-runtime/                           binario scada-kernel: UDS, sessioni, ingresso, sequencer (+ test multiprocesso)
+crates/scada-sched/                             VS-003: modello puro dello scheduler di ingresso + simulatore politiche
 apps/scada-sim-driver/                          processo driver simulato
 apps/scada-bench/                               benchmark riproducibili
 fuzz/                                           workspace cargo-fuzz separato (nightly) + seed corpus
@@ -59,6 +62,8 @@ cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_
 ```
 
 Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `cargo build --release -p scada-sim-driver && SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
+
+Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4`, `source_fair:1`, `source_capped:2`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
 
 ## Esecuzione della demo
 
