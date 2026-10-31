@@ -1,0 +1,41 @@
+//! IPC types and framing for the kernel <-> driver protocol (`scada.driver.v1`) and the
+//! read-only test introspection (`scada.introspect.v1`).
+//!
+//! Frame = `u32` big-endian payload length + protobuf payload. A length of zero or above
+//! the configured maximum is rejected *before* any buffer is reserved.
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )
+)]
+
+pub mod frame;
+
+/// Generated code for `scada.driver.v1`.
+#[allow(clippy::all, clippy::pedantic, missing_debug_implementations)]
+pub mod driver_v1 {
+    include!(concat!(env!("OUT_DIR"), "/scada.driver.v1.rs"));
+}
+
+/// Generated code for `scada.introspect.v1`.
+#[allow(clippy::all, clippy::pedantic, missing_debug_implementations)]
+pub mod introspect_v1 {
+    include!(concat!(env!("OUT_DIR"), "/scada.introspect.v1.rs"));
+}
+
+pub use prost::Message;
+
+/// Protocol major version implemented by this crate.
+pub const PROTOCOL_MAJOR: u32 = 1;
+/// Protocol minor version implemented by this crate.
+pub const PROTOCOL_MINOR: u32 = 0;
+/// Length of `kernel_instance_id` in bytes.
+pub const KERNEL_INSTANCE_ID_LEN: usize = 16;
+/// Maximum length of `Hello.driver_id` in bytes.
+pub const MAX_DRIVER_ID_BYTES: usize = 64;

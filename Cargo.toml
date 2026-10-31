@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/scada-core",
+    "crates/scada-protocol",
+    "crates/scada-runtime",
+    "apps/scada-sim-driver",
+    "apps/scada-bench",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[workspace.dependencies]
+scada-core = { path = "crates/scada-core" }
+scada-protocol = { path = "crates/scada-protocol" }
+scada-runtime = { path = "crates/scada-runtime" }
+blake3 = { version = "1.8.7", default-features = false, features = ["pure"] }
+prost = { version = "0.14.4", default-features = false, features = ["std", "derive"] }
+prost-build = "0.14.4"
+protox = "0.10.0"
+tokio = { version = "1.54.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+tempfile = "3.27.0"
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
+lto = "thin"
+panic = "unwind"

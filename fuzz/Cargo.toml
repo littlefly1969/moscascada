@@ -1,0 +1,42 @@
+# Separate workspace: cargo-fuzz (libFuzzer + sanitizers) needs a nightly toolchain.
+# The ordinary build and test suite stays on stable. Run with:
+#   cargo +nightly fuzz run frame_decode
+#   cargo +nightly fuzz run batch_validation
+[package]
+name = "scada-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+scada-core = { path = "../crates/scada-core" }
+scada-protocol = { path = "../crates/scada-protocol" }
+scada-runtime = { path = "../crates/scada-runtime" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "batch_validation"
+path = "fuzz_targets/batch_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gen_corpus"
+path = "src/bin/gen_corpus.rs"
+test = false
+doc = false
+bench = false

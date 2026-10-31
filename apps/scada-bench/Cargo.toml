@@ -1,0 +1,18 @@
+[package]
+name = "scada-bench"
+description = "Reproducible VS-001 benchmarks: in-memory kernel, end-to-end IPC, saturation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+scada-core.workspace = true
+scada-protocol.workspace = true
+scada-sim-driver = { path = "../scada-sim-driver" }
+
+[lints.rust]
+# The counting global allocator needs `unsafe impl GlobalAlloc` (ADR 0003). Benchmark-only
+# binary, never deployed; every other crate keeps `forbid(unsafe_code)`.
+unsafe_code = "deny"

@@ -1,0 +1,39 @@
+# VS-001 demo configuration (brief §6). Static: validated at startup, never reloaded.
+
+[ipc]
+socket_path = "/tmp/scada-vs001/driver.sock"
+# socket_group_gid = 990        # optional: group allowed to connect (socket mode is 0660)
+max_frame_bytes = 65536
+max_driver_connections = 16
+input_queue_capacity = 64
+max_inflight_per_connection = 32
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "door_contact"
+type = "bool"
+
+[[tags]]
+id = 102
+name = "tamper_switch"
+type = "bool"
+
+[[tags]]
+id = 103
+name = "case_temperature_centi_c"   # hundredths of °C, scaled integer
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "sim-enclosure-1"
+# authorized_uids = [1000]   # optional: peer effective UIDs allowed for this source
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "i64" },
+]

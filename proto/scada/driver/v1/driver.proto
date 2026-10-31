@@ -1,0 +1,184 @@
+// SCADA kernel <-> driver protocol, major version 1.
+//
+// Transport: Unix domain stream socket. Every message is one frame:
+//   u32 big-endian payload length (1..=max_frame_bytes) followed by the payload.
+// The driver sends DriverMessage frames, the kernel sends KernelMessage frames.
+//
+// Identity: driver_id names the software component that opened the connection;
+// source_id names the configured, stable data source. One connection carries
+// exactly one logical session for one source_id. A driver serving several sources
+// opens one connection per source; the kernel does not change.
+//
+// Durability: the kernel keeps state only in RAM. ACK_STATUS_APPLIED_VOLATILE
+// promises nothing about surviving a crash, shutdown or restart of the kernel.
+// A different kernel_instance_id means previously acknowledged state is lost.
+//
+// Evolution rules: never reuse or renumber a field or enum value; reserve removed
+// numbers; no protobuf map for order-sensitive data.
+syntax = "proto3";
+
+package scada.driver.v1;
+
+// First frame on every connection.
+message Hello {
+  // Free-form identifier of the driver software (diagnostic, max 64 bytes UTF-8).
+  string driver_id = 1;
+  // Configured source this session will feed. Authorised against kernel config and
+  // the peer's Unix credentials; it is a request, not an authentication.
+  uint32 source_id = 2;
+  // Opaque identity of the producer's data session; MUST be non-zero and MUST change
+  // when the producer restarts. May stay equal across reconnects without restart.
+  fixed64 source_epoch = 3;
+  // Protocol major versions the driver can speak.
+  repeated uint32 supported_protocol_majors = 4;
+}
+
+// Limits the kernel enforces on this connection.
+message SessionLimits {
+  uint32 max_frame_bytes = 1;
+  uint32 max_observations_per_batch = 2;
+  uint32 max_inflight_batches = 3;
+}
+
+// Positive handshake answer.
+message Welcome {
+  // 16 random bytes generated at kernel start; changes on every kernel restart.
+  bytes kernel_instance_id = 1;
+  uint32 negotiated_protocol_major = 2;
+  uint32 negotiated_protocol_minor = 3;
+  // Assigned by the kernel sequencer; identifies this link of the source.
+  uint64 link_generation = 4;
+  SessionLimits limits = 5;
+  // True when the kernel has no baseline for (source_id, source_epoch): the next batch
+  // must be a FULL_STATE.
+  bool full_state_required = 6;
+  // Last accepted source_sequence of the same epoch, when a baseline exists. A driver
+  // that reconnects without restarting resends batches after this sequence.
+  optional uint64 last_accepted_source_sequence = 7;
+}
+
+// Negative handshake answer; the kernel closes the connection after sending it.
+message HandshakeRejected {
+  ErrorCode error_code = 1;
+  bytes kernel_instance_id = 2;
+  // Diagnostic text, not for programmatic use.
+  string detail = 3;
+}
+
+enum BatchMode {
+  BATCH_MODE_UNSPECIFIED = 0;
+  // Complete picture: every configured channel of the source exactly once.
+  BATCH_MODE_FULL_STATE = 1;
+  // Changes only; requires an established baseline and source_sequence = last + 1.
+  BATCH_MODE_DELTA = 2;
+}
+
+message Observation {
+  uint32 channel_id = 1;
+  oneof value {
+    bool bool_value = 2;
+    sint64 i64_value = 3;
+  }
+}
+
+message ObservationBatch {
+  BatchMode mode = 1;
+  // Per-source, per-epoch batch counter, starting at any value >= 1 for the baseline.
+  uint64 source_sequence = 2;
+  // Each channel_id at most once; one invalid observation rejects the whole batch.
+  repeated Observation observations = 3;
+}
+
+message DriverMessage {
+  oneof body {
+    Hello hello = 1;
+    ObservationBatch batch = 2;
+  }
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  // Validated and applied entirely in volatile memory. NOT durable.
+  ACK_STATUS_APPLIED_VOLATILE = 1;
+  // Identical to the last accepted batch; nothing applied again.
+  ACK_STATUS_DUPLICATE = 2;
+  // No effect on kernel state; see error_code.
+  ACK_STATUS_REJECTED = 3;
+}
+
+enum Continuity {
+  CONTINUITY_UNSPECIFIED = 0;
+  // source_sequence == last accepted + 1 in the same epoch.
+  CONTINUITY_CONTINUOUS = 1;
+  // First FULL_STATE of the epoch: history before it is NOT proven continuous.
+  CONTINUITY_BASELINE_ESTABLISHED = 2;
+  // FULL_STATE after a gap: state replaced, intermediate events NOT recovered.
+  CONTINUITY_RESYNCHRONIZED = 3;
+}
+
+// One InputAck per ObservationBatch, in the same order as the batches were sent.
+message InputAck {
+  uint64 source_sequence = 1;
+  AckStatus status = 2;
+  // Global applied-transition number; present only for ACK_STATUS_APPLIED_VOLATILE.
+  optional uint64 operation_sequence = 3;
+  ErrorCode error_code = 4;
+  bytes kernel_instance_id = 5;
+  Continuity continuity = 6;
+  // Kernel's last accepted source_sequence for this source/epoch, if any (resync hint).
+  optional uint64 last_accepted_source_sequence = 7;
+}
+
+// Fatal protocol error; the kernel closes the connection after sending it.
+message ProtocolError {
+  ErrorCode error_code = 1;
+  string detail = 2;
+}
+
+message KernelMessage {
+  oneof body {
+    Welcome welcome = 1;
+    HandshakeRejected handshake_rejected = 2;
+    InputAck ack = 3;
+    ProtocolError protocol_error = 4;
+  }
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // Handshake
+  ERROR_CODE_UNSUPPORTED_VERSION = 1;
+  ERROR_CODE_UNKNOWN_SOURCE = 2;
+  ERROR_CODE_UNAUTHORIZED = 3;
+  ERROR_CODE_TOO_MANY_CONNECTIONS = 4;
+  ERROR_CODE_HANDSHAKE_TIMEOUT = 5;
+  ERROR_CODE_INVALID_HELLO = 6;
+  // Framing / protocol
+  ERROR_CODE_FRAME_TOO_LARGE = 10;
+  ERROR_CODE_INVALID_FRAME_LENGTH = 11;
+  ERROR_CODE_MALFORMED_MESSAGE = 12;
+  ERROR_CODE_UNEXPECTED_MESSAGE = 13;
+  ERROR_CODE_FRAME_TIMEOUT = 14;
+  // Batch validation (no state change)
+  ERROR_CODE_INVALID_MODE = 20;
+  ERROR_CODE_EMPTY_BATCH = 21;
+  ERROR_CODE_BATCH_TOO_LARGE = 22;
+  ERROR_CODE_UNKNOWN_CHANNEL = 23;
+  ERROR_CODE_DUPLICATE_CHANNEL = 24;
+  ERROR_CODE_MISSING_VALUE = 25;
+  ERROR_CODE_TYPE_MISMATCH = 26;
+  ERROR_CODE_INCOMPLETE_FULL_STATE = 27;
+  // Sequencing (no state change)
+  ERROR_CODE_INVALID_SEQUENCE = 30;
+  ERROR_CODE_SEQUENCE_GAP = 31;
+  ERROR_CODE_STALE_SEQUENCE = 32;
+  ERROR_CODE_SEQUENCE_CONFLICT = 33;
+  ERROR_CODE_SEQUENCE_OVERFLOW = 34;
+  ERROR_CODE_RESYNC_REQUIRED = 35;
+  ERROR_CODE_LINK_SUPERSEDED = 36;
+  // Kernel capacity / lifecycle
+  ERROR_CODE_REVISION_OVERFLOW = 40;
+  ERROR_CODE_OPERATION_SEQUENCE_EXHAUSTED = 41;
+  ERROR_CODE_KERNEL_SHUTTING_DOWN = 42;
+  ERROR_CODE_INTERNAL = 43;
+}
