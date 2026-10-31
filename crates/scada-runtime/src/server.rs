@@ -441,6 +441,9 @@ async fn writer_task(
     probe: bool,
 ) {
     let mut scratch = Vec::new();
+    let mut ack = KernelMessage {
+        body: Some(kernel_message::Body::Ack(pb::InputAck { kernel_instance_id: id.to_vec(), ..Default::default() })),
+    };
     while let Some(p) = pending.recv().await {
         let (source_sequence, reply, frame_done) = match p {
             Pending::Wait { source_sequence, reply, frame_done } => match reply.await {
@@ -458,17 +461,11 @@ async fn writer_task(
                 break;
             }
         };
-        let ack = KernelMessage {
-            body: Some(kernel_message::Body::Ack(pb::InputAck {
-                source_sequence,
-                status: reply.status as i32,
-                operation_sequence: reply.operation_sequence,
-                error_code: reply.error_code as i32,
-                kernel_instance_id: id.to_vec(),
-                continuity: reply.continuity.map_or(0, |c| c as i32),
-                last_accepted_source_sequence: reply.last_accepted,
-            })),
-        };
+        // C2: one ACK message per connection, fields overwritten per batch; the instance id
+        // is copied once instead of once per ACK. Every field is assigned: same bytes.
+        if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
+            set_ack(a, source_sequence, &reply);
+        }
         let t_w = diag::now(diag);
         if write_msg(&mut wr, &ack, max, &mut scratch).await.is_err() {
             break;
@@ -488,6 +485,16 @@ async fn writer_task(
     }
     let _ = wr.shutdown().await;
     drop(closed);
+}
+
+/// Overwrite every per-batch field of a reused ACK (the instance id stays).
+fn set_ack(a: &mut pb::InputAck, source_sequence: u64, reply: &BatchReply) {
+    a.source_sequence = source_sequence;
+    a.status = reply.status as i32;
+    a.operation_sequence = reply.operation_sequence;
+    a.error_code = reply.error_code as i32;
+    a.continuity = reply.continuity.map_or(0, |c| c as i32);
+    a.last_accepted_source_sequence = reply.last_accepted;
 }
 
 /// Read-only introspection endpoint (tests and benchmarks). Bounded to a few connections.
@@ -533,6 +540,70 @@ async fn introspection_session(server: &Server, stream: UnixStream) {
             || wr.write_all(&scratch).await.is_err()
         {
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh(id: &[u8], seq: u64, r: &BatchReply) -> KernelMessage {
+        KernelMessage {
+            body: Some(kernel_message::Body::Ack(pb::InputAck {
+                source_sequence: seq,
+                status: r.status as i32,
+                operation_sequence: r.operation_sequence,
+                error_code: r.error_code as i32,
+                kernel_instance_id: id.to_vec(),
+                continuity: r.continuity.map_or(0, |c| c as i32),
+                last_accepted_source_sequence: r.last_accepted,
+            })),
+        }
+    }
+
+    /// C2 equivalence: the reused ACK encodes to exactly the bytes of a freshly built one,
+    /// also when optional fields go from Some to None between batches.
+    #[test]
+    fn reused_ack_encodes_identically() {
+        let id = [7u8; KERNEL_INSTANCE_ID_LEN];
+        let replies = [
+            BatchReply {
+                status: AckStatus::AppliedVolatile,
+                operation_sequence: Some(42),
+                error_code: ErrorCode::Unspecified,
+                continuity: Some(pb::Continuity::Continuous),
+                last_accepted: Some(9),
+                sent: None,
+            },
+            BatchReply {
+                status: AckStatus::Rejected,
+                operation_sequence: None,
+                error_code: ErrorCode::SequenceGap,
+                continuity: None,
+                last_accepted: None,
+                sent: None,
+            },
+            BatchReply {
+                status: AckStatus::Duplicate,
+                operation_sequence: None,
+                error_code: ErrorCode::Unspecified,
+                continuity: None,
+                last_accepted: Some(u64::MAX),
+                sent: None,
+            },
+        ];
+        let mut reused = KernelMessage {
+            body: Some(kernel_message::Body::Ack(pb::InputAck {
+                kernel_instance_id: id.to_vec(),
+                ..Default::default()
+            })),
+        };
+        for (i, r) in replies.iter().cycle().take(9).enumerate() {
+            if let Some(kernel_message::Body::Ack(a)) = &mut reused.body {
+                set_ack(a, i as u64 + 1, r);
+            }
+            assert_eq!(reused.encode_to_vec(), fresh(&id, i as u64 + 1, r).encode_to_vec());
         }
     }
 }
