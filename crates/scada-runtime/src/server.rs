@@ -460,9 +460,14 @@ async fn data_phase(
         // told to stop immediately (it may itself be blocked on a peer that does not read).
         // Err: the sequencer is gone. Either way this link is finished. All the awaited
         // operations are cancel-safe: a cancelled send enqueues nothing.
+        // `biased`: the operation is polled first, so when it is ready (no backpressure,
+        // the common case) the takeover receiver is not polled at all; when it blocks,
+        // the receiver is polled and wakes the reader. The socket read below uses a fair
+        // select instead.
         macro_rules! or_superseded {
             ($fut:expr) => {
                 tokio::select! {
+                    biased;
                     r = $fut => r,
                     r = &mut superseded => {
                         if r.is_ok() {
@@ -479,13 +484,21 @@ async fn data_phase(
         // C3: decoded batch reused across frames (observation buffer keeps its capacity).
         let mut wire = pb::ObservationBatch::default();
         loop {
-            let frame = or_superseded!(async {
-                tokio::select! {
-                    r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => Some(r),
-                    _ = &mut closed_rx => None, // writer stopped (peer gone)
+            // One flat, fair `select!` on the hot path (the random choice guarantees that
+            // a pending takeover is seen even if a flooding peer keeps the read ready).
+            let frame = tokio::select! {
+                r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => r,
+                _ = &mut closed_rx => return, // writer stopped (peer gone)
+                r = &mut superseded => {
+                    if r.is_ok() {
+                        Counters::inc(&server.counters.links_superseded);
+                        if let Some(t) = abort_tx.take() {
+                            let _ = t.send(());
+                        }
+                    }
+                    return;
                 }
-            });
-            let Some(frame) = frame else { return };
+            };
             let frame_done = diag::now(diag);
             let fatal = match frame {
                 Ok(false) => return,
@@ -805,7 +818,9 @@ async fn writer_task(
     // that does not read: ACKs not yet written are dropped (the batches they acknowledge
     // stay applied; the driver reconciles through the new link's Welcome). The reason is
     // sent only if the socket accepts it without waiting.
+    // `biased`: the ACK work is polled first; the abort receiver only when it is pending.
     let aborted = tokio::select! {
+        biased;
         () = work => false,
         Ok(()) = &mut abort => true,
     };

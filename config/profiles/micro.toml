@@ -4,11 +4,11 @@
 
 [runtime]
 scheduler = "current_thread"     # 2 thread: runtime I/O + sequencer
-memory_budget_bytes = 2097152   # 2 MiB; bound calcolato ~0,9 MiB; avvio rifiutato se superato (ADR 0009)
+memory_budget_bytes = 2097152   # 2 MiB; bound calcolato ~0,8 MiB; avvio rifiutato se superato (ADR 0009)
 
 [ipc]
 socket_path = "/run/moscascada/driver.sock"   # directory privata (0750, non scrivibile da altri)
-max_frame_bytes = 65536
+max_frame_bytes = 8192                 # 128 obs × 19 B + 32 = 2464 B al massimo: 3,3× di margine; limita anche il picco transitorio del decode (review P1)
 max_driver_connections = 8
 input_queue_capacity = 16           # coda corta: meno attesa per la sorgente rara, meno throughput (vs002.md §5)
 max_inflight_per_connection = 16

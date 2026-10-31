@@ -7,7 +7,7 @@
 [runtime]
 scheduler = "multi_thread"
 worker_threads = 2               # + main + sequencer = 4 thread
-memory_budget_bytes = 16777216   # 16 MiB; bound configurativo calcolato ~6,7 MiB
+memory_budget_bytes = 16777216   # 16 MiB; bound configurativo calcolato ~15,4 MiB (review P1: picco transitorio del decode per worker)
 
 [ipc]
 socket_path = "/run/moscascada/driver.sock"

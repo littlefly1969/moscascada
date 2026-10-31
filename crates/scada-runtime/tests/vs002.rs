@@ -149,9 +149,13 @@ fn ingestion_modes_preserve_order_and_give_the_same_normalized_state() {
         all_ops.sort_unstable();
         all_ops.dedup();
         assert_eq!(all_ops.len(), total, "{workers:?}: an operation sequence was given twice");
-        let r = k.wait_for("all applied", |r| {
+        // Also wait until every load client's close has been sequenced: its
+        // SourceDisconnected changes quality and revision, and the clients close
+        // concurrently with this read (reading earlier made the comparison racy).
+        let r = k.wait_for("all applied and load links closed", |r| {
             r.sources.iter().find(|s| s.source_id == 1001).and_then(|s| s.last_accepted_source_sequence)
                 == Some(last_1001)
+                && (1..=SOURCES).all(|n| link(r, 3000 + n).0 == LinkState::Disconnected)
         });
         assert_eq!(r.counters.unwrap().batches_rejected, 0, "{workers:?}");
         assert!(r.counters.unwrap().links_superseded >= 19, "{workers:?}: {:?}", r.counters);
@@ -516,47 +520,52 @@ fn oversized_empty_observations_frame(n: usize, seq: u64) -> Vec<u8> {
 
 #[test]
 fn adversarial_many_small_observations_are_rejected_without_retained_memory() {
-    let limits = Limits { max_frame_bytes: 65_536, ..Limits::default() };
-    let k = KernelProc::start(&limits);
-    let conns = 16usize;
-    let mut sessions: Vec<Session> = (0..conns)
-        .map(|i| {
-            let src = 3001 + i as u32;
-            let mut s = Session::connect(&k.socket, "adv", src, 1).unwrap();
-            let a = s.request(&batch(BatchMode::FullState, 1, &[(1, Val::I(i as i64))])).unwrap();
-            assert_eq!(st(&a), AckStatus::AppliedVolatile);
-            s
-        })
-        .collect();
-    let before = k.introspect();
-    let rss0 = k.rss_kib();
-    let frame = oversized_empty_observations_frame(32_000, 2);
-    assert!(frame.len() - 4 <= 65_536, "{}", frame.len());
-    for round in 0..20 {
-        for s in &mut sessions {
-            s.send_raw(&frame).unwrap();
-            let a = s.recv_ack().unwrap();
-            assert_eq!(
-                (st(&a), a.error_code(), a.source_sequence),
-                (AckStatus::Rejected, ErrorCode::BatchTooLarge, 2),
-                "round {round}"
-            );
+    for workers in [None, Some(2)] {
+        let limits = Limits { max_frame_bytes: 65_536, ..Limits::default() };
+        let k = start_mode(&limits, workers, &[]);
+        let conns = 16usize;
+        let mut sessions: Vec<Session> = (0..conns)
+            .map(|i| {
+                let src = 3001 + i as u32;
+                let mut s = Session::connect(&k.socket, "adv", src, 1).unwrap();
+                let a = s.request(&batch(BatchMode::FullState, 1, &[(1, Val::I(i as i64))])).unwrap();
+                assert_eq!(st(&a), AckStatus::AppliedVolatile);
+                s
+            })
+            .collect();
+        let before = k.introspect();
+        let rss0 = k.rss_kib();
+        let frame = oversized_empty_observations_frame(32_000, 2);
+        assert!(frame.len() - 4 <= 65_536, "{}", frame.len());
+        for round in 0..20 {
+            for s in &mut sessions {
+                s.send_raw(&frame).unwrap();
+                let a = s.recv_ack().unwrap();
+                assert_eq!(
+                    (st(&a), a.error_code(), a.source_sequence),
+                    (AckStatus::Rejected, ErrorCode::BatchTooLarge, 2),
+                    "round {round}"
+                );
+            }
         }
+        let rss1 = k.rss_kib();
+        // Old behaviour: >= 16 x 768 KiB retained. Allow allocator noise only.
+        assert!(rss1 < rss0 + 4 * 1024, "{workers:?}: RSS grew from {rss0} to {rss1} KiB");
+        // Nothing applied, every connection still usable, sequence continues at 2.
+        let after = k.introspect();
+        assert_eq!(after.state_digest, before.state_digest);
+        assert_eq!(after.last_operation_sequence, before.last_operation_sequence);
+        assert_eq!(
+            after.counters.unwrap().batches_rejected,
+            before.counters.unwrap().batches_rejected + 20 * conns as u64
+        );
+        for (i, s) in sessions.iter_mut().enumerate() {
+            let a = s.request(&batch(BatchMode::Delta, 2, &[(1, Val::I(100 + i as i64))])).unwrap();
+            assert_eq!(st(&a), AckStatus::AppliedVolatile);
+        }
+        eprintln!("{workers:?} adversarial frames: RSS {rss0} -> {rss1} KiB over {} rejected frames", 20 * conns);
+        k.stop();
     }
-    let rss1 = k.rss_kib();
-    // Old behaviour: >= 16 x 768 KiB retained. Allow allocator noise only.
-    assert!(rss1 < rss0 + 4 * 1024, "RSS grew from {rss0} to {rss1} KiB");
-    // Nothing applied, every connection still usable, sequence continues at 2.
-    let after = k.introspect();
-    assert_eq!(after.state_digest, before.state_digest);
-    assert_eq!(after.last_operation_sequence, before.last_operation_sequence);
-    assert_eq!(after.counters.unwrap().batches_rejected, before.counters.unwrap().batches_rejected + 20 * conns as u64);
-    for (i, s) in sessions.iter_mut().enumerate() {
-        let a = s.request(&batch(BatchMode::Delta, 2, &[(1, Val::I(100 + i as i64))])).unwrap();
-        assert_eq!(st(&a), AckStatus::AppliedVolatile);
-    }
-    eprintln!("adversarial frames: RSS {rss0} -> {rss1} KiB over {} rejected frames", 20 * conns);
-    k.stop();
 }
 
 // Review P2: takeover while the old session's reader is NOT waiting on the socket but on

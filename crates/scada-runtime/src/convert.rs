@@ -35,31 +35,64 @@ const BATCH_KEY: u8 = (2 << 3) | 2;
 /// Smallest encoding of one `Observation` inside a batch: key byte + zero length.
 const MIN_OBSERVATION_WIRE_BYTES: usize = 2;
 
-/// Decode one data-phase frame (C3), never materializing more than `max_observations`
-/// observations (review P1).
-///
-/// Limit first: a frame within `max_frame_bytes` can encode up to `max_frame_bytes / 2`
-/// observations. Before any decoding, a cheap pass over the bytes counts the observation
-/// fields (an upper bound of the decoded length). Only if that bound exceeds the limit
-/// does an exact, allocation-free validating scan decide between a malformed frame, a
-/// non-batch body and an oversized batch, reported as [`Decoded::Oversized`] with the
-/// same header fields the full decode would give. Frames too short to exceed the limit
-/// skip the count.
+/// Decode one data-phase frame (C3) without ever *retaining* memory for more than
+/// `max_observations` observations (review P1).
 ///
 /// Fast path: a frame that is exactly one `batch` field — what every conforming driver
 /// sends — is merged into `scratch` after resetting every field to its default, so the
 /// observation vector keeps its capacity across frames instead of being regrown from zero
 /// for every batch. Proto3 merging into a default message is decoding, so the result is
-/// the same `ObservationBatch` that `DriverMessage::decode` would produce. Every other
-/// shape (other bodies, repeated or unknown top-level fields, trailing bytes) takes the
-/// generic decoder. Only keys and length varints are parsed by hand, with prost's own
-/// helpers, all bounds-checked; there is no unsafe code.
+/// the same `ObservationBatch` that `DriverMessage::decode` would produce. Only keys and
+/// length varints are parsed by hand, with prost's own helpers, all bounds-checked; there
+/// is no unsafe code.
+///
+/// Limit (review P1): a frame within `max_frame_bytes` can encode up to
+/// `max_frame_bytes / 2` observations. On the fast path the merge runs at full speed and
+/// the count is checked right after it: a batch over the limit (or a frame that fails to
+/// decode) is reported as [`Decoded::Oversized`] (or an error) and, if it made the vector
+/// grow past [`retained_capacity_bound`], the vector is dropped at once — before the
+/// caller can await anything. The transient peak is therefore bounded by
+/// [`transient_decode_bound_bytes`] per thread that decodes at that moment (decoding is
+/// synchronous), not per connection; the memory bound counts it per runtime worker.
+/// (A limit checked inside the merge was measured: 13–16 % less throughput and +30 %
+/// rare-source p99 in `current_thread`, `docs/benchmarks/vs002.md` §12.)
+///
+/// Every other shape (other bodies, repeated or unknown top-level fields, trailing
+/// bytes) takes the generic decoder, whose result can be held across awaits: there a
+/// cheap pass first counts the observation fields (an upper bound of the decoded length;
+/// frames too short to exceed the limit skip it), and past the limit an exact,
+/// allocation-free validating scan decides between a malformed frame, a non-batch body
+/// and an oversized batch, so nothing over the limit is materialized at all.
 pub fn decode_driver_message<'a>(
     bytes: &[u8],
     scratch: &'a mut pb::ObservationBatch,
     max_observations: u32,
 ) -> Result<Decoded<'a>, Malformed> {
     let max = u64::from(max_observations);
+    if let Some((&BATCH_KEY, mut rest)) = bytes.split_first()
+        && let Ok(len) = prost::encoding::decode_varint(&mut rest)
+        && usize::try_from(len).is_ok_and(|l| l == rest.len())
+    {
+        // `clear` resets every field (including any added later) and keeps the
+        // observation vector's capacity.
+        scratch.clear();
+        let merged = scratch.merge(rest);
+        let n = scratch.observations.len() as u64;
+        if merged.is_err() || n > max {
+            // Never retain what an oversized or broken frame made the vector grow to.
+            if scratch.observations.capacity() > retained_capacity_bound(max_observations) {
+                scratch.observations = Vec::new();
+            }
+            merged?;
+            return Ok(Decoded::Oversized {
+                mode: scratch.mode,
+                source_sequence: scratch.source_sequence,
+                observations: n,
+            });
+        }
+        return Ok(Decoded::Batch(scratch));
+    }
+    // Any other shape: a cheap count bounds what the generic decoder would allocate.
     if bytes.len() / MIN_OBSERVATION_WIRE_BYTES > max_observations as usize && count_upper_bound(bytes) > max {
         match scan_exact(bytes)? {
             Body::Batch { mode, source_sequence, observations } if observations > max => {
@@ -76,16 +109,6 @@ pub fn decode_driver_message<'a>(
             Body::None => {}
         }
     }
-    if let Some((&BATCH_KEY, mut rest)) = bytes.split_first()
-        && let Ok(len) = prost::encoding::decode_varint(&mut rest)
-        && usize::try_from(len).is_ok_and(|l| l == rest.len())
-    {
-        // `clear` resets every field (including any added later) and keeps the
-        // observation vector's capacity.
-        scratch.clear();
-        scratch.merge(rest)?;
-        return Ok(Decoded::Batch(scratch));
-    }
     let msg = pb::DriverMessage::decode(bytes)?;
     Ok(Decoded::Other(msg))
 }
@@ -93,6 +116,8 @@ pub fn decode_driver_message<'a>(
 /// Number of `observations` fields in every `batch` field of the frame: an upper bound
 /// of the decoded batch length. Stops at the first undecodable byte (what was counted
 /// so far is still an upper bound of what a decoder would allocate before failing).
+#[cold]
+#[inline(never)]
 fn count_upper_bound(bytes: &[u8]) -> u64 {
     use prost::encoding::{WireType, decode_key, decode_varint, skip_field};
     let mut n = 0u64;
@@ -141,6 +166,8 @@ enum Body {
 /// (wire types, varints, nested `Observation`s, unknown fields skipped) and returns the
 /// resulting body, counting observations instead of storing them. Only reached for
 /// oversized or hostile frames, never on the hot path of a conforming driver.
+#[cold]
+#[inline(never)]
 fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
     use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, skip_field, uint64};
     let mut top = bytes;
@@ -187,6 +214,8 @@ fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
 
 /// Merge into `scratch` the `batch` fields that follow the last `hello` field: the body
 /// prost's oneof decoding ends with. Only called after [`scan_exact`] validated the frame.
+#[cold]
+#[inline(never)]
 fn merge_final_batch(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result<(), Malformed> {
     use prost::encoding::{DecodeContext, decode_key, skip_field};
     // Pass 1: where the body after the last `hello` starts.
@@ -222,6 +251,15 @@ fn merge_final_batch(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result
 /// Largest observation capacity the reused scratch can retain with limit `max`: it only
 /// grows while holding at most `max` observations, and `Vec` growth at most doubles the
 /// previous capacity (minimum 4). Used by the memory bound (`budget.rs`).
+/// Upper bound, in bytes, of the observation vector while one fast-path frame of at most
+/// `max_frame_bytes` is merged, before an oversized result is dropped: at most
+/// `max_frame_bytes / 2` observations; during the last reallocation the old and the new
+/// buffer coexist (capacity c and at most 2c, with c ≤ that count), hence the factor 3.
+pub const fn transient_decode_bound_bytes(max_frame_bytes: u32) -> u128 {
+    3 * (max_frame_bytes as u128 / MIN_OBSERVATION_WIRE_BYTES as u128 + 1)
+        * std::mem::size_of::<pb::Observation>() as u128
+}
+
 pub const fn retained_capacity_bound(max: u32) -> usize {
     let twice = (max as usize).saturating_mul(2);
     if twice < 4 { 4 } else { twice }
@@ -511,7 +549,7 @@ mod adversarial {
     }
 
     #[test]
-    fn oversized_batch_is_not_materialized() {
+    fn oversized_batch_is_not_retained() {
         // 64 KiB frame: ~32 000 observations, limit 128.
         let frame = many_empty_observations(32_000, 2, 7);
         assert!(frame.len() <= 65_536);
@@ -534,7 +572,7 @@ mod adversarial {
     }
 
     #[test]
-    fn oversized_then_corrupt_is_malformed_without_allocation() {
+    fn oversized_then_corrupt_is_malformed_without_retention() {
         let mut frame = many_empty_observations(10_000, 2, 1);
         frame.push(0xff); // trailing garbage: an invalid key
         let mut scratch = pb::ObservationBatch::default();

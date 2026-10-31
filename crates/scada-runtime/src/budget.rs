@@ -37,6 +37,8 @@ pub struct Budget {
     pub per_connection: u128,
     /// `per_connection * max_driver_connections`.
     pub connections: u128,
+    /// Transient decode of an oversized frame, one per runtime worker (review P1).
+    pub decode_workers: u128,
     /// Sequencer queue and the request being applied, with their observation vectors.
     pub sequencer_queue: u128,
     /// Kernel RTDB + configuration metadata.
@@ -52,10 +54,11 @@ impl fmt::Display for Budget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "total={} (connections={} [{} each], sequencer_queue={}, kernel={}, introspection={}, diagnostics={})",
+            "total={} (connections={} [{} each], decode_workers={}, sequencer_queue={}, kernel={}, introspection={}, diagnostics={})",
             self.total,
             self.connections,
             self.per_connection,
+            self.decode_workers,
             self.sequencer_queue,
             self.kernel,
             self.introspection,
@@ -74,8 +77,9 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     let l = cfg.limits;
     let max_obs = u128::from(cfg.core.limits().max_observations_per_batch);
     let obs_core = m(max_obs, size_of::<Observation>() as u128);
-    // Review P1: the decoder never materializes more than `max_obs` observations, but the
-    // reused scratch can retain up to twice that capacity (Vec growth).
+    // Review P1: the reused scratch never retains capacity for more than
+    // `retained_capacity_bound(max_obs)` observations (Vec growth); an oversized frame
+    // can grow it transiently (see `decode_workers` below).
     let obs_wire = m(
         crate::convert::retained_capacity_bound(cfg.core.limits().max_observations_per_batch) as u128,
         size_of::<pb::Observation>() as u128,
@@ -98,6 +102,13 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
         .saturating_add(MAX_HANDSHAKE_FRAME_BYTES)
         .saturating_add(TASK_ESTIMATE_BYTES);
     let connections = m(per_connection, u128::from(l.max_driver_connections));
+    // Review P1: the fast-path merge of an oversized frame is transient and synchronous
+    // (dropped before any await), so at most one per runtime worker exists at a time.
+    let workers = match cfg.runtime.scheduler {
+        crate::config::Scheduler::CurrentThread => 1,
+        crate::config::Scheduler::MultiThread { worker_threads } => u128::from(worker_threads),
+    };
+    let decode_workers = m(workers, crate::convert::transient_decode_bound_bytes(l.max_frame_bytes));
     // Requests that left the sessions: queued (capacity) + the one being applied. Each
     // batch request owns its observation vector.
     let queued = u128::from(l.input_queue_capacity).saturating_add(1);
@@ -114,11 +125,12 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     };
     let diagnostics = if diag { DIAG_BYTES } else { 0 };
     let total = connections
+        .saturating_add(decode_workers)
         .saturating_add(sequencer_queue)
         .saturating_add(kernel)
         .saturating_add(introspection)
         .saturating_add(diagnostics);
-    Budget { per_connection, connections, sequencer_queue, kernel, introspection, diagnostics, total }
+    Budget { per_connection, connections, decode_workers, sequencer_queue, kernel, introspection, diagnostics, total }
 }
 
 /// Validate the bound against `[runtime] memory_budget_bytes`, if configured.
@@ -173,7 +185,15 @@ channels = [{{ channel = 1, tag = 1, type = "i64" }}]
         assert!(small.total > 0 && small.total < big.total);
         assert!(big.total < u128::from(u64::MAX), "{big}");
         assert_eq!(big.connections, big.per_connection * 1024);
-        assert_eq!(big.total, big.connections + big.sequencer_queue + big.kernel + big.introspection + big.diagnostics);
+        assert_eq!(
+            big.total,
+            big.connections
+                + big.decode_workers
+                + big.sequencer_queue
+                + big.kernel
+                + big.introspection
+                + big.diagnostics
+        );
     }
 
     #[test]

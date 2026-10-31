@@ -8,7 +8,8 @@
 //!   header; `NotBatch` is a generic non-batch body;
 //! - the scratch never retains capacity for more than `LIMIT` observations.
 //!
-//! The first input byte selects the limit (0..=15) so that oversized frames are common.
+//! The first input byte selects the limit (0..=15) so that oversized frames are common;
+//! each limit has its own scratch (as each connection has one fixed limit).
 #![no_main]
 
 use std::cell::RefCell;
@@ -20,15 +21,18 @@ use scada_protocol::driver_v1::{DriverMessage, ObservationBatch};
 use scada_runtime::convert::{Decoded, decode_driver_message};
 
 thread_local! {
-    static SCRATCH: RefCell<ObservationBatch> = RefCell::new(ObservationBatch::default());
+    // One dirty scratch per limit: in the server the limit is fixed for the life of a
+    // connection's scratch, so capacity retained under a larger limit must not be charged
+    // to a smaller one (a shared scratch made the capacity check fail spuriously).
+    static SCRATCH: [RefCell<ObservationBatch>; 16] = std::array::from_fn(|_| RefCell::new(ObservationBatch::default()));
 }
 
 fuzz_target!(|input: &[u8]| {
     let Some((&sel, data)) = input.split_first() else { return };
     let limit = u32::from(sel & 0x0f);
     let generic = DriverMessage::decode(data);
-    SCRATCH.with(|s| {
-        let mut s = s.borrow_mut();
+    SCRATCH.with(|all| {
+        let mut s = all[limit as usize].borrow_mut();
         let fast = decode_driver_message(data, &mut s, limit);
         match (&generic, fast) {
             (Err(_), Err(_)) => {}
