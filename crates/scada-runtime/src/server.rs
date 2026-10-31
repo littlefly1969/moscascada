@@ -441,7 +441,10 @@ async fn data_phase(
         coalesce_max: limits.ack_coalesce_max,
     };
     let counters = &server.counters;
-    let writer = writer_task(ws, wr, pending_rx, closed_tx, diag, probe, counters);
+    // Review P2: the reader tells the writer to stop at once when the link is superseded,
+    // whatever either of them is waiting on.
+    let (abort_tx, abort_rx) = oneshot::channel::<()>();
+    let writer = writer_task(ws, wr, pending_rx, (closed_tx, abort_rx), diag, probe, counters);
     // C5: optional read buffer, so that one `recv` can deliver several pipelined frames.
     // 0 = read straight from the socket (VS-001). Frame limits are unchanged: the length
     // is still validated before the payload buffer is resized.
@@ -450,30 +453,77 @@ async fn data_phase(
         n => Reader::Buffered(tokio::io::BufReader::with_capacity(n as usize, rd)),
     };
     let reader = async move {
+        let mut abort_tx = Some(abort_tx);
+        // D3 + review P2: every wait of the reader — the socket, but also backpressure on
+        // the ACK queue (`reserve`, `send`) and on the sequencer queue (`submit`) — ends as
+        // soon as a newer link of this source is welcomed. Ok: superseded; the writer is
+        // told to stop immediately (it may itself be blocked on a peer that does not read).
+        // Err: the sequencer is gone. Either way this link is finished. All the awaited
+        // operations are cancel-safe: a cancelled send enqueues nothing.
+        macro_rules! or_superseded {
+            ($fut:expr) => {
+                tokio::select! {
+                    r = $fut => r,
+                    r = &mut superseded => {
+                        if r.is_ok() {
+                            Counters::inc(&server.counters.links_superseded);
+                            if let Some(t) = abort_tx.take() {
+                                let _ = t.send(());
+                            }
+                        }
+                        return;
+                    }
+                }
+            };
+        }
         // C3: decoded batch reused across frames (observation buffer keeps its capacity).
         let mut wire = pb::ObservationBatch::default();
         loop {
-            let frame = tokio::select! {
-                r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => r,
-                _ = &mut closed_rx => return, // writer stopped (peer gone or link superseded)
-                r = &mut superseded => {
-                    // Ok: a newer link of this source was welcomed (D3). Err: the
-                    // sequencer is gone. Either way this link is finished.
-                    if r.is_ok() {
-                        Counters::inc(&server.counters.links_superseded);
-                        let msg = protocol_error(ErrorCode::LinkSuperseded, "a newer link took over this source");
-                        let _ = pending_tx.send(Pending::Fatal(msg)).await;
-                    }
-                    return;
+            let frame = or_superseded!(async {
+                tokio::select! {
+                    r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => Some(r),
+                    _ = &mut closed_rx => None, // writer stopped (peer gone)
                 }
-            };
+            });
+            let Some(frame) = frame else { return };
             let frame_done = diag::now(diag);
             let fatal = match frame {
                 Ok(false) => return,
-                Ok(true) => match convert::decode_driver_message(buf.as_slice(), &mut wire) {
+                Ok(true) => match convert::decode_driver_message(buf.as_slice(), &mut wire, max_obs) {
                     Ok(decoded) => {
                         let b = match &decoded {
                             convert::Decoded::Batch(b) => *b,
+                            // Review P1: rejected exactly as a materialized oversized batch
+                            // would be (same ACK, same error order), without decoding it.
+                            convert::Decoded::Oversized { mode, source_sequence, observations } => {
+                                let code = match convert::check_batch_header(*mode, *observations, max_obs) {
+                                    Err(code) => code,
+                                    Ok(_) => ErrorCode::BatchTooLarge, // unreachable: count > limit
+                                };
+                                Counters::inc(&server.counters.batches_rejected);
+                                let pending = Pending::Ready {
+                                    source_sequence: *source_sequence,
+                                    reply: BatchReply {
+                                        status: AckStatus::Rejected,
+                                        operation_sequence: None,
+                                        error_code: code,
+                                        continuity: None,
+                                        last_accepted: None,
+                                        sent: None,
+                                    },
+                                };
+                                if or_superseded!(pending_tx.send(pending)).is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                            convert::Decoded::NotBatch => {
+                                Counters::inc(&server.counters.protocol_errors);
+                                let msg =
+                                    protocol_error(ErrorCode::UnexpectedMessage, "only ObservationBatch after Welcome");
+                                let _ = or_superseded!(pending_tx.send(Pending::Fatal(msg)));
+                                return;
+                            }
                             convert::Decoded::Other(m) => match convert::as_batch(m) {
                                 Some(b) => b,
                                 None => {
@@ -482,7 +532,7 @@ async fn data_phase(
                                         ErrorCode::UnexpectedMessage,
                                         "only ObservationBatch after Welcome",
                                     );
-                                    let _ = pending_tx.send(Pending::Fatal(msg)).await;
+                                    let _ = or_superseded!(pending_tx.send(Pending::Fatal(msg)));
                                     return;
                                 }
                             },
@@ -502,13 +552,15 @@ async fn data_phase(
                                 // Reserve the ACK slot first (bounded in-flight per connection),
                                 // then enqueue for the sequencer (bounded global queue).
                                 let t_slot = diag::now(diag);
-                                let Ok(slot) = pending_tx.reserve().await else { return };
+                                let Ok(slot) = or_superseded!(pending_tx.reserve()) else { return };
                                 if let (Some(d), Some(t)) = (diag, t_slot) {
                                     d.since(Stage::SlotWait, t);
                                 }
                                 slot.send(Pending::Wait { source_sequence, reply: rx, frame_done });
                                 let submitted = diag::now(diag);
-                                if submit(server, Request::Batch { batch, reply: tx, submitted }).await.is_err() {
+                                if or_superseded!(submit(server, Request::Batch { batch, reply: tx, submitted }))
+                                    .is_err()
+                                {
                                     return;
                                 }
                                 continue;
@@ -528,7 +580,7 @@ async fn data_phase(
                                 }
                             }
                         };
-                        if pending_tx.send(pending).await.is_err() {
+                        if or_superseded!(pending_tx.send(pending)).is_err() {
                             return;
                         }
                         continue;
@@ -541,7 +593,7 @@ async fn data_phase(
                 },
             };
             Counters::inc(&server.counters.protocol_errors);
-            let _ = pending_tx.send(Pending::Fatal(fatal)).await;
+            let _ = or_superseded!(pending_tx.send(Pending::Fatal(fatal)));
             return;
         }
     };
@@ -648,7 +700,7 @@ async fn writer_task(
     ws: WriterSettings,
     mut wr: OwnedWriteHalf,
     mut pending: mpsc::Receiver<Pending>,
-    closed: oneshot::Sender<()>,
+    (closed, mut abort): (oneshot::Sender<()>, oneshot::Receiver<()>),
     diag: Option<&Diag>,
     probe: bool,
     counters: &Counters,
@@ -664,87 +716,103 @@ async fn writer_task(
     // In-kernel timestamps of the ACKs in `out` (diagnostics only; bounded by coalesce_max).
     let mut stamps: Vec<Instant> = Vec::new();
     let mut head: Option<Pending> = None;
-    'conn: loop {
-        let first = match head.take() {
-            Some(p) => p,
-            None => match pending.recv().await {
+    let work = async {
+        'conn: loop {
+            let first = match head.take() {
                 Some(p) => p,
-                None => break,
-            },
-        };
-        let mut next = resolve(first, diag).await;
-        let mut n = 0u32;
-        let mut stop = false;
-        out.clear();
-        stamps.clear();
-        loop {
-            match next {
-                Next::Ack { source_sequence, reply, frame_done } => {
-                    // C2: one ACK message per connection, every per-batch field overwritten.
-                    if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
-                        set_ack(a, source_sequence, &reply);
+                None => match pending.recv().await {
+                    Some(p) => p,
+                    None => break,
+                },
+            };
+            let mut next = resolve(first, diag).await;
+            let mut n = 0u32;
+            let mut stop = false;
+            out.clear();
+            stamps.clear();
+            loop {
+                match next {
+                    Next::Ack { source_sequence, reply, frame_done } => {
+                        // C2: one ACK message per connection, every per-batch field overwritten.
+                        if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
+                            set_ack(a, source_sequence, &reply);
+                        }
+                        if frame::encode_frame(&ack, ws.max_frame, &mut frame).is_err() {
+                            stop = true;
+                            break;
+                        }
+                        out.extend_from_slice(&frame);
+                        if let (Some(_), Some(t)) = (diag, frame_done) {
+                            stamps.push(t);
+                        }
+                        n += 1;
+                        if reply.error_code == ErrorCode::LinkSuperseded {
+                            stop = true; // a newer link owns the source; this one is closed
+                            break;
+                        }
                     }
-                    if frame::encode_frame(&ack, ws.max_frame, &mut frame).is_err() {
+                    Next::Fatal(msg) => {
+                        if frame::encode_frame(&msg, ws.max_frame, &mut frame).is_ok() {
+                            out.extend_from_slice(&frame);
+                        }
                         stop = true;
                         break;
                     }
-                    out.extend_from_slice(&frame);
-                    if let (Some(_), Some(t)) = (diag, frame_done) {
-                        stamps.push(t);
-                    }
-                    n += 1;
-                    if reply.error_code == ErrorCode::LinkSuperseded {
-                        stop = true; // a newer link owns the source; this one is closed
+                    Next::Stop => {
+                        stop = true;
                         break;
                     }
                 }
-                Next::Fatal(msg) => {
-                    if frame::encode_frame(&msg, ws.max_frame, &mut frame).is_ok() {
-                        out.extend_from_slice(&frame);
-                    }
-                    stop = true;
+                if n >= ws.coalesce_max {
                     break;
                 }
-                Next::Stop => {
-                    stop = true;
-                    break;
+                // C5: append ACKs that are already available, never wait for more.
+                match pending.try_recv() {
+                    Ok(p) => match try_resolve(p, diag) {
+                        Ok(x) => next = x,
+                        Err(p) => {
+                            head = Some(p);
+                            break;
+                        }
+                    },
+                    Err(_) => break,
                 }
             }
-            if n >= ws.coalesce_max {
+            if !out.is_empty() {
+                let t_w = diag::now(diag);
+                if let Err(e) = timed_write(&mut wr, &out, ws.write_timeout).await {
+                    if e.kind() == io::ErrorKind::TimedOut {
+                        Counters::inc(&counters.ack_write_timeouts);
+                    }
+                    break 'conn;
+                }
+                if let (Some(d), Some(t_w)) = (diag, t_w) {
+                    d.since(Stage::AckWrite, t_w);
+                    for t in &stamps {
+                        d.since(Stage::InKernel, *t);
+                        if probe {
+                            d.since(Stage::ProbeInKernel, *t);
+                        }
+                    }
+                }
+            }
+            if stop {
                 break;
             }
-            // C5: append ACKs that are already available, never wait for more.
-            match pending.try_recv() {
-                Ok(p) => match try_resolve(p, diag) {
-                    Ok(x) => next = x,
-                    Err(p) => {
-                        head = Some(p);
-                        break;
-                    }
-                },
-                Err(_) => break,
-            }
         }
-        if !out.is_empty() {
-            let t_w = diag::now(diag);
-            if let Err(e) = timed_write(&mut wr, &out, ws.write_timeout).await {
-                if e.kind() == io::ErrorKind::TimedOut {
-                    Counters::inc(&counters.ack_write_timeouts);
-                }
-                break 'conn;
-            }
-            if let (Some(d), Some(t_w)) = (diag, t_w) {
-                d.since(Stage::AckWrite, t_w);
-                for t in &stamps {
-                    d.since(Stage::InKernel, *t);
-                    if probe {
-                        d.since(Stage::ProbeInKernel, *t);
-                    }
-                }
-            }
-        }
-        if stop {
-            break;
+    };
+    // Review P2: superseded link. Stop now, even in the middle of a write blocked on a peer
+    // that does not read: ACKs not yet written are dropped (the batches they acknowledge
+    // stay applied; the driver reconciles through the new link's Welcome). The reason is
+    // sent only if the socket accepts it without waiting.
+    let aborted = tokio::select! {
+        () = work => false,
+        Ok(()) = &mut abort => true,
+    };
+    if aborted {
+        let msg = protocol_error(ErrorCode::LinkSuperseded, "a newer link took over this source");
+        if frame::encode_frame(&msg, ws.max_frame, &mut frame).is_ok() {
+            let _ = wr.try_write(&frame);
         }
     }
     let _ = timeout(ws.write_timeout, wr.shutdown()).await;

@@ -487,3 +487,154 @@ fn malformed_input(read_buffer_bytes: u32) {
     assert!(k.rss_kib() < 64 * 1024);
     k.stop();
 }
+
+// Review P1: valid but adversarial frames — a 64 KiB frame of ~32 000 empty observations
+// (2 bytes each), far above max_observations_per_batch = 128 — are rejected with the same
+// ACK as any oversized batch (REJECTED / BATCH_TOO_LARGE), the connection stays usable,
+// nothing changes in the RTDB and no connection retains decoder capacity for them. Before
+// the fix each connection kept ~768 KiB of observation capacity after one such frame.
+fn oversized_empty_observations_frame(n: usize, seq: u64) -> Vec<u8> {
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+    let mut inner = vec![0x08, 0x02, 0x10]; // mode = DELTA, source_sequence = ...
+    varint(seq, &mut inner);
+    for _ in 0..n {
+        inner.extend_from_slice(&[0x1a, 0x00]); // observations: empty Observation
+    }
+    let mut payload = vec![0x12]; // DriverMessage.batch
+    varint(inner.len() as u64, &mut payload);
+    payload.extend_from_slice(&inner);
+    let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(&payload);
+    framed
+}
+
+#[test]
+fn adversarial_many_small_observations_are_rejected_without_retained_memory() {
+    let limits = Limits { max_frame_bytes: 65_536, ..Limits::default() };
+    let k = KernelProc::start(&limits);
+    let conns = 16usize;
+    let mut sessions: Vec<Session> = (0..conns)
+        .map(|i| {
+            let src = 3001 + i as u32;
+            let mut s = Session::connect(&k.socket, "adv", src, 1).unwrap();
+            let a = s.request(&batch(BatchMode::FullState, 1, &[(1, Val::I(i as i64))])).unwrap();
+            assert_eq!(st(&a), AckStatus::AppliedVolatile);
+            s
+        })
+        .collect();
+    let before = k.introspect();
+    let rss0 = k.rss_kib();
+    let frame = oversized_empty_observations_frame(32_000, 2);
+    assert!(frame.len() - 4 <= 65_536, "{}", frame.len());
+    for round in 0..20 {
+        for s in &mut sessions {
+            s.send_raw(&frame).unwrap();
+            let a = s.recv_ack().unwrap();
+            assert_eq!(
+                (st(&a), a.error_code(), a.source_sequence),
+                (AckStatus::Rejected, ErrorCode::BatchTooLarge, 2),
+                "round {round}"
+            );
+        }
+    }
+    let rss1 = k.rss_kib();
+    // Old behaviour: >= 16 x 768 KiB retained. Allow allocator noise only.
+    assert!(rss1 < rss0 + 4 * 1024, "RSS grew from {rss0} to {rss1} KiB");
+    // Nothing applied, every connection still usable, sequence continues at 2.
+    let after = k.introspect();
+    assert_eq!(after.state_digest, before.state_digest);
+    assert_eq!(after.last_operation_sequence, before.last_operation_sequence);
+    assert_eq!(after.counters.unwrap().batches_rejected, before.counters.unwrap().batches_rejected + 20 * conns as u64);
+    for (i, s) in sessions.iter_mut().enumerate() {
+        let a = s.request(&batch(BatchMode::Delta, 2, &[(1, Val::I(100 + i as i64))])).unwrap();
+        assert_eq!(st(&a), AckStatus::AppliedVolatile);
+    }
+    eprintln!("adversarial frames: RSS {rss0} -> {rss1} KiB over {} rejected frames", 20 * conns);
+    k.stop();
+}
+
+// Review P2: takeover while the old session's reader is NOT waiting on the socket but on
+// backpressure. The old client writes Deltas as fast as it can and never reads its ACKs:
+// the kernel's ACK writes fill the socket toward the client, the per-connection ACK queue
+// fills (max_inflight), the reader blocks on reserving a slot, and the client's own
+// writes block. Then the same source reconnects with only 2 connection slots. The old
+// session must be released promptly (well before the 20 s ACK write deadline, so it is
+// not the deadline that frees it), without inventing ACKs or losing applied state, and
+// its late close must not degrade the new link. Run in current_thread and multi_thread(2).
+#[test]
+fn takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly() {
+    for workers in [None, Some(2)] {
+        let limits = Limits { max_driver_connections: 2, ack_write_timeout_ms: 20_000, ..Limits::default() };
+        let k = start_mode(&limits, workers, &[]);
+        let mut current = Session::connect(&k.socket, "p2", 3001, 5).unwrap();
+        let a = current.request(&batch(BatchMode::FullState, 1, &[(1, Val::I(1))])).unwrap();
+        assert_eq!(st(&a), AckStatus::AppliedVolatile);
+        let mut next_seq = 2u64;
+        let mut stale = Vec::new();
+        for round in 0..3 {
+            // Old link: flood without reading until our own writes block.
+            let mut raw: UnixStream = current.into_stream();
+            raw.set_write_timeout(Some(Duration::from_millis(300))).unwrap();
+            let first = next_seq;
+            let flooder = std::thread::spawn(move || {
+                let mut w = Vec::new();
+                let mut seq = first;
+                loop {
+                    frame::encode_frame(&batch(BatchMode::Delta, seq, &[(1, Val::I(seq as i64))]), 65_536, &mut w)
+                        .unwrap();
+                    if raw.write_all(&w).is_err() {
+                        break; // blocked (timeout) or closed
+                    }
+                    seq += 1;
+                }
+                (seq, raw)
+            });
+            let (written_up_to, raw) = flooder.join().unwrap();
+            assert!(written_up_to > first + 32, "{workers:?} round {round}: flood too short");
+            let busy = k.introspect().counters.unwrap();
+            assert_eq!(busy.active_connections, 1);
+            // Takeover by the same source while the old reader sits on backpressure.
+            let t0 = Instant::now();
+            let mut s = Session::connect(&k.socket, "p2", 3001, 5)
+                .unwrap_or_else(|e| panic!("{workers:?} round {round}: takeover refused: {e}"));
+            let r = k.wait_for("old link released", |r| {
+                let c = r.counters.unwrap();
+                c.active_connections == 1 && c.links_superseded == round + 1
+            });
+            let released = t0.elapsed();
+            eprintln!("{workers:?} round {round}: old link released {released:?} after the takeover Hello");
+            assert!(released < Duration::from_secs(2), "{workers:?}: release took {released:?}");
+            assert_eq!(r.counters.unwrap().ack_write_timeouts, 0, "released by the deadline, not the takeover");
+            assert_eq!(r.counters.unwrap().connections_refused_limit, 0);
+            // No invented ACK, no lost state: the new Welcome reports what was applied, and
+            // the tag holds exactly that batch's value (each Delta carries its sequence).
+            let last = s.welcome.last_accepted_source_sequence.expect("baseline");
+            assert!(last >= first - 1 && last < written_up_to, "{workers:?}: last={last}");
+            assert_eq!(i64_of(&r, 301), Some(if last == 1 { 1 } else { last as i64 }));
+            // The new link continues without a gap.
+            let a = s.request(&batch(BatchMode::Delta, last + 1, &[(1, Val::I((last + 1) as i64))])).unwrap();
+            assert_eq!(st(&a), AckStatus::AppliedVolatile, "{workers:?}: {a:?}");
+            assert_eq!(a.continuity(), Continuity::Continuous);
+            next_seq = last + 2;
+            stale.push(raw); // the old socket closes only later
+            current = s;
+        }
+        // Late closes of every old socket: the active link stays Connected and Good.
+        let before = link(&k.introspect(), 3001);
+        drop(stale);
+        std::thread::sleep(Duration::from_millis(200));
+        let r = k.introspect();
+        assert_eq!(link(&r, 3001), before);
+        assert_eq!(before.0, LinkState::Connected);
+        assert_eq!(quality(&tag(&r, 301)), Quality::Good);
+        let a = current.request(&batch(BatchMode::Delta, next_seq, &[(1, Val::I(0))])).unwrap();
+        assert_eq!(st(&a), AckStatus::AppliedVolatile);
+        k.stop();
+    }
+}

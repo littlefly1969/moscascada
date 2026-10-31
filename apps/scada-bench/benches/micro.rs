@@ -3,7 +3,8 @@
 //! `cargo bench -p scada-bench --bench micro [-- FILTER]`
 //!
 //! - `decode/fresh/*`: `DriverMessage::decode` of an ObservationBatch frame payload (VS-001).
-//! - `decode/reuse/*`: `convert::decode_driver_message` with a reused scratch batch (C3).
+//! - `decode/reuse/*`: `convert::decode_driver_message` with a reused scratch batch (C3),
+//!   limit 128; `decode/reuse_nolimit/*`: same without the observation-count check (P1).
 //! - `convert/*`: protocol batch -> core batch.
 //! - `apply/{order}/{n}`: one Delta of n changed i64 observations on a source with 128
 //!   channels, input in canonical (sorted), reversed or shuffled channel order.
@@ -53,9 +54,19 @@ fn bench_decode(c: &mut Criterion) {
             b.iter(|| black_box(pb::DriverMessage::decode(black_box(bytes.as_slice())).unwrap()))
         });
         let mut scratch = pb::ObservationBatch::default();
+        // Limit = channels per source (128), as in the kernel: frames long enough to exceed
+        // it pay the observation count (review P1).
         g.bench_with_input(BenchmarkId::new("reuse", n), &bytes, |b, bytes| {
             b.iter(|| {
-                let d = scada_runtime::convert::decode_driver_message(black_box(bytes.as_slice()), &mut scratch);
+                let d = scada_runtime::convert::decode_driver_message(black_box(bytes.as_slice()), &mut scratch, CH);
+                black_box(matches!(d, Ok(scada_runtime::convert::Decoded::Batch(_))))
+            })
+        });
+        // Same decoder with no limit (the count is skipped): the cost of the P1 check.
+        g.bench_with_input(BenchmarkId::new("reuse_nolimit", n), &bytes, |b, bytes| {
+            b.iter(|| {
+                let d =
+                    scada_runtime::convert::decode_driver_message(black_box(bytes.as_slice()), &mut scratch, u32::MAX);
                 black_box(matches!(d, Ok(scada_runtime::convert::Decoded::Batch(_))))
             })
         });

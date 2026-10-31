@@ -74,13 +74,22 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     let l = cfg.limits;
     let max_obs = u128::from(cfg.core.limits().max_observations_per_batch);
     let obs_core = m(max_obs, size_of::<Observation>() as u128);
-    let obs_wire = m(max_obs, size_of::<pb::Observation>() as u128);
+    // Review P1: the decoder never materializes more than `max_obs` observations, but the
+    // reused scratch can retain up to twice that capacity (Vec growth).
+    let obs_wire = m(
+        crate::convert::retained_capacity_bound(cfg.core.limits().max_observations_per_batch) as u128,
+        size_of::<pb::Observation>() as u128,
+    );
     let inflight = u128::from(l.max_inflight_per_connection);
     // One oneshot reply allocation per in-flight batch (Arc'd cell: header + value).
     let reply_cell = (size_of::<BatchReply>() as u128).saturating_add(64);
     let per_connection = u128::from(l.max_frame_bytes) // payload buffer (grows to the largest frame)
         .saturating_add(u128::from(l.read_buffer_bytes)) // C5 read buffer
-        .saturating_add(obs_wire) // C3 reused decoded batch
+        .saturating_add(obs_wire) // C3 reused decoded batch (retained capacity)
+        // Transient, one at a time: a frame that is not exactly one `batch` field is decoded
+        // generically (at most `max_obs` observations, P1) or a `hello` is validated; its
+        // strings and observations are bounded by the frame and freed at once.
+        .saturating_add(u128::from(l.max_frame_bytes).max(obs_wire))
         .saturating_add(obs_core) // converted batch held while waiting for a slot / the queue
         .saturating_add(m(inflight, 64)) // pending queue entries
         .saturating_add(m(inflight, reply_cell))

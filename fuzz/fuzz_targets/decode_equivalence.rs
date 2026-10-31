@@ -1,7 +1,14 @@
-//! C3: the fast-path decoder (`convert::decode_driver_message`, reused scratch batch) must
-//! accept exactly the frames the generic `DriverMessage::decode` accepts and yield the same
-//! message, whatever the scratch held before (it is reused across frames, so the target
-//! keeps one dirty scratch for the whole run).
+//! C3 + review P1: the data-phase decoder (`convert::decode_driver_message`, reused scratch
+//! batch, observation limit enforced before materialization) must agree with the generic
+//! `DriverMessage::decode` on every input, whatever the scratch held before (it is reused
+//! across frames, so the target keeps one dirty scratch for the whole run):
+//! - it fails exactly when the generic decoder fails;
+//! - `Batch`/`Other` equal the generic result, with at most `LIMIT` observations;
+//! - `Oversized` is a generic batch with more than `LIMIT` observations and the same
+//!   header; `NotBatch` is a generic non-batch body;
+//! - the scratch never retains capacity for more than `LIMIT` observations.
+//!
+//! The first input byte selects the limit (0..=15) so that oversized frames are common.
 #![no_main]
 
 use std::cell::RefCell;
@@ -16,18 +23,37 @@ thread_local! {
     static SCRATCH: RefCell<ObservationBatch> = RefCell::new(ObservationBatch::default());
 }
 
-fuzz_target!(|data: &[u8]| {
+fuzz_target!(|input: &[u8]| {
+    let Some((&sel, data)) = input.split_first() else { return };
+    let limit = u32::from(sel & 0x0f);
     let generic = DriverMessage::decode(data);
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
-        let fast = decode_driver_message(data, &mut s).map(|d| match d {
-            Decoded::Batch(b) => DriverMessage { body: Some(Body::Batch(b.clone())) },
-            Decoded::Other(m) => m,
-        });
-        match (&generic, &fast) {
-            (Ok(g), Ok(f)) => assert_eq!(g, f),
+        let fast = decode_driver_message(data, &mut s, limit);
+        match (&generic, fast) {
             (Err(_), Err(_)) => {}
-            _ => panic!("decoders disagree: generic={generic:?} fast={fast:?}"),
+            (Ok(g), Ok(Decoded::Batch(b))) => {
+                assert!(b.observations.len() <= limit as usize, "{} > {limit}", b.observations.len());
+                assert_eq!(g, &DriverMessage { body: Some(Body::Batch(b.clone())) });
+            }
+            (Ok(g), Ok(Decoded::Other(m))) => {
+                if let Some(Body::Batch(b)) = &m.body {
+                    assert!(b.observations.len() <= limit as usize, "{} > {limit}", b.observations.len());
+                }
+                assert_eq!(g, &m);
+            }
+            (Ok(g), Ok(Decoded::Oversized { mode, source_sequence, observations })) => match &g.body {
+                Some(Body::Batch(b)) => {
+                    assert!(observations > u64::from(limit));
+                    assert_eq!((b.mode, b.source_sequence, b.observations.len() as u64), (mode, source_sequence, observations));
+                }
+                other => panic!("Oversized but generic body is {other:?}"),
+            },
+            (Ok(g), Ok(Decoded::NotBatch)) => assert!(!matches!(g.body, Some(Body::Batch(_))), "{g:?}"),
+            (g, f) => panic!("decoders disagree: generic={g:?} fast={f:?}"),
         }
+        // Retained capacity bounded by the limit (the bound used by the memory budget).
+        let cap = s.observations.capacity();
+        assert!(cap <= scada_runtime::convert::retained_capacity_bound(limit), "capacity {cap} for limit {limit}");
     });
 });

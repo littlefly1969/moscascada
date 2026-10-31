@@ -11,12 +11,40 @@ pub enum Decoded<'a> {
     Batch(&'a pb::ObservationBatch),
     /// Anything else (Hello, empty body, unusual encodings), decoded generically.
     Other(pb::DriverMessage),
+    /// A well-formed batch with more observations than the limit. Nothing was
+    /// materialized: only its header fields and the count are known (review P1).
+    Oversized { mode: i32, source_sequence: u64, observations: u64 },
+    /// A well-formed frame whose body is not a batch, recognized without decoding it
+    /// (it held more observation fields than the limit before a later `hello` replaced
+    /// the batch body).
+    NotBatch,
+}
+
+/// The frame is not a valid `DriverMessage` (the generic decoder would fail too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Malformed;
+
+impl From<prost::DecodeError> for Malformed {
+    fn from(_: prost::DecodeError) -> Self {
+        Malformed
+    }
 }
 
 /// `DriverMessage` field 2 (`batch`), wire type 2 (length-delimited).
 const BATCH_KEY: u8 = (2 << 3) | 2;
+/// Smallest encoding of one `Observation` inside a batch: key byte + zero length.
+const MIN_OBSERVATION_WIRE_BYTES: usize = 2;
 
-/// Decode one data-phase frame (C3).
+/// Decode one data-phase frame (C3), never materializing more than `max_observations`
+/// observations (review P1).
+///
+/// Limit first: a frame within `max_frame_bytes` can encode up to `max_frame_bytes / 2`
+/// observations. Before any decoding, a cheap pass over the bytes counts the observation
+/// fields (an upper bound of the decoded length). Only if that bound exceeds the limit
+/// does an exact, allocation-free validating scan decide between a malformed frame, a
+/// non-batch body and an oversized batch, reported as [`Decoded::Oversized`] with the
+/// same header fields the full decode would give. Frames too short to exceed the limit
+/// skip the count.
 ///
 /// Fast path: a frame that is exactly one `batch` field — what every conforming driver
 /// sends — is merged into `scratch` after resetting every field to its default, so the
@@ -24,12 +52,30 @@ const BATCH_KEY: u8 = (2 << 3) | 2;
 /// for every batch. Proto3 merging into a default message is decoding, so the result is
 /// the same `ObservationBatch` that `DriverMessage::decode` would produce. Every other
 /// shape (other bodies, repeated or unknown top-level fields, trailing bytes) takes the
-/// generic decoder. Only the key byte and one length varint are parsed by hand, both
-/// bounds-checked; there is no unsafe code and no custom parsing of observations.
+/// generic decoder. Only keys and length varints are parsed by hand, with prost's own
+/// helpers, all bounds-checked; there is no unsafe code.
 pub fn decode_driver_message<'a>(
     bytes: &[u8],
     scratch: &'a mut pb::ObservationBatch,
-) -> Result<Decoded<'a>, prost::DecodeError> {
+    max_observations: u32,
+) -> Result<Decoded<'a>, Malformed> {
+    let max = u64::from(max_observations);
+    if bytes.len() / MIN_OBSERVATION_WIRE_BYTES > max_observations as usize && count_upper_bound(bytes) > max {
+        match scan_exact(bytes)? {
+            Body::Batch { mode, source_sequence, observations } if observations > max => {
+                return Ok(Decoded::Oversized { mode, source_sequence, observations });
+            }
+            Body::Hello => return Ok(Decoded::NotBatch),
+            // Within the limit after all: the upper bound also counted `batch` fields that
+            // a later `hello` discarded. A generic decode would still materialize those, so
+            // merge only the `batch` fields after the last `hello`, as prost would.
+            Body::Batch { .. } => {
+                merge_final_batch(bytes, scratch)?;
+                return Ok(Decoded::Batch(scratch));
+            }
+            Body::None => {}
+        }
+    }
     if let Some((&BATCH_KEY, mut rest)) = bytes.split_first()
         && let Ok(len) = prost::encoding::decode_varint(&mut rest)
         && usize::try_from(len).is_ok_and(|l| l == rest.len())
@@ -42,6 +88,157 @@ pub fn decode_driver_message<'a>(
     }
     let msg = pb::DriverMessage::decode(bytes)?;
     Ok(Decoded::Other(msg))
+}
+
+/// Number of `observations` fields in every `batch` field of the frame: an upper bound
+/// of the decoded batch length. Stops at the first undecodable byte (what was counted
+/// so far is still an upper bound of what a decoder would allocate before failing).
+fn count_upper_bound(bytes: &[u8]) -> u64 {
+    use prost::encoding::{WireType, decode_key, decode_varint, skip_field};
+    let mut n = 0u64;
+    let mut top = bytes;
+    while !top.is_empty() {
+        let Ok((tag, wt)) = decode_key(&mut top) else { break };
+        if tag == 2 && wt == WireType::LengthDelimited {
+            let Some(mut inner) = take_len(&mut top) else { break };
+            while !inner.is_empty() {
+                let Ok((t, w)) = decode_key(&mut inner) else { break };
+                if t == 3 && w == WireType::LengthDelimited {
+                    let Ok(len) = decode_varint(&mut inner) else { break };
+                    let Some(rest) = usize::try_from(len).ok().and_then(|l| inner.get(l..)) else { break };
+                    inner = rest;
+                    n = n.saturating_add(1);
+                } else if skip_field(w, t, &mut inner, prost::encoding::DecodeContext::default()).is_err() {
+                    break;
+                }
+            }
+        } else if skip_field(wt, tag, &mut top, prost::encoding::DecodeContext::default()).is_err() {
+            break;
+        }
+    }
+    n
+}
+
+/// Split a length-delimited payload off the front of `buf`.
+fn take_len<'b>(buf: &mut &'b [u8]) -> Option<&'b [u8]> {
+    let len = usize::try_from(prost::encoding::decode_varint(buf).ok()?).ok()?;
+    let b: &'b [u8] = buf;
+    let (payload, rest) = (b.get(..len)?, b.get(len..)?);
+    *buf = rest;
+    Some(payload)
+}
+
+/// Final body of a frame as prost would decode it (oneof: last field wins; repeated
+/// `batch` fields merge, concatenating observations).
+enum Body {
+    None,
+    Hello,
+    Batch { mode: i32, source_sequence: u64, observations: u64 },
+}
+
+/// Exact, allocation-free mirror of the derived `DriverMessage::merge` for frames whose
+/// observation count exceeds the limit: validates every field the way prost does
+/// (wire types, varints, nested `Observation`s, unknown fields skipped) and returns the
+/// resulting body, counting observations instead of storing them. Only reached for
+/// oversized or hostile frames, never on the hot path of a conforming driver.
+fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
+    use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, skip_field, uint64};
+    let mut top = bytes;
+    let mut body = Body::None;
+    while !top.is_empty() {
+        let (tag, wt) = decode_key(&mut top)?;
+        match tag {
+            1 => {
+                check_wire_type(WireType::LengthDelimited, wt)?;
+                let sub = take_len(&mut top).ok_or(Malformed)?;
+                // Validates; allocates at most the strings of this field (bounded by the
+                // frame) and frees them at once.
+                pb::Hello::decode(sub)?;
+                body = Body::Hello;
+            }
+            2 => {
+                check_wire_type(WireType::LengthDelimited, wt)?;
+                let mut inner = take_len(&mut top).ok_or(Malformed)?;
+                let (mut mode, mut seq, mut n) = match body {
+                    Body::Batch { mode, source_sequence, observations } => (mode, source_sequence, observations),
+                    _ => (0, 0, 0),
+                };
+                while !inner.is_empty() {
+                    let (t, w) = decode_key(&mut inner)?;
+                    match t {
+                        1 => int32::merge(w, &mut mode, &mut inner, DecodeContext::default())?,
+                        2 => uint64::merge(w, &mut seq, &mut inner, DecodeContext::default())?,
+                        3 => {
+                            check_wire_type(WireType::LengthDelimited, w)?;
+                            let o = take_len(&mut inner).ok_or(Malformed)?;
+                            pb::Observation::decode(o)?; // no heap fields: no allocation
+                            n = n.saturating_add(1);
+                        }
+                        _ => skip_field(w, t, &mut inner, DecodeContext::default())?,
+                    }
+                }
+                body = Body::Batch { mode, source_sequence: seq, observations: n };
+            }
+            _ => skip_field(wt, tag, &mut top, DecodeContext::default())?,
+        }
+    }
+    Ok(body)
+}
+
+/// Merge into `scratch` the `batch` fields that follow the last `hello` field: the body
+/// prost's oneof decoding ends with. Only called after [`scan_exact`] validated the frame.
+fn merge_final_batch(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result<(), Malformed> {
+    use prost::encoding::{DecodeContext, decode_key, skip_field};
+    // Pass 1: where the body after the last `hello` starts.
+    let mut top = bytes;
+    let mut start = bytes;
+    while !top.is_empty() {
+        let (tag, wt) = decode_key(&mut top)?;
+        match tag {
+            1 => {
+                take_len(&mut top).ok_or(Malformed)?;
+                start = top;
+            }
+            2 => {
+                take_len(&mut top).ok_or(Malformed)?;
+            }
+            _ => skip_field(wt, tag, &mut top, DecodeContext::default())?,
+        }
+    }
+    // Pass 2: merge every `batch` field from there on (no hello is left in `start`).
+    scratch.clear();
+    let mut top = start;
+    while !top.is_empty() {
+        let (tag, wt) = decode_key(&mut top)?;
+        if tag == 2 {
+            scratch.merge(take_len(&mut top).ok_or(Malformed)?)?;
+        } else {
+            skip_field(wt, tag, &mut top, DecodeContext::default())?;
+        }
+    }
+    Ok(())
+}
+
+/// Largest observation capacity the reused scratch can retain with limit `max`: it only
+/// grows while holding at most `max` observations, and `Vec` growth at most doubles the
+/// previous capacity (minimum 4). Used by the memory bound (`budget.rs`).
+pub const fn retained_capacity_bound(max: u32) -> usize {
+    let twice = (max as usize).saturating_mul(2);
+    if twice < 4 { 4 } else { twice }
+}
+
+/// Header checks shared by [`batch_from_wire`] and oversized batches: the same error,
+/// in the same order, whether or not the observations were materialized.
+pub fn check_batch_header(mode: i32, observations: u64, max_observations: u32) -> Result<BatchMode, ErrorCode> {
+    let mode = match pb::BatchMode::try_from(mode) {
+        Ok(pb::BatchMode::FullState) => BatchMode::FullState,
+        Ok(pb::BatchMode::Delta) => BatchMode::Delta,
+        Ok(pb::BatchMode::Unspecified) | Err(_) => return Err(ErrorCode::InvalidMode),
+    };
+    if observations > u64::from(max_observations) {
+        return Err(ErrorCode::BatchTooLarge);
+    }
+    Ok(mode)
 }
 
 /// Unwrap a generically decoded message that turned out to be a batch.
@@ -61,15 +258,8 @@ pub fn batch_from_wire(
     b: &pb::ObservationBatch,
     max_observations: u32,
 ) -> Result<ObservationBatch, ErrorCode> {
-    let mode = match pb::BatchMode::try_from(b.mode) {
-        Ok(pb::BatchMode::FullState) => BatchMode::FullState,
-        Ok(pb::BatchMode::Delta) => BatchMode::Delta,
-        Ok(pb::BatchMode::Unspecified) | Err(_) => return Err(ErrorCode::InvalidMode),
-    };
-    // Checked again by the core; done here to avoid converting oversized vectors.
-    if b.observations.len() > max_observations as usize {
-        return Err(ErrorCode::BatchTooLarge);
-    }
+    // Size checked again by the core; done here to avoid converting oversized vectors.
+    let mode = check_batch_header(b.mode, b.observations.len() as u64, max_observations)?;
     let mut observations = Vec::with_capacity(b.observations.len());
     for o in &b.observations {
         let value = match o.value {
@@ -129,9 +319,10 @@ mod tests {
     }
 
     fn fast(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result<pb::DriverMessage, ()> {
-        match decode_driver_message(bytes, scratch) {
+        match decode_driver_message(bytes, scratch, u32::MAX) {
             Ok(Decoded::Batch(b)) => Ok(pb::DriverMessage { body: Some(driver_message::Body::Batch(b.clone())) }),
             Ok(Decoded::Other(m)) => Ok(m),
+            Ok(d @ (Decoded::Oversized { .. } | Decoded::NotBatch)) => panic!("no limit, got {d:?}"),
             Err(_) => Err(()),
         }
     }
@@ -216,6 +407,67 @@ mod tests {
         }
     }
 
+    /// Review P1: the same agreement with a small observation limit, so that the
+    /// count, the exact scan and the final-batch merge are all exercised.
+    fn check_limited(frame: &[u8], limit: u32, scratch: &mut pb::ObservationBatch) -> Result<(), TestCaseError> {
+        let generic = pb::DriverMessage::decode(frame);
+        match (&generic, decode_driver_message(frame, scratch, limit)) {
+            (Err(_), Err(_)) => {}
+            (Ok(g), Ok(Decoded::Batch(b))) => {
+                prop_assert!(b.observations.len() <= limit as usize);
+                prop_assert_eq!(g, &pb::DriverMessage { body: Some(driver_message::Body::Batch(b.clone())) });
+            }
+            (Ok(g), Ok(Decoded::Other(m))) => prop_assert_eq!(g, &m),
+            (Ok(g), Ok(Decoded::Oversized { mode, source_sequence, observations })) => match &g.body {
+                Some(driver_message::Body::Batch(b)) => {
+                    prop_assert!(observations > u64::from(limit));
+                    prop_assert_eq!(
+                        (b.mode, b.source_sequence, b.observations.len() as u64),
+                        (mode, source_sequence, observations)
+                    );
+                }
+                other => prop_assert!(false, "Oversized, generic {:?}", other),
+            },
+            (Ok(g), Ok(Decoded::NotBatch)) => prop_assert!(!matches!(g.body, Some(driver_message::Body::Batch(_)))),
+            (g, f) => prop_assert!(false, "disagree: {:?} vs {:?}", g, f),
+        }
+        prop_assert!(scratch.observations.capacity() <= retained_capacity_bound(limit));
+        Ok(())
+    }
+
+    fn arb_mixed_frame() -> impl Strategy<Value = Vec<u8>> {
+        // Sequences of batch / hello / unknown fields: oneof replacement and merging.
+        let field = prop_oneof![
+            arb_batch().prop_map(|b| pb::DriverMessage { body: Some(driver_message::Body::Batch(b)) }.encode_to_vec()),
+            Just(
+                pb::DriverMessage {
+                    body: Some(driver_message::Body::Hello(pb::Hello { driver_id: "h".into(), ..Default::default() }))
+                }
+                .encode_to_vec()
+            ),
+            Just(vec![(9 << 3), 1]), // unknown varint field 9
+        ];
+        prop::collection::vec(field, 1..5).prop_map(|v| v.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 3000, ..ProptestConfig::default() })]
+
+        #[test]
+        fn limited_decode_agrees_with_generic(prev in arb_batch(), frame in arb_frame(), limit in 0u32..8) {
+            let mut scratch = pb::ObservationBatch::default();
+            // A scratch already within the limit (the decoder never leaves it larger).
+            scratch.observations.extend(prev.observations.into_iter().take(limit as usize));
+            check_limited(&frame, limit, &mut scratch)?;
+        }
+
+        #[test]
+        fn limited_decode_agrees_on_mixed_bodies(frame in arb_mixed_frame(), limit in 0u32..8) {
+            let mut scratch = pb::ObservationBatch::default();
+            check_limited(&frame, limit, &mut scratch)?;
+        }
+    }
+
     #[test]
     fn scratch_capacity_is_reused() {
         let big = pb::DriverMessage {
@@ -227,11 +479,98 @@ mod tests {
         }
         .encode_to_vec();
         let mut scratch = pb::ObservationBatch::default();
-        assert!(matches!(decode_driver_message(&big, &mut scratch), Ok(Decoded::Batch(_))));
+        assert!(matches!(decode_driver_message(&big, &mut scratch, 128), Ok(Decoded::Batch(_))));
         let cap = scratch.observations.capacity();
         for _ in 0..100 {
-            assert!(matches!(decode_driver_message(&big, &mut scratch), Ok(Decoded::Batch(_))));
+            assert!(matches!(decode_driver_message(&big, &mut scratch, 128), Ok(Decoded::Batch(_))));
         }
         assert_eq!(scratch.observations.capacity(), cap);
+    }
+}
+
+#[cfg(test)]
+mod adversarial {
+    //! P1 (review of PR #2): a frame within `max_frame_bytes` can carry far more
+    //! observations than `max_observations_per_batch`, each as small as 2 bytes (an empty
+    //! `Observation`). The limit must be enforced before they are materialized, and the
+    //! reused scratch must never keep more than the limit.
+    use super::*;
+
+    /// `DriverMessage{batch{mode, seq, n × empty Observation}}`, hand-encoded.
+    pub(crate) fn many_empty_observations(n: usize, mode: i32, seq: u64) -> Vec<u8> {
+        let mut inner = Vec::new();
+        prost::encoding::int32::encode(1, &mode, &mut inner);
+        prost::encoding::uint64::encode(2, &seq, &mut inner);
+        for _ in 0..n {
+            inner.extend_from_slice(&[(3 << 3) | 2, 0]);
+        }
+        let mut out = vec![BATCH_KEY];
+        prost::encoding::encode_varint(inner.len() as u64, &mut out);
+        out.extend_from_slice(&inner);
+        out
+    }
+
+    #[test]
+    fn oversized_batch_is_not_materialized() {
+        // 64 KiB frame: ~32 000 observations, limit 128.
+        let frame = many_empty_observations(32_000, 2, 7);
+        assert!(frame.len() <= 65_536);
+        let mut scratch = pb::ObservationBatch::default();
+        match decode_driver_message(&frame, &mut scratch, 128) {
+            Ok(Decoded::Oversized { mode, source_sequence, observations }) => {
+                assert_eq!((mode, source_sequence, observations), (2, 7, 32_000));
+            }
+            other => panic!("expected Oversized, got {other:?}"),
+        }
+        assert!(scratch.observations.capacity() <= 128, "scratch grew to {}", scratch.observations.capacity());
+    }
+
+    #[test]
+    fn oversized_with_invalid_mode_reports_invalid_mode_first() {
+        // Same error order as a materialized batch: mode, then size.
+        assert_eq!(check_batch_header(7, 1_000, 128), Err(ErrorCode::InvalidMode));
+        assert_eq!(check_batch_header(2, 1_000, 128), Err(ErrorCode::BatchTooLarge));
+        assert_eq!(check_batch_header(2, 128, 128), Ok(BatchMode::Delta));
+    }
+
+    #[test]
+    fn oversized_then_corrupt_is_malformed_without_allocation() {
+        let mut frame = many_empty_observations(10_000, 2, 1);
+        frame.push(0xff); // trailing garbage: an invalid key
+        let mut scratch = pb::ObservationBatch::default();
+        assert_eq!(decode_driver_message(&frame, &mut scratch, 128).unwrap_err(), Malformed);
+        assert!(pb::DriverMessage::decode(frame.as_slice()).is_err());
+        assert_eq!(scratch.observations.capacity(), 0);
+    }
+
+    #[test]
+    fn oversized_batch_replaced_by_hello_is_not_a_batch() {
+        let mut frame = many_empty_observations(10_000, 2, 1);
+        frame.extend(
+            pb::DriverMessage { body: Some(driver_message::Body::Hello(pb::Hello::default())) }.encode_to_vec(),
+        );
+        let mut scratch = pb::ObservationBatch::default();
+        assert!(matches!(decode_driver_message(&frame, &mut scratch, 128), Ok(Decoded::NotBatch)));
+        assert_eq!(scratch.observations.capacity(), 0);
+    }
+
+    #[test]
+    fn small_batch_after_discarded_oversized_one_is_decoded_within_the_limit() {
+        // batch(10 000 obs), hello, batch(3 obs): prost ends with the 3-observation batch.
+        let mut frame = many_empty_observations(10_000, 2, 1);
+        frame.extend(
+            pb::DriverMessage { body: Some(driver_message::Body::Hello(pb::Hello::default())) }.encode_to_vec(),
+        );
+        frame.extend(many_empty_observations(3, 1, 9));
+        let mut scratch = pb::ObservationBatch::default();
+        let generic = pb::DriverMessage::decode(frame.as_slice()).unwrap();
+        match decode_driver_message(&frame, &mut scratch, 128) {
+            Ok(Decoded::Batch(b)) => {
+                assert_eq!(generic, pb::DriverMessage { body: Some(driver_message::Body::Batch(b.clone())) });
+                assert_eq!(b.observations.len(), 3);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(scratch.observations.capacity() <= 4);
     }
 }
