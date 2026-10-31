@@ -1,0 +1,9 @@
+decode_equivalence exit 1
+decode_equivalence rerun exit 1
+batch_validation exit 0
+frame_decode exit 0
+decode_equivalence (per-limit scratch) exit 0
+--- final decoder (merge then reject) ---
+decode_equivalence final exit 0
+batch_validation final exit 0
+frame_decode final exit 0

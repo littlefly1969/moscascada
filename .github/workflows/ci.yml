@@ -12,8 +12,12 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install buf
         run: npm install --global @bufbuild/buf@1.75.0
-      - name: Checks
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Checks (includes runtime tests in release under multi_thread(2))
         run: ./scripts/check.sh
+      - name: Runtime tests in release, current_thread
+        run: cargo build --release -p scada-sim-driver && cargo test --release -p scada-runtime
 
   fuzz-smoke:
     # Separate from the stable gate: cargo-fuzz needs nightly (libFuzzer + sanitizers).
@@ -28,3 +32,5 @@ jobs:
         run: cd fuzz && cargo +nightly fuzz run -O frame_decode corpus/frame_decode -- -max_total_time=60
       - name: batch_validation (60 s)
         run: cd fuzz && cargo +nightly fuzz run -O batch_validation corpus/batch_validation -- -max_total_time=60
+      - name: decode_equivalence (60 s)
+        run: mkdir -p fuzz/corpus/decode_equivalence && cd fuzz && cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=60

@@ -16,6 +16,8 @@ struct FileConfig {
     ipc: FileIpc,
     #[serde(default)]
     core: FileCore,
+    #[serde(default)]
+    runtime: FileRuntime,
     tags: Vec<FileTag>,
     sources: Vec<FileSource>,
 }
@@ -37,6 +39,25 @@ struct FileIpc {
     handshake_timeout_ms: u64,
     #[serde(default = "d_timeout")]
     frame_timeout_ms: u64,
+    /// D2: deadline for writing ACKs to a peer; a peer that does not read is closed.
+    #[serde(default = "d_write_timeout")]
+    ack_write_timeout_ms: u64,
+    /// C5: per-connection read buffer (0 = unbuffered, VS-001 behaviour).
+    #[serde(default = "d_read_buffer")]
+    read_buffer_bytes: u32,
+    /// C5: at most this many already-available ACKs per socket write (1 = one per write).
+    #[serde(default = "d_ack_coalesce")]
+    ack_coalesce_max: u32,
+}
+
+fn d_write_timeout() -> u64 {
+    5_000
+}
+fn d_read_buffer() -> u32 {
+    8_192
+}
+fn d_ack_coalesce() -> u32 {
+    32
 }
 
 fn d_max_frame() -> u32 {
@@ -70,6 +91,20 @@ impl Default for FileCore {
 
 fn d_max_obs() -> u32 {
     128
+}
+
+/// `[runtime]`: how the I/O edge is scheduled. Never touches the core or the sequencer
+/// model (one OS thread, one writer).
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileRuntime {
+    /// `"current_thread"` (default) or `"multi_thread"`.
+    scheduler: Option<String>,
+    /// Required with `multi_thread`, forbidden with `current_thread`. Never derived from
+    /// the number of CPUs: the operator chooses it (brief §4 B2).
+    worker_threads: Option<u32>,
+    /// E1: refuse startup if the configured worst-case allocation bound exceeds this.
+    memory_budget_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -126,6 +161,64 @@ pub struct IpcLimits {
     pub max_inflight_per_connection: u32,
     pub handshake_timeout_ms: u64,
     pub frame_timeout_ms: u64,
+    pub ack_write_timeout_ms: u64,
+    pub read_buffer_bytes: u32,
+    /// ACKs per socket write (C5): only ACKs already available are grouped, never waited for.
+    pub ack_coalesce_max: u32,
+}
+
+/// Upper bound for `worker_threads` (a guardrail against typos, not a recommendation).
+pub const MAX_WORKER_THREADS: u32 = 64;
+
+/// Tokio scheduler of the I/O edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheduler {
+    /// One thread runs every session (VS-001 behaviour, default, Micro profile).
+    CurrentThread,
+    /// Work-stealing pool with an explicit number of workers (Server profile). Different
+    /// sessions may run in parallel; one session is still one task (no intra-session
+    /// parallelism, no reordering).
+    MultiThread { worker_threads: u32 },
+}
+
+impl Scheduler {
+    /// Parse the `--scheduler` / `[runtime]` pair. `workers` must be given exactly for
+    /// `multi_thread`.
+    pub fn parse(name: &str, workers: Option<u32>) -> Result<Scheduler, String> {
+        match (name, workers) {
+            ("current_thread", None) => Ok(Scheduler::CurrentThread),
+            ("current_thread", Some(_)) => Err("worker_threads is only valid with scheduler = \"multi_thread\"".into()),
+            ("multi_thread", Some(n)) if (1..=MAX_WORKER_THREADS).contains(&n) => {
+                Ok(Scheduler::MultiThread { worker_threads: n })
+            }
+            ("multi_thread", Some(n)) => Err(format!("worker_threads={n} outside 1..={MAX_WORKER_THREADS}")),
+            ("multi_thread", None) => Err("scheduler = \"multi_thread\" requires an explicit worker_threads".into()),
+            (other, _) => Err(format!("unknown scheduler {other:?} (current_thread | multi_thread)")),
+        }
+    }
+}
+
+impl fmt::Display for Scheduler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Scheduler::CurrentThread => f.write_str("current_thread"),
+            Scheduler::MultiThread { worker_threads } => write!(f, "multi_thread({worker_threads})"),
+        }
+    }
+}
+
+/// `[runtime]` settings after validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeSettings {
+    pub scheduler: Scheduler,
+    /// E1: optional ceiling for the configured worst-case allocation bound (`budget.rs`).
+    pub memory_budget_bytes: Option<u64>,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        RuntimeSettings { scheduler: Scheduler::CurrentThread, memory_budget_bytes: None }
+    }
 }
 
 /// Validated runtime configuration.
@@ -134,6 +227,7 @@ pub struct RuntimeConfig {
     pub socket_path: PathBuf,
     pub socket_group_gid: Option<u32>,
     pub limits: IpcLimits,
+    pub runtime: RuntimeSettings,
     pub core: ValidatedConfig,
     /// (source, authorized uids) sorted by source; `None` = socket permissions only.
     pub authorization: Vec<(SourceId, Option<Vec<u32>>)>,
@@ -156,6 +250,7 @@ pub enum LoadError {
     Io(PathBuf, std::io::Error),
     Parse(String),
     Ipc(String),
+    Runtime(String),
     Core(ConfigError),
 }
 
@@ -165,6 +260,7 @@ impl fmt::Display for LoadError {
             LoadError::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
             LoadError::Parse(e) => write!(f, "invalid TOML: {e}"),
             LoadError::Ipc(e) => write!(f, "invalid [ipc] section: {e}"),
+            LoadError::Runtime(e) => write!(f, "invalid [runtime] section: {e}"),
             LoadError::Core(e) => write!(f, "invalid configuration: {e}"),
         }
     }
@@ -193,6 +289,9 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         max_inflight_per_connection: ipc.max_inflight_per_connection,
         handshake_timeout_ms: ipc.handshake_timeout_ms,
         frame_timeout_ms: ipc.frame_timeout_ms,
+        ack_write_timeout_ms: ipc.ack_write_timeout_ms,
+        read_buffer_bytes: ipc.read_buffer_bytes,
+        ack_coalesce_max: ipc.ack_coalesce_max,
     };
     let range = |name: &str, v: u64, lo: u64, hi: u64| {
         if v < lo || v > hi { Err(LoadError::Ipc(format!("{name}={v} outside {lo}..={hi}"))) } else { Ok(()) }
@@ -203,6 +302,9 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
     range("max_inflight_per_connection", limits.max_inflight_per_connection.into(), 1, 1024)?;
     range("handshake_timeout_ms", limits.handshake_timeout_ms, 1, 600_000)?;
     range("frame_timeout_ms", limits.frame_timeout_ms, 1, 600_000)?;
+    range("ack_write_timeout_ms", limits.ack_write_timeout_ms, 1, 600_000)?;
+    range("read_buffer_bytes", limits.read_buffer_bytes.into(), 0, 1 << 20)?;
+    range("ack_coalesce_max", limits.ack_coalesce_max.into(), 1, 1024)?;
     let needed = f
         .core
         .max_observations_per_batch
@@ -214,6 +316,11 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
             limits.max_frame_bytes, f.core.max_observations_per_batch
         )));
     }
+
+    let scheduler =
+        Scheduler::parse(f.runtime.scheduler.as_deref().unwrap_or("current_thread"), f.runtime.worker_threads)
+            .map_err(LoadError::Runtime)?;
+    let runtime = RuntimeSettings { scheduler, memory_budget_bytes: f.runtime.memory_budget_bytes };
 
     let spec = ConfigSpec {
         limits: CoreLimits { max_observations_per_batch: f.core.max_observations_per_batch },
@@ -251,6 +358,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         socket_path: ipc.socket_path,
         socket_group_gid: ipc.socket_group_gid,
         limits,
+        runtime,
         core,
         authorization,
     })

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3fa0ab0b45d1569f4ea429462a71ac5ce61b0737706af109fa8b9f7f49df88a7 # shrinks to prev = ObservationBatch { mode: Unspecified, source_sequence: 0, observations: [Observation { channel_id: 0, value: None }, Observation { channel_id: 0, value: None }, Observation { channel_id: 0, value: None }, Observation { channel_id: 0, value: None }, Observation { channel_id: 0, value: None }] }, frame = [18, 12, 26, 0, 26, 0, 26, 0, 26, 0, 26, 0, 26, 0], limit = 6

@@ -274,6 +274,22 @@ impl Kernel {
         Kernel { config, last_operation_sequence: 0, sources, cells, staging }
     }
 
+    /// Conservative upper bound, in bytes, of the heap the kernel state allocates for
+    /// `config` (RTDB cells, per-source runtime and deduplication copy, staging buffer).
+    /// All of it is allocated by [`Kernel::new`] and never grows (VS-002 E1). Allocator
+    /// overhead is not included.
+    pub fn storage_bound_bytes(config: &ValidatedConfig) -> u128 {
+        let tags = config.tags().len() as u128;
+        let max_obs = u128::from(config.limits().max_observations_per_batch);
+        let channels: u128 = config.sources().iter().map(|s| s.channel_count() as u128).sum();
+        let sources = config.sources().len() as u128;
+        let sz = |n: usize| n as u128;
+        tags.saturating_mul(sz(std::mem::size_of::<TagCell>()))
+            .saturating_add(sources.saturating_mul(sz(std::mem::size_of::<SourceRuntime>())))
+            .saturating_add(channels.saturating_mul(sz(std::mem::size_of::<(u32, Value)>())))
+            .saturating_add(max_obs.saturating_mul(sz(std::mem::size_of::<Staged>())))
+    }
+
     pub fn config(&self) -> &Arc<ValidatedConfig> {
         &self.config
     }
@@ -417,6 +433,8 @@ impl Kernel {
 
     fn batch(&mut self, b: &ObservationBatch, op: u64) -> Result<TransitionOutcome, ApplyError> {
         let src = self.source_index(b.source_id)?;
+        // C4: removing this `Arc::clone` (split borrows) was measured: -8..-18 % on `apply`
+        // but not repeatable (p > 0.05 in 4 of 7 cases, ADR 0007); kept as in VS-001.
         let config = Arc::clone(&self.config);
         let meta = config.sources().get(src).ok_or(ApplyError::UnknownSource(b.source_id))?;
         let rt = self.sources.get(src).ok_or(ApplyError::UnknownSource(b.source_id))?;
@@ -448,6 +466,8 @@ impl Kernel {
             let tag_index = u32::try_from(tag_index).map_err(|_| ApplyError::UnknownChannel(o.channel_id))?;
             self.staging.push(Staged { tag_index, channel_id: o.channel_id, value: o.value });
         }
+        // C4: an `is_sorted` pre-check was measured and dropped (within noise in all cases):
+        // the unstable sort already handles sorted or reversed input in linear time.
         self.staging.sort_unstable_by_key(|s| s.tag_index);
         for w in self.staging.windows(2) {
             if let [a, c] = w

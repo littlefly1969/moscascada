@@ -1,0 +1,68 @@
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.12s
+     Running benches/micro.rs (target/release/deps/micro-49ba383f5f65a021)
+Benchmarking apply/sorted/1
+Benchmarking apply/sorted/1: Warming up for 1.0000 s
+Benchmarking apply/sorted/1: Collecting 100 samples in estimated 3.0005 s (21M iterations)
+Benchmarking apply/sorted/1: Analyzing
+apply/sorted/1          time:   [61.154 ns 63.539 ns 66.286 ns]
+                        change: [−41.738% −38.186% −34.360%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+  9 (9.00%) high severe
+Benchmarking apply/sorted/32
+Benchmarking apply/sorted/32: Warming up for 1.0000 s
+Benchmarking apply/sorted/32: Collecting 100 samples in estimated 3.0000 s (2.2M iterations)
+Benchmarking apply/sorted/32: Analyzing
+apply/sorted/32         time:   [840.59 ns 872.88 ns 909.10 ns]
+                        change: [−36.517% −32.948% −29.293%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 21 outliers among 100 measurements (21.00%)
+  9 (9.00%) high mild
+  12 (12.00%) high severe
+Benchmarking apply/reversed/32
+Benchmarking apply/reversed/32: Warming up for 1.0000 s
+Benchmarking apply/reversed/32: Collecting 100 samples in estimated 3.0054 s (2.0M iterations)
+Benchmarking apply/reversed/32: Analyzing
+apply/reversed/32       time:   [979.30 ns 1.0216 µs 1.0626 µs]
+                        change: [−19.935% −15.852% −11.745%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking apply/shuffled/32
+Benchmarking apply/shuffled/32: Warming up for 1.0000 s
+Benchmarking apply/shuffled/32: Collecting 100 samples in estimated 3.0062 s (1.3M iterations)
+Benchmarking apply/shuffled/32: Analyzing
+apply/shuffled/32       time:   [1.2900 µs 1.3259 µs 1.3703 µs]
+                        change: [−28.191% −24.831% −21.362%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 18 outliers among 100 measurements (18.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  15 (15.00%) high severe
+Benchmarking apply/sorted/128
+Benchmarking apply/sorted/128: Warming up for 1.0000 s
+Benchmarking apply/sorted/128: Collecting 100 samples in estimated 3.0297 s (470k iterations)
+Benchmarking apply/sorted/128: Analyzing
+apply/sorted/128        time:   [3.6720 µs 3.8350 µs 4.0209 µs]
+                        change: [−19.983% −15.236% −10.419%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking apply/reversed/128
+Benchmarking apply/reversed/128: Warming up for 1.0000 s
+Benchmarking apply/reversed/128: Collecting 100 samples in estimated 3.0111 s (389k iterations)
+Benchmarking apply/reversed/128: Analyzing
+apply/reversed/128      time:   [3.9614 µs 4.1781 µs 4.3941 µs]
+                        change: [−18.308% −12.512% −6.2106%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking apply/shuffled/128
+Benchmarking apply/shuffled/128: Warming up for 1.0000 s
+Benchmarking apply/shuffled/128: Collecting 100 samples in estimated 3.0263 s (263k iterations)
+Benchmarking apply/shuffled/128: Analyzing
+apply/shuffled/128      time:   [5.8537 µs 6.0885 µs 6.3499 µs]
+                        change: [−13.969% −9.3540% −4.1520%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+

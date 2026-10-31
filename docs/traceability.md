@@ -1,4 +1,6 @@
-# Matrice di tracciabilità VS-001
+# Matrice di tracciabilità VS-001 + VS-002
+
+La parte VS-002 è in fondo ([§VS-002](#vs-002)); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
 Legenda: **✅ verificato** = implementato e coperto da un test o da una misura eseguiti (risultati in questo repository); **🟡 parziale** = implementato, verifica incompleta (motivo indicato); **❌ non soddisfatto** = non implementato o non verificabile qui (motivo indicato).
 
@@ -164,14 +166,14 @@ Esecuzione di riferimento (30-10-2026, Linux x86_64): `cargo test --workspace` �
 1. **ARM64**: solo `cargo check`; link ed esecuzione non testati (manca sysroot/hardware).
 2. **Durabilità assente per progetto**: nessun journal, nessun recovery. Un riavvio perde tutto; il protocollo lo rende esplicito (`kernel_instance_id`, `APPLIED_VOLATILE`, `full_state_required`).
 3. **Ordine di ammissione non registrato**: il sequencer non scrive un log degli input; la riproducibilità è garantita dal core dato lo stesso stream (testata), ma lo stream reale non viene salvato (sarebbe un journal, fuori perimetro).
-4. **Takeover**: un link superato ma inattivo resta aperto finché il peer non scrive o chiude, occupando uno slot di connessione (limite `max_driver_connections`). Solo un peer già autorizzato può farlo.
+4. ~~**Takeover**: un link superato ma inattivo resta aperto…~~ **Chiuso in VS-002 (D3)**: il sequencer segnala il link superato, che viene chiuso (`LINK_SUPERSEDED`); test `vs002.rs::repeated_takeovers_do_not_exhaust_connection_slots`.
 5. **Rifiuto per limite connessioni best effort**: se il client ha già inviato dati, Linux può consegnargli `ECONNRESET` invece del frame `TOO_MANY_CONNECTIONS`.
-6. **Permessi del socket**: piccola finestra fra `bind` e `chmod 0660` (mitigata dalla directory `0750` se creata dal kernel); `socket_group_gid` non testato.
+6. **Permessi del socket**: piccola finestra fra `bind` e `chmod 0660`; VS-002 (E2) richiede ora una directory non scrivibile da altri, non symlink, del proprio utente o di root, e non rimuove socket altrui. `socket_group_gid` resta non testato.
 7. **Autorizzazione**: per UID effettivo e solo se `authorized_uids` è configurato; altrimenti valgono i soli permessi del file socket. Nessun controllo per GID/PID.
 8. **Flag `--throttle-sequencer-us`** presente nel binario di produzione per i test di saturazione (default 0, documentato come diagnostico).
 9. **Introspezione**: socket opzionale che restituisce l'intero snapshot (allocazione proporzionale al numero di tag, fuori dal percorso caldo); non è un'API pubblica.
-10. **Benchmark**: una sola esecuzione per cella su una VM condivisa; nessun intervallo di confidenza; massimi rumorosi.
-11. **Allocazioni nel kernel end-to-end non misurate** (solo nel core in-memory).
+10. **Benchmark**: in VS-001 una sola esecuzione per cella. VS-002 usa 7 run randomizzate per condizione con dispersione e test di permutazione (`docs/benchmarks/vs002.md`); resta una sola VM.
+11. ~~**Allocazioni nel kernel end-to-end non misurate**~~ **Misurate in VS-002** con `valgrind --tool=dhat`: 9,0 → 2,0 allocazioni per batch da 128 oss. (`vs002.md` §6).
 12. **Digest lento** (83 µs per 1024 tag) per BLAKE3 in Rust puro e molti `update` piccoli; accettabile perché on-demand.
 
 ## Problemi trovati durante lo sviluppo (e corretti)
@@ -193,3 +195,93 @@ Esecuzione di riferimento (30-10-2026, Linux x86_64): `cargo test --workspace` �
 ## Prossimo rischio prioritario
 
 Il costo per richiesta del runtime (handoff fra thread) limita il throughput a ~40 000 batch/s su questa VM e la latenza p50 a ~100 µs anche quando la state machine lavora per meno di 4 µs. Prima di aggiungere funzionalità (allarmi, historian) conviene misurare e ridurre questo percorso, ripetendo i benchmark su hardware ARM64 reale, che oggi è il dato mancante più importante per la piattaforma di destinazione.
+
+
+---
+
+## VS-002
+
+Brief: `MoscaSCADA_VS002_Agent_Brief.md`. Base `b17413f` (VS-001), branch `vs-002`. Esecuzione di riferimento (31-10-2026, VM x86_64 4 vCPU): `cargo test --workspace --release` e `SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime` verdi; `cargo fmt --check`, `clippy -D warnings`, `buf lint`/`buf breaking` superati; fuzz 3 target × 300 s, 0 crash.
+
+### Vincoli (§0, "non fare")
+
+| Vincolo | Stato | Evidenza |
+|---|---|---|
+| `scada.driver.v1` invariato | ✅ | Nessuna modifica a `driver.proto`; `buf breaking` contro la baseline v1.0. Le aggiunte sono solo in `introspect.proto` (campi additivi). |
+| Semantica `APPLIED_VOLATILE`, `Kernel::apply` puro, un solo writer, modello Bool/I64, UDS/Protobuf | ✅ | core: solo indice denso (stesso risultato, `core/equivalence.rs` contro il kernel VS-001 congelato); `check.sh` audit di purezza esteso (lock, `unsafe`) |
+| Niente I/O, timer, lock, thread nel core; niente `unsafe` nel prodotto | ✅ | `check.sh` |
+| Niente cluster, DB, historian, allarmi, logica, GUI, MQTT | ✅ | `cargo tree`; la sorgente "critica" è solo un ruolo nel benchmark |
+| Niente spin loop, affinità, `SCHED_FIFO`, lock-free custom, allocatore custom, mmap, compressione | ✅ | Non presenti |
+| Nessuna coda illimitata, nessuna perdita/coalescenza silenziosa, nessun riordino intra-sorgente | ✅ | Tutte le code limitate; il coalescing riguarda solo le `write` di ACK già prodotti, in ordine; test di ordine §8.3/§8.4 |
+| Nessuna dichiarazione hard real-time / ARM64 | ✅ | `vs002.md` §11, README: **ARM64 NOT TESTED ON HARDWARE** |
+
+### Work package
+
+| WP | Requisito | Stato | Evidenza |
+|---|---|---|---|
+| A | Strumentazione non intrusiva prima degli interventi | ✅ | `diag.rs` (istogrammi limitati, `--diag`, `--diag-probe-source`), CPU per thread nel bench; overhead entro il rumore (`vs002.md` §2) |
+| B | Scheduler `current_thread`/`multi_thread(N)` esplicito, sequencer dedicato, ordine | ✅ | `config.rs` (`[runtime]`), ADR 0004, campagna 2, test di ordine con 1/2/4 worker |
+| C1 | Drain del sequencer | ✅ misurato, ❌ non adottato | ADR 0005 (codice rimosso dopo la misura) |
+| C2 | ACK senza allocazioni ripetute | ✅ | `server.rs::set_ack`, test `reused_ack_encodes_identically`, dhat |
+| C3 | Decode/conversione senza allocazioni ripetute | ✅ | `convert.rs::decode_driver_message`, proptest + fuzz `decode_equivalence` |
+| P1 (review) | Memoria del decoder entro il budget: nessuna capacità trattenuta oltre `2·max`, picco transitorio contato per worker | ✅ | ADR 0006 §P1 (varianti A0/A/B misurate, B adottata), ADR 0009, `adversarial_many_small_observations_are_rejected_without_retained_memory` (`ct` e `mt2`), `convert.rs::adversarial`, proptest con limite, fuzz `results/vs002/fuzz/p1/`, `vs002.md` §12 |
+| C4 | Lookup/sort del core | ✅ | ADR 0007 |
+| C5 | Syscall per batch (buffer lettura, ACK raggruppati) | ✅ | ADR 0006, campagna 1 |
+| D1 | Ripresa con fotografia fresca | ✅ | `scada_sim_driver::resume`, contratto §5.1, `reconnection_with_partial_deltas_then_fresh_full_state`, `simulator_resume_procedure_reasserts_all_channels` |
+| D2 | Scadenza scrittura ACK / peer non leggente | ✅ | `ack_write_timeout_ms`, `non_reading_peer_is_closed_and_reconciles_by_reconnect` |
+| D3 | Takeover: chiusura del vecchio link | ✅ | `repeated_takeovers_do_not_exhaust_connection_slots` |
+| P2 (review) | Takeover di un link in backpressure che non legge: slot liberato subito | ✅ | ADR 0008 §P2, contratto §2.1, `takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly` (`current_thread` e `multi_thread(2)`) |
+| D4 | Ordine su runtime multicore | ✅ | `ingestion_modes_preserve_order_and_give_the_same_normalized_state`, suite runtime con `multi_thread:2` |
+| D5 | Replay deterministico dello stream sequenziato | ✅ | `capture.rs`, `captured_streams_replay_to_the_live_digest_in_every_mode` (replay su `Kernel` e sul kernel VS-001 congelato) |
+| D6 | Nessun timeout del dispositivo nel core | ✅ | Nessuna modifica a `apply` |
+| E1 | Bound configurativo `u128`, `memory_budget_bytes` | ✅ | `budget.rs` + test, ADR 0009, `--check-config` |
+| E2 | Directory/socket, symlink, cleanup, socket altrui | ✅ / 🟡 | `tests/socket_security.rs` (7 test). Il caso "socket stale di un altro utente" è eseguito solo come root (qui sì). Finestra `bind`→`chmod` documentata. |
+| E3 | Introspezione limitata, fuzz e malformati sui percorsi modificati, `max_frame_bytes` prima dell'allocazione | ✅ | idle timeout introspezione, `malformed_input_with_read_buffer` / `_unbuffered`, fuzz |
+| E4 | `cargo audit`, `cargo deny` | ✅ | `docs/benchmarks/results/vs002/supply-chain/` (0 advisory; licenze ok; 2 duplicati di versione segnalati come warning: `hashbrown`, `syn`) |
+
+### Test obbligatori (§8)
+
+| # | Test | Stato | Evidenza |
+|---|---|---|---|
+| 1 | Stesso stream → stesso snapshot/digest prima/dopo e con ogni worker count | ✅ | `core/equivalence.rs` (200 seed × 400 passi + proptest contro VS-001), `captured_streams_replay_to_the_live_digest_in_every_mode` |
+| 2 | Invalidi all-or-nothing, duplicati, gap, stale invariati | ✅ | Suite VS-001 invariata e verde; equivalenza differenziale |
+| 3 | Ordine ACK con 8/16 sorgenti, ricadute e takeover | ✅ | `ingestion_modes_preserve_order…` (16 sorgenti, takeover) |
+| 4 | `current_thread` e `multi_thread(1/2/4)`, stesso scenario normalizzato | ✅ | idem; CI con `multi_thread(2)` |
+| 5 | Client che non legge ACK | ✅ | `non_reading_peer_is_closed_and_reconciles_by_reconnect` |
+| 6 | Frame incompleti, oversize, malformati, EOF | ✅ | `malformed_input_*`, `rt/ipc.rs::malformed_frames…`, fuzz |
+| 7 | Reconnect con delta parziali → `Uncertain`; `FullState` fresco → `Good` | ✅ | `reconnection_with_partial_deltas_then_fresh_full_state` |
+| 8 | Replay continuo vs perdita di sequenza | ✅ | `continuous_replay_vs_sequence_loss` |
+| 9 | Sorgente rara vs alto volume, p50/p99/p99.9, niente fame/perdita | ✅ | campagna 3, `vs002.md` §5 (con i limiti statistici dichiarati) |
+| 10 | Memoria/limiti ≥ 60 s, RSS stabile, budget senza overflow | ✅ | `vs002.md` §9, `budget::tests` |
+| 11 | Terminazione del sequencer → arresto dell'host | ✅ | `sequencer_failure_stops_the_host` |
+| 12 | fmt, clippy, test, buf, fuzz, Miri | 🟡 | Tutti eseguiti tranne **Miri**: non eseguito (i moduli toccati sono codice safe senza `unsafe`; il valore di Miri qui sarebbe basso rispetto al costo). |
+
+### Definition of Done (§12)
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Branch e PR dedicata senza merge, SHA base/finale, changelog | ✅ | PR verso `vs-001`; SHA nella descrizione |
+| Build release e test verdi; fuzz ripetuto sui componenti modificati | ✅ | sopra |
+| `vs002.md`, log grezzi, analisi colli di bottiglia | ✅ | `docs/benchmarks/vs002.md`, `docs/benchmarks/results/vs002/` |
+| architecture, contract, traceability, ADR | ✅ | ADR 0004–0009 |
+| Tabella baseline/variante/risultato/variazione/regressioni/decisione con scarti | ✅ | `vs002.md` §1 |
+| Reconnect con snapshot fresco, non-reading client, limiti di memoria | ✅ | D1, D2, E1 |
+| Profili Micro e Server | ✅ | `config/profiles/`, test `shipped_profiles_are_valid_and_fit_their_budget`, demo nel README |
+| Limiti residui | ✅ | sotto |
+
+### Limiti e rischi residui (VS-002)
+
+1. **Nessuna durabilità**: stato solo in RAM, `APPLIED_VOLATILE`; la cattura `--capture-inputs` è diagnostica, non un journal.
+2. **Nessuna garanzia hard real-time**: latenze proporzionali al carico e alla coda; nessun isolamento fra sorgenti (la sorgente rara attende dietro le altre nella FIFO). Fairness per sorgente non implementata (proposta in `vs002.md` §5).
+3. **Nessuna ridondanza**: un processo, un sequencer.
+4. **ARM64: NOT TESTED ON HARDWARE** (né link né esecuzione).
+5. Misure su una sola VM con client co-residenti; `worker_threads = 2` è un valore di questa VM.
+6. Il thread sequencer è al 64 % con `mt2` a 125 kbatch/s: con più core per l'I/O diventerà il collo di bottiglia (single writer per progetto).
+7. Finestra `bind`→`chmod` del socket; controllo solo della directory immediata, non dei componenti superiori del percorso.
+8. Bound di memoria = allocazioni applicative con una stima fissa per task Tokio; non è un bound dell'RSS.
+9. D3 cambia un comportamento osservabile (il link superato viene chiuso subito, anche in backpressure, e i suoi ACK non ancora scritti possono andare persi); documentato nel contratto §2.1.
+10. Miri non eseguito.
+11. **Fairness per sorgente**: non implementata; serve un ADR dedicato (code per sorgente con round robin nel sequencer vs. quote per sorgente) prima di affrontarla. Follow-up indicato dalla review.
+12. **Raspberry Pi / ARM64 reale**: nessun test su hardware; da eseguire (build nativa, suite, campagna 3 ridotta, soak). Follow-up indicato dalla review.
+13. **Limiti funzionali**: nessuna durabilità né supervisione remota (`APPLIED_VOLATILE`, nessun journal, nessuna replica).
+14. Le prove di qualità (test, proptest, fuzz a tempo, benchmark su una VM) non sono una **prova formale**: riducono il rischio, non lo escludono.

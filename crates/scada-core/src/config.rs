@@ -144,16 +144,62 @@ pub struct SourceMeta {
     pub source_id: SourceId,
     pub name: String,
     channels: Vec<(ChannelId, u32)>,
+    /// C4: direct table `channel_id - dense_base -> tag index` (`NO_TAG` for holes), built
+    /// only when the channel numbering is compact (span <= 2 x count), so it costs at most
+    /// 8 bytes per channel. Empty for sparse sources, which keep the binary search.
+    dense_base: u32,
+    dense: Vec<u32>,
+}
+
+const NO_TAG: u32 = u32::MAX;
+
+/// Build the direct lookup table for a compact channel numbering, or an empty one.
+fn dense_table(channels: &[(ChannelId, u32)]) -> (u32, Vec<u32>) {
+    let (Some(&(lo, _)), Some(&(hi, _))) = (channels.first(), channels.last()) else {
+        return (0, Vec::new());
+    };
+    // Channels are sorted, so hi >= lo; checked arithmetic anyway (core lint policy).
+    let span = hi.0.checked_sub(lo.0).and_then(|d| d.checked_add(1)).map_or(u64::MAX, u64::from);
+    let limit = (channels.len() as u64).saturating_mul(2);
+    if span > limit {
+        return (0, Vec::new());
+    }
+    let mut t = vec![NO_TAG; span as usize];
+    for &(c, tag) in channels {
+        if let Some(slot) = c.0.checked_sub(lo.0).and_then(|i| t.get_mut(i as usize)) {
+            *slot = tag;
+        }
+    }
+    (lo.0, t)
 }
 
 impl SourceMeta {
-    /// Tag index bound to `channel_id`, if any (binary search, no hashing).
+    /// Tag index bound to `channel_id`, if any: direct table for compact numberings,
+    /// otherwise binary search (no hashing in either case).
+    #[inline]
     pub fn tag_index(&self, channel_id: ChannelId) -> Option<usize> {
+        if !self.dense.is_empty() {
+            let i = channel_id.0.checked_sub(self.dense_base)?;
+            return self.dense.get(i as usize).copied().filter(|&t| t != NO_TAG).map(|t| t as usize);
+        }
         self.channels
             .binary_search_by_key(&channel_id, |&(c, _)| c)
             .ok()
             .and_then(|i| self.channels.get(i))
             .map(|&(_, t)| t as usize)
+    }
+
+    /// Heap bytes of this source's metadata (channel table, dense index, name).
+    pub fn heap_bytes(&self) -> u128 {
+        (self.channels.capacity() as u128)
+            .saturating_mul(std::mem::size_of::<(ChannelId, u32)>() as u128)
+            .saturating_add((self.dense.capacity() as u128).saturating_mul(4))
+            .saturating_add(self.name.capacity() as u128)
+    }
+
+    /// Whether the direct lookup table is in use (diagnostics, tests).
+    pub fn has_dense_index(&self) -> bool {
+        !self.dense.is_empty()
     }
 
     /// Channels and tag indices, sorted by channel id.
@@ -324,7 +370,8 @@ impl ValidatedConfig {
                     u32::try_from(idx).map_err(|_| ConfigError::TooManyTags { count: idx, max: MAX_TAGS_CEILING })?;
                 channels.push((c.channel_id, idx32));
             }
-            sources.push(SourceMeta { source_id: s.source_id, name: s.name, channels });
+            let (dense_base, dense) = dense_table(&channels);
+            sources.push(SourceMeta { source_id: s.source_id, name: s.name, channels, dense_base, dense });
         }
         if let Some(pos) = bound.iter().position(|b| !*b) {
             let tag_id = tags.get(pos).map_or(TagId(0), |t| t.tag_id);
@@ -383,6 +430,21 @@ impl ValidatedConfig {
 
     pub fn tag_index(&self, tag_id: TagId) -> Option<usize> {
         self.tags.binary_search_by_key(&tag_id, |t| t.tag_id).ok()
+    }
+
+    /// Heap bytes of the validated configuration (tag and source metadata).
+    pub fn heap_bytes(&self) -> u128 {
+        let tags: u128 = self
+            .tags
+            .iter()
+            .map(|t| (std::mem::size_of::<TagMeta>() as u128).saturating_add(t.name.capacity() as u128))
+            .sum();
+        let sources: u128 = self
+            .sources
+            .iter()
+            .map(|s| (std::mem::size_of::<SourceMeta>() as u128).saturating_add(s.heap_bytes()))
+            .sum();
+        tags.saturating_add(sources)
     }
 
     pub fn source(&self, source_id: SourceId) -> Option<&SourceMeta> {

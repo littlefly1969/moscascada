@@ -10,6 +10,8 @@ message IntrospectRequest {
   bool include_tags = 1;
   // Must be 1. Also guarantees a non-empty encoding (zero-length frames are invalid).
   uint32 introspect_version = 2;
+  // VS-002: zero the diagnostic histograms after answering (benchmark warm-up).
+  bool reset_diagnostics = 3;
 }
 
 enum Quality {
@@ -56,6 +58,10 @@ message RuntimeCounters {
   uint64 input_queue_full_waits = 8;
   uint32 input_queue_capacity = 9;
   uint32 active_connections = 10;
+  // VS-002: connections closed because the peer did not read its ACKs in time.
+  uint64 ack_write_timeouts = 11;
+  // VS-002: connections closed because a newer link took over their source.
+  uint64 links_superseded = 12;
 }
 
 message IntrospectResponse {
@@ -66,4 +72,20 @@ message IntrospectResponse {
   repeated TagState tags = 5;
   repeated SourceState sources = 6;
   RuntimeCounters counters = 7;
+  // VS-002: stage timings, present only when the kernel runs with --diag.
+  repeated StageStats stages = 8;
+  // VS-002: scheduler of the I/O edge, e.g. "current_thread" or "multi_thread(2)".
+  string scheduler = 9;
+}
+
+// VS-002: summary of one diagnostic histogram. Values are nanoseconds,
+// wall clock, bucket resolution about 3 %.
+message StageStats {
+  string name = 1;
+  uint64 count = 2;
+  uint64 sum_ns = 3;
+  uint64 p50_ns = 4;
+  uint64 p99_ns = 5;
+  uint64 p999_ns = 6;
+  uint64 max_ns = 7;
 }

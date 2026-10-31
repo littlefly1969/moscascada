@@ -16,3 +16,11 @@ scada-sim-driver = { path = "../scada-sim-driver" }
 # The counting global allocator needs `unsafe impl GlobalAlloc` (ADR 0003). Benchmark-only
 # binary, never deployed; every other crate keeps `forbid(unsafe_code)`.
 unsafe_code = "deny"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+scada-runtime.workspace = true
+
+[[bench]]
+name = "micro"
+harness = false

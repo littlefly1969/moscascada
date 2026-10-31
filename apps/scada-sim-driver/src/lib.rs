@@ -179,6 +179,58 @@ impl Session {
     }
 }
 
+/// Outcome of [`resume`].
+#[derive(Debug)]
+pub struct ResumeReport {
+    /// ACKs of the replayed batches, in order.
+    pub replayed: Vec<InputAck>,
+    /// ACK of the reasserting FullState.
+    pub snapshot: InputAck,
+    /// Sequence to use for the next batch.
+    pub next_sequence: u64,
+}
+
+/// VS-002 (D1) reconnection procedure for a driver that reconnects WITHOUT restarting
+/// (same `source_epoch`), with no change to the wire protocol. Call it right after
+/// [`Session::connect`]:
+///
+/// 1. `unacked` holds the batches sent on the previous link whose ACK was not received,
+///    with their sequences, in order. Those at or below the kernel's
+///    `last_accepted_source_sequence` were applied (only their ACK was lost) and are not
+///    resent; the others are replayed in order and must come back `APPLIED_VOLATILE`.
+/// 2. A `FullState` with the device's current value of every channel is sent at the next
+///    sequence. Its continuity is `CONTINUOUS` (no gap) and it turns every channel of the
+///    source back to `Good`, including channels that did not change while the link was down
+///    and would otherwise stay `Uncertain` indefinitely.
+///
+/// Replayed duplicates never refresh quality (the kernel answers `DUPLICATE` without any
+/// state change), so old data is not mistaken for fresh evidence. Events that the device
+/// did not buffer between the last replayed batch and the snapshot are lost; the snapshot
+/// replaces the state, it cannot reconstruct them. A device that cannot produce a snapshot
+/// skips step 2; its unobserved channels then correctly stay `Uncertain`.
+pub fn resume(
+    s: &mut Session,
+    unacked: &[(u64, DriverMessage)],
+    snapshot: &[(u32, Val)],
+) -> Result<ResumeReport, ClientError> {
+    let mut replayed = Vec::new();
+    let last = if s.welcome.full_state_required { None } else { s.welcome.last_accepted_source_sequence };
+    let mut next = last.map_or(1, |l| l + 1);
+    if let Some(l) = last {
+        for (seq, msg) in unacked.iter().filter(|(q, _)| *q > l) {
+            let ack = s.request(msg)?;
+            next = seq + 1;
+            replayed.push(ack);
+        }
+    } else if let Some((seq, _)) = unacked.last() {
+        // No baseline (e.g. kernel restarted): deltas cannot be replayed; the snapshot
+        // re-establishes the baseline after the highest sequence ever used.
+        next = next.max(seq + 1);
+    }
+    let snapshot = s.request(&batch(BatchMode::FullState, next, snapshot))?;
+    Ok(ResumeReport { replayed, snapshot, next_sequence: next + 1 })
+}
+
 /// One-line, stable, human and machine readable rendering of an ACK.
 pub fn ack_line(a: &InputAck) -> String {
     let status = AckStatus::try_from(a.status).map_or("?", |s| s.as_str_name());

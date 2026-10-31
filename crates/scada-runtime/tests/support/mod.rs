@@ -30,6 +30,9 @@ pub struct Limits {
     pub max_inflight_per_connection: u32,
     pub handshake_timeout_ms: u64,
     pub frame_timeout_ms: u64,
+    pub ack_write_timeout_ms: u64,
+    pub read_buffer_bytes: u32,
+    pub ack_coalesce_max: u32,
 }
 
 impl Default for Limits {
@@ -41,6 +44,10 @@ impl Default for Limits {
             max_inflight_per_connection: 32,
             handshake_timeout_ms: 2_000,
             frame_timeout_ms: 2_000,
+            ack_write_timeout_ms: 5_000,
+            // Product defaults (VS-002).
+            read_buffer_bytes: 8_192,
+            ack_coalesce_max: 32,
         }
     }
 }
@@ -58,6 +65,9 @@ input_queue_capacity = {q}
 max_inflight_per_connection = {inf}
 handshake_timeout_ms = {ht}
 frame_timeout_ms = {ft}
+ack_write_timeout_ms = {wt}
+read_buffer_bytes = {rb}
+ack_coalesce_max = {co}
 
 [[tags]]
 id = 101
@@ -91,7 +101,7 @@ name = "restricted"
 authorized_uids = [4294967294]
 channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
 {load}"#,
-        load = (1..=8)
+        load = (1..=16)
             .map(|n| format!(
                 "\n[[tags]]\nid = {t}\nname = \"load_{n}\"\ntype = \"i64\"\n\n[[sources]]\nid = {s}\nname = \"load-{n}\"\nchannels = [ {{ channel = 1, tag = {t}, type = \"i64\" }} ]\n",
                 t = 300 + n,
@@ -105,6 +115,9 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         inf = l.max_inflight_per_connection,
         ht = l.handshake_timeout_ms,
         ft = l.frame_timeout_ms,
+        wt = l.ack_write_timeout_ms,
+        rb = l.read_buffer_bytes,
+        co = l.ack_coalesce_max,
     )
 }
 
@@ -137,6 +150,7 @@ impl KernelProc {
             .arg(&cfg)
             .arg("--introspection-socket")
             .arg(&intro)
+            .args(scheduler_args_from_env(extra))
             .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -176,8 +190,13 @@ impl KernelProc {
         let mut s = UnixStream::connect(&self.intro).expect("introspection socket");
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut w = Vec::new();
-        frame::write_message(&mut s, &IntrospectRequest { include_tags: true, introspect_version: 1 }, 1024, &mut w)
-            .unwrap();
+        frame::write_message(
+            &mut s,
+            &IntrospectRequest { include_tags: true, introspect_version: 1, ..Default::default() },
+            1024,
+            &mut w,
+        )
+        .unwrap();
         let mut r = Vec::new();
         frame::read_message(&mut s, frame::MAX_FRAME_BYTES_CEILING, &mut r).unwrap().expect("response")
     }
@@ -219,6 +238,30 @@ impl KernelProc {
         assert!(status.success(), "kernel exit {status:?}\n{err}");
         assert!(!err.contains("panicked"), "kernel panicked:\n{err}");
         err
+    }
+}
+
+/// `SCADA_TEST_SCHEDULER=current_thread|multi_thread:N` runs every multi-process test with
+/// that scheduler (CI runs the suite with `current_thread` and `multi_thread:2`). Tests that
+/// choose a scheduler explicitly (`--scheduler` in `extra`) are left alone.
+pub fn scheduler_args_from_env(extra: &[&str]) -> Vec<String> {
+    if extra.contains(&"--scheduler") {
+        return Vec::new();
+    }
+    match std::env::var("SCADA_TEST_SCHEDULER").ok().as_deref() {
+        None | Some("") | Some("current_thread") => Vec::new(),
+        Some(v) => {
+            let n = v.strip_prefix("multi_thread:").expect("SCADA_TEST_SCHEDULER=current_thread|multi_thread:N");
+            vec!["--scheduler".into(), "multi_thread".into(), "--worker-threads".into(), n.into()]
+        }
+    }
+}
+
+/// Scheduler arguments for an explicit mode: `None` = current_thread, `Some(n)` = multi_thread(n).
+pub fn scheduler_args(workers: Option<u32>) -> Vec<String> {
+    match workers {
+        None => vec!["--scheduler".into(), "current_thread".into()],
+        Some(n) => vec!["--scheduler".into(), "multi_thread".into(), "--worker-threads".into(), n.to_string()],
     }
 }
 

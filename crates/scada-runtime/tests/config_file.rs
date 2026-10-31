@@ -64,3 +64,64 @@ fn kernel_binary_exits_with_error_on_invalid_config() {
         .unwrap();
     assert!(out.status.success());
 }
+
+#[test]
+fn runtime_section_selects_scheduler_explicitly() {
+    use scada_runtime::config::Scheduler;
+    assert_eq!(config::parse(DEMO).unwrap().runtime.scheduler, Scheduler::CurrentThread);
+    let with = |rt: &str| config::parse(&format!("{DEMO}\n[runtime]\n{rt}\n"));
+    assert_eq!(
+        with("scheduler = \"multi_thread\"\nworker_threads = 2").unwrap().runtime.scheduler,
+        Scheduler::MultiThread { worker_threads: 2 }
+    );
+    assert_eq!(with("scheduler = \"current_thread\"").unwrap().runtime.scheduler, Scheduler::CurrentThread);
+    // No implicit expansion to all cores: multi_thread needs an explicit, bounded count.
+    for bad in [
+        "scheduler = \"multi_thread\"",
+        "scheduler = \"multi_thread\"\nworker_threads = 0",
+        "scheduler = \"multi_thread\"\nworker_threads = 65",
+        "scheduler = \"current_thread\"\nworker_threads = 2",
+        "scheduler = \"auto\"",
+        "workers = 2",
+    ] {
+        assert!(with(bad).is_err(), "{bad} accepted");
+    }
+}
+
+#[test]
+fn scheduler_override_on_command_line_is_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.toml");
+    std::fs::write(&good, DEMO).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_scada-kernel"))
+            .arg("--config")
+            .arg(&good)
+            .args(args)
+            .arg("--check-config")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--scheduler", "multi_thread", "--worker-threads", "4"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("scheduler=multi_thread(4)"));
+    assert_eq!(run(&["--scheduler", "multi_thread"]).status.code(), Some(2));
+    assert_eq!(run(&["--worker-threads", "2"]).status.code(), Some(2));
+}
+
+// VS-002 §10: both shipped profiles are valid, select the declared scheduler and fit
+// their explicit memory budget.
+#[test]
+fn shipped_profiles_are_valid_and_fit_their_budget() {
+    use scada_runtime::{budget, config::Scheduler};
+    for (text, sched) in [
+        (include_str!("../../../config/profiles/micro.toml"), Scheduler::CurrentThread),
+        (include_str!("../../../config/profiles/server.toml"), Scheduler::MultiThread { worker_threads: 2 }),
+    ] {
+        let c = config::parse(text).unwrap();
+        assert_eq!(c.runtime.scheduler, sched);
+        assert!(c.runtime.memory_budget_bytes.is_some());
+        let b = budget::compute(&c, false, false);
+        budget::check(&c, &b).unwrap();
+    }
+}

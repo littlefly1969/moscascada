@@ -6,7 +6,10 @@
 //! Tokio is used only here, at the I/O edge. The sequencer runs on a plain OS thread.
 #![forbid(unsafe_code)]
 
+pub mod budget;
+pub mod capture;
 pub mod config;
 pub mod convert;
+pub mod diag;
 pub mod sequencer;
 pub mod server;

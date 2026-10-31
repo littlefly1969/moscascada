@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use scada_core::{
     AppliedKind, Kernel, LinkState, ObservationBatch, Operation, Quality, SequencedInput, SourceId, TransitionOutcome,
@@ -15,7 +15,9 @@ use scada_protocol::driver_v1::{AckStatus, ErrorCode};
 use scada_protocol::introspect_v1 as ipb;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::capture::CaptureWriter;
 use crate::convert;
+use crate::diag::{self, Diag, Stage};
 
 /// Runtime counters. Metrics only: never part of the logical state or the digest.
 #[derive(Debug, Default)]
@@ -29,6 +31,10 @@ pub struct Counters {
     pub batches_rejected: AtomicU64,
     pub input_queue_full_waits: AtomicU64,
     pub active_connections: AtomicU64,
+    /// D2: connections closed because the peer did not read its ACKs in time.
+    pub ack_write_timeouts: AtomicU64,
+    /// D3: connections closed because a newer link took over their source.
+    pub links_superseded: AtomicU64,
 }
 
 impl Counters {
@@ -52,15 +58,36 @@ pub struct BatchReply {
     pub error_code: ErrorCode,
     pub continuity: Option<scada_protocol::driver_v1::Continuity>,
     pub last_accepted: Option<u64>,
+    /// When the sequencer sent the reply (diagnostics only, never part of the state).
+    pub sent: Option<Instant>,
 }
 
 /// Requests admitted into the bounded input queue.
 #[derive(Debug)]
 pub enum Request {
-    Connect { source_id: SourceId, source_epoch: u64, reply: oneshot::Sender<ConnectReply> },
-    Disconnect { source_id: SourceId, link_generation: u64 },
-    Batch { batch: ObservationBatch, reply: oneshot::Sender<BatchReply> },
-    Introspect { include_tags: bool, reply: oneshot::Sender<ipb::IntrospectResponse> },
+    /// `superseded` fires (with `()`) when a later link of the same source is welcomed
+    /// (D3), so an idle old session is closed instead of holding a connection slot.
+    Connect {
+        source_id: SourceId,
+        source_epoch: u64,
+        reply: oneshot::Sender<ConnectReply>,
+        superseded: oneshot::Sender<()>,
+    },
+    Disconnect {
+        source_id: SourceId,
+        link_generation: u64,
+    },
+    /// `submitted`: when the session started to submit it (diagnostics only).
+    Batch {
+        batch: ObservationBatch,
+        reply: oneshot::Sender<BatchReply>,
+        submitted: Option<Instant>,
+    },
+    Introspect {
+        include_tags: bool,
+        reset_diagnostics: bool,
+        reply: oneshot::Sender<ipb::IntrospectResponse>,
+    },
 }
 
 /// Static data the sequencer needs besides the kernel.
@@ -71,6 +98,13 @@ pub struct SequencerContext {
     pub input_queue_capacity: u32,
     /// Artificial delay after each request (saturation tests only; 0 in production).
     pub throttle: Duration,
+    /// Stage timings (`--diag`); `None` in production.
+    pub diag: Option<Arc<Diag>>,
+    /// Scheduler description reported by the introspection.
+    pub scheduler: String,
+    /// Test only (`--test-fail-sequencer-after N`): panic after N requests, to prove that
+    /// the host stops instead of running without its single writer.
+    pub fail_after: Option<u64>,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -80,52 +114,131 @@ pub fn spawn(
     kernel: Kernel,
     rx: mpsc::Receiver<Request>,
     ctx: SequencerContext,
+    capture: Option<CaptureWriter>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
     let (alive, stopped) = oneshot::channel::<()>();
     let handle = thread::Builder::new().name("scada-sequencer".into()).spawn(move || {
         let _alive = alive;
-        run(kernel, rx, ctx)
+        run(kernel, rx, ctx, capture)
     })?;
     Ok((handle, stopped))
 }
 
-fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContext) -> Kernel {
-    let mut next_generation: u64 = 0;
+/// Runtime-only state of the sequencer (never part of the kernel state or digest).
+struct Links {
+    next_generation: u64,
+    /// D5 capture of every input handed to `apply` (diagnostics only).
+    capture: Option<CaptureWriter>,
+    handled: u64,
+    /// Per configured source (config order): active link generation and its takeover signal.
+    active: Vec<Option<(u64, oneshot::Sender<()>)>>,
+}
+
+fn run(
+    mut kernel: Kernel,
+    mut rx: mpsc::Receiver<Request>,
+    ctx: SequencerContext,
+    capture: Option<CaptureWriter>,
+) -> Kernel {
+    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new() };
+    links.active.resize_with(kernel.config().sources().len(), || None);
+    // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
+    // N = 4/16/64) was measured in VS-002 and removed: no repeatable effect on throughput
+    // or on the rare source's latency (ADR 0005).
     while let Some(req) = rx.blocking_recv() {
-        match req {
-            Request::Connect { source_id, source_epoch, reply } => {
-                let r = connect(&mut kernel, &mut next_generation, source_id, source_epoch);
-                // A dropped receiver means the session died; its link will be disconnected
-                // by that session's cleanup, which is always queued after this request.
-                let _ = reply.send(r);
-            }
-            Request::Disconnect { source_id, link_generation } => {
-                let Some(operation_sequence) = kernel.next_operation_sequence() else {
-                    eprintln!("sequencer: operation sequence exhausted; disconnect of {source_id} not applied");
-                    continue;
-                };
-                let op = Operation::SourceDisconnected { source_id, link_generation };
-                if let Err(e) = kernel.apply(SequencedInput { operation_sequence, operation: op }) {
-                    eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
-                }
-            }
-            Request::Batch { batch, reply } => {
-                let r = apply_batch(&mut kernel, batch, &ctx.counters);
-                // ACK only after `apply` returned; if the session is gone the ACK is moot.
-                let _ = reply.send(r);
-            }
-            Request::Introspect { include_tags, reply } => {
-                let _ = reply.send(introspect(&kernel, include_tags, &ctx));
-            }
-        }
-        if !ctx.throttle.is_zero() {
-            thread::sleep(ctx.throttle);
-        }
+        handle(&mut kernel, &mut links, req, &ctx);
     }
     kernel
 }
 
-fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, source_epoch: u64) -> ConnectReply {
+/// The only place where the sequencer calls `Kernel::apply`.
+fn apply(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    input: SequencedInput,
+) -> Result<TransitionOutcome, scada_core::ApplyError> {
+    if let Some(c) = capture {
+        c.record(&input);
+    }
+    kernel.apply(input)
+}
+
+fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerContext) {
+    links.handled = links.handled.saturating_add(1);
+    if ctx.fail_after.is_some_and(|n| links.handled > n) {
+        panic!("--test-fail-sequencer-after reached: simulated sequencer failure");
+    }
+    match req {
+        Request::Connect { source_id, source_epoch, reply, superseded } => {
+            let r = connect(kernel, &mut links.capture, &mut links.next_generation, source_id, source_epoch);
+            if let ConnectReply::Welcome { link_generation, .. } = r
+                && let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
+                && let Some((_, old)) = slot.replace((link_generation, superseded))
+            {
+                // D3: tell the previous link of this source to close. Its own
+                // Disconnect stays queued after its batches and is ignored as stale.
+                let _ = old.send(());
+            }
+            // A dropped receiver means the session died; its link will be disconnected
+            // by that session's cleanup, which is always queued after this request.
+            let _ = reply.send(r);
+        }
+        Request::Disconnect { source_id, link_generation } => {
+            if let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
+                && slot.as_ref().is_some_and(|(g, _)| *g == link_generation)
+            {
+                *slot = None;
+            }
+            let Some(operation_sequence) = kernel.next_operation_sequence() else {
+                eprintln!("sequencer: operation sequence exhausted; disconnect of {source_id} not applied");
+                return;
+            };
+            let op = Operation::SourceDisconnected { source_id, link_generation };
+            if let Err(e) = apply(kernel, &mut links.capture, SequencedInput { operation_sequence, operation: op }) {
+                eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
+            }
+        }
+        Request::Batch { batch, reply, submitted } => {
+            let d = ctx.diag.as_deref();
+            let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
+            if let (Some(d), Some(t)) = (d, submitted) {
+                d.since(Stage::QueueWait, t);
+                if probe {
+                    d.since(Stage::ProbeQueueWait, t);
+                }
+            }
+            let t0 = diag::now(d);
+            let mut r = apply_batch(kernel, &mut links.capture, batch, &ctx.counters);
+            if let (Some(d), Some(t0)) = (d, t0) {
+                d.since(Stage::Apply, t0);
+                r.sent = Some(Instant::now());
+            }
+            // ACK only after `apply` returned; if the session is gone the ACK is moot.
+            let _ = reply.send(r);
+        }
+        Request::Introspect { include_tags, reset_diagnostics, reply } => {
+            // Everything applied before this answer is on disk for a test that replays it.
+            if let Some(c) = &mut links.capture {
+                c.flush();
+            }
+            let _ = reply.send(introspect(kernel, include_tags, ctx));
+            if reset_diagnostics && let Some(d) = &ctx.diag {
+                d.reset();
+            }
+        }
+    }
+    if !ctx.throttle.is_zero() {
+        thread::sleep(ctx.throttle);
+    }
+}
+
+fn connect(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    next_generation: &mut u64,
+    source_id: SourceId,
+    source_epoch: u64,
+) -> ConnectReply {
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
         return ConnectReply::Rejected(ErrorCode::OperationSequenceExhausted);
     };
@@ -133,7 +246,7 @@ fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, 
         return ConnectReply::Rejected(ErrorCode::Internal);
     };
     let op = Operation::SourceConnected { source_id, link_generation, source_epoch };
-    match kernel.apply(SequencedInput { operation_sequence, operation: op }) {
+    match apply(kernel, capture, SequencedInput { operation_sequence, operation: op }) {
         Ok(TransitionOutcome::Applied {
             kind: AppliedKind::Connected { full_state_required, last_accepted_source_sequence, .. },
             ..
@@ -149,7 +262,12 @@ fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, 
     }
 }
 
-fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters) -> BatchReply {
+fn apply_batch(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    batch: ObservationBatch,
+    counters: &Counters,
+) -> BatchReply {
     let source_id = batch.source_id;
     let last = |k: &Kernel| k.source_status(source_id).and_then(|s| s.last_accepted_source_sequence);
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
@@ -160,9 +278,11 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
             error_code: ErrorCode::OperationSequenceExhausted,
             continuity: None,
             last_accepted: last(kernel),
+            sent: None,
         };
     };
-    let outcome = kernel.apply(SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
+    let outcome =
+        apply(kernel, capture, SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
     match outcome {
         Ok(TransitionOutcome::Applied { operation_sequence, kind }) => {
             Counters::inc(&counters.batches_applied);
@@ -176,6 +296,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Unspecified,
                 continuity,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Ok(TransitionOutcome::Duplicate { .. }) => {
@@ -186,6 +307,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Unspecified,
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Ok(TransitionOutcome::Ignored(_)) => {
@@ -196,6 +318,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Internal,
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Err(e) => {
@@ -206,6 +329,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: convert::error_code(&e),
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
     }
@@ -269,6 +393,26 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             input_queue_full_waits: ld(&c.input_queue_full_waits),
             input_queue_capacity: ctx.input_queue_capacity,
             active_connections: u32::try_from(ld(&c.active_connections)).unwrap_or(u32::MAX),
+            ack_write_timeouts: ld(&c.ack_write_timeouts),
+            links_superseded: ld(&c.links_superseded),
         }),
+        stages: ctx
+            .diag
+            .as_deref()
+            .map(|d| {
+                d.summaries()
+                    .map(|(s, m)| ipb::StageStats {
+                        name: s.name().to_owned(),
+                        count: m.count,
+                        sum_ns: m.sum_ns,
+                        p50_ns: m.p50_ns,
+                        p99_ns: m.p99_ns,
+                        p999_ns: m.p999_ns,
+                        max_ns: m.max_ns,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        scheduler: ctx.scheduler.clone(),
     }
 }

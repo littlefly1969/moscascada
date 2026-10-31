@@ -1,0 +1,10 @@
+decode/fresh/1          time:   [100.18 ns 108.89 ns 117.77 ns]
+decode/reuse/1          time:   [54.125 ns 55.521 ns 57.156 ns]
+decode/reuse_nolimit/1  time:   [54.166 ns 55.740 ns 57.476 ns]
+decode/fresh/32         time:   [1.2796 µs 1.3059 µs 1.3413 µs]
+decode/reuse/32         time:   [981.90 ns 1.0379 µs 1.0971 µs]
+decode/reuse_nolimit/32 time:   [976.02 ns 1.0421 µs 1.1139 µs]
+decode/fresh/128        time:   [4.3671 µs 4.6261 µs 4.9343 µs]
+decode/reuse/128        time:   [3.2298 µs 3.3074 µs 3.4289 µs]
+decode/reuse_nolimit/128
+                        time:   [3.3256 µs 3.3999 µs 3.4928 µs]
