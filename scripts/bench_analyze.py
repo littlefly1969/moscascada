@@ -26,6 +26,11 @@ for line in open(a.file):
     if not line.startswith("round="):
         continue
     kv = dict(x.split("=", 1) for x in line.split() if "=" in x)
+    # cpu_threads=main:97,seq:33,io:120 -> cpu_main, cpu_seq, cpu_io (percent of one core)
+    for part in kv.get("cpu_threads", "").split(","):
+        if ":" in part:
+            g, v = part.split(":", 1)
+            kv[f"cpu_{g}"] = v
     spec, var = kv["spec"], kv["variant"]
     if spec not in order_specs:
         order_specs.append(spec)

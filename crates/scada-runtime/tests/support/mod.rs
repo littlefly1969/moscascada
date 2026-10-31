@@ -32,6 +32,7 @@ pub struct Limits {
     pub frame_timeout_ms: u64,
     pub ack_write_timeout_ms: u64,
     pub read_buffer_bytes: u32,
+    pub ack_coalesce_max: u32,
 }
 
 impl Default for Limits {
@@ -44,7 +45,9 @@ impl Default for Limits {
             handshake_timeout_ms: 2_000,
             frame_timeout_ms: 2_000,
             ack_write_timeout_ms: 5_000,
-            read_buffer_bytes: 0,
+            // Product defaults (VS-002).
+            read_buffer_bytes: 8_192,
+            ack_coalesce_max: 32,
         }
     }
 }
@@ -64,6 +67,7 @@ handshake_timeout_ms = {ht}
 frame_timeout_ms = {ft}
 ack_write_timeout_ms = {wt}
 read_buffer_bytes = {rb}
+ack_coalesce_max = {co}
 
 [[tags]]
 id = 101
@@ -113,6 +117,7 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         ft = l.frame_timeout_ms,
         wt = l.ack_write_timeout_ms,
         rb = l.read_buffer_bytes,
+        co = l.ack_coalesce_max,
     )
 }
 

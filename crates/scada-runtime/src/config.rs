@@ -45,13 +45,19 @@ struct FileIpc {
     /// C5: per-connection read buffer (0 = unbuffered, VS-001 behaviour).
     #[serde(default = "d_read_buffer")]
     read_buffer_bytes: u32,
+    /// C5: at most this many already-available ACKs per socket write (1 = one per write).
+    #[serde(default = "d_ack_coalesce")]
+    ack_coalesce_max: u32,
 }
 
 fn d_write_timeout() -> u64 {
     5_000
 }
 fn d_read_buffer() -> u32 {
-    0
+    8_192
+}
+fn d_ack_coalesce() -> u32 {
+    32
 }
 
 fn d_max_frame() -> u32 {
@@ -99,6 +105,8 @@ struct FileRuntime {
     worker_threads: Option<u32>,
     /// Maximum requests the sequencer takes from its queue per wake-up (C1). 1 = VS-001.
     sequencer_drain_max: Option<u32>,
+    /// E1: refuse startup if the configured worst-case allocation bound exceeds this.
+    memory_budget_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -157,7 +165,7 @@ pub struct IpcLimits {
     pub frame_timeout_ms: u64,
     pub ack_write_timeout_ms: u64,
     pub read_buffer_bytes: u32,
-    /// ACKs per socket write (C5). Not in the file: an A/B switch of the benchmark only.
+    /// ACKs per socket write (C5): only ACKs already available are grouped, never waited for.
     pub ack_coalesce_max: u32,
 }
 
@@ -210,6 +218,8 @@ pub struct RuntimeSettings {
     /// reordered. Taken requests leave the queue, so up to `input_queue_capacity +
     /// sequencer_drain_max` requests can be admitted at once (memory bound, ADR 0005).
     pub sequencer_drain_max: u32,
+    /// E1: optional ceiling for the configured worst-case allocation bound (`budget.rs`).
+    pub memory_budget_bytes: Option<u64>,
 }
 
 /// Upper bound for `sequencer_drain_max`.
@@ -217,7 +227,7 @@ pub const MAX_SEQUENCER_DRAIN: u32 = 1024;
 
 impl Default for RuntimeSettings {
     fn default() -> Self {
-        RuntimeSettings { scheduler: Scheduler::CurrentThread, sequencer_drain_max: 1 }
+        RuntimeSettings { scheduler: Scheduler::CurrentThread, sequencer_drain_max: 1, memory_budget_bytes: None }
     }
 }
 
@@ -300,7 +310,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         frame_timeout_ms: ipc.frame_timeout_ms,
         ack_write_timeout_ms: ipc.ack_write_timeout_ms,
         read_buffer_bytes: ipc.read_buffer_bytes,
-        ack_coalesce_max: 1,
+        ack_coalesce_max: ipc.ack_coalesce_max,
     };
     let range = |name: &str, v: u64, lo: u64, hi: u64| {
         if v < lo || v > hi { Err(LoadError::Ipc(format!("{name}={v} outside {lo}..={hi}"))) } else { Ok(()) }
@@ -313,6 +323,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
     range("frame_timeout_ms", limits.frame_timeout_ms, 1, 600_000)?;
     range("ack_write_timeout_ms", limits.ack_write_timeout_ms, 1, 600_000)?;
     range("read_buffer_bytes", limits.read_buffer_bytes.into(), 0, 1 << 20)?;
+    range("ack_coalesce_max", limits.ack_coalesce_max.into(), 1, 1024)?;
     let needed = f
         .core
         .max_observations_per_batch
@@ -329,7 +340,8 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         Scheduler::parse(f.runtime.scheduler.as_deref().unwrap_or("current_thread"), f.runtime.worker_threads)
             .map_err(LoadError::Runtime)?;
     let sequencer_drain_max = check_drain(f.runtime.sequencer_drain_max.unwrap_or(1)).map_err(LoadError::Runtime)?;
-    let runtime = RuntimeSettings { scheduler, sequencer_drain_max };
+    let runtime =
+        RuntimeSettings { scheduler, sequencer_drain_max, memory_budget_bytes: f.runtime.memory_budget_bytes };
 
     let spec = ConfigSpec {
         limits: CoreLimits { max_observations_per_batch: f.core.max_observations_per_batch },

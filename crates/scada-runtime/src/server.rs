@@ -45,19 +45,61 @@ pub fn new_instance_id() -> io::Result<[u8; KERNEL_INSTANCE_ID_LEN]> {
     Ok(id)
 }
 
-/// Bind a Unix socket with restricted permissions. Refuses to replace a live socket.
-pub fn bind_socket(path: &Path, mode: u32, group: Option<u32>) -> io::Result<UnixListener> {
-    if let Some(dir) = path.parent()
-        && !dir.as_os_str().is_empty()
-        && !dir.exists()
-    {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+/// Effective uid of this process (owner of the files it creates), without libc.
+fn effective_uid() -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata("/proc/self")?.uid())
+}
+
+/// E2: the directory that holds a socket must be a real directory (not a symlink), owned
+/// by this process's user or by root, and not writable by group or others. Otherwise
+/// another user could replace or pre-create the socket (or its directory) between our
+/// checks and our bind, or delete it later.
+pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(dir)?;
+    let deny = |why: &str| {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("socket directory {}: {why}", dir.display())))
+    };
+    if m.file_type().is_symlink() {
+        return deny("is a symbolic link");
     }
+    if !m.is_dir() {
+        return deny("is not a directory");
+    }
+    let me = effective_uid()?;
+    if m.uid() != me && m.uid() != 0 {
+        return deny(&format!("owned by uid {}, not by this user ({me}) or root", m.uid()));
+    }
+    if m.mode() & 0o022 != 0 {
+        return deny(&format!("mode {:o} is writable by group or others; use a private directory", m.mode() & 0o7777));
+    }
+    Ok(())
+}
+
+/// Bind a Unix socket with restricted permissions. Refuses to replace a live socket, a
+/// socket of another user or anything that is not a socket (E2).
+pub fn bind_socket(path: &Path, mode: u32, group: Option<u32>) -> io::Result<(UnixListener, SocketGuard)> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if !dir.exists() {
+        // Created with its final mode (no window with a umask-dependent mode).
+        std::fs::DirBuilder::new().recursive(true).mode(0o750).create(&dir)?;
+    }
+    check_socket_dir(&dir)?;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
             if std::os::unix::net::UnixStream::connect(path).is_ok() {
                 return Err(io::Error::new(io::ErrorKind::AddrInUse, "a kernel is already listening on this socket"));
+            }
+            if m.uid() != effective_uid()? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("stale socket {} belongs to uid {}; not removing it", path.display(), m.uid()),
+                ));
             }
             std::fs::remove_file(path)?;
         }
@@ -66,21 +108,53 @@ pub fn bind_socket(path: &Path, mode: u32, group: Option<u32>) -> io::Result<Uni
         Err(e) => return Err(e),
     }
     let std_listener = std::os::unix::net::UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    if let Some(gid) = group {
-        std::os::unix::fs::chown(path, None, Some(gid))?;
+    let secure = || -> io::Result<()> {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        if let Some(gid) = group {
+            std::os::unix::fs::chown(path, None, Some(gid))?;
+        }
+        Ok(())
+    };
+    if let Err(e) = secure() {
+        let _ = std::fs::remove_file(path);
+        return Err(e);
     }
+    // After chmod/chown: they change the ctime the guard records.
+    let guard = SocketGuard::new(path.to_path_buf())?;
     std_listener.set_nonblocking(true)?;
-    UnixListener::from_std(std_listener)
+    Ok((UnixListener::from_std(std_listener)?, guard))
 }
 
-/// Removes the socket file when dropped.
+/// Removes the socket file when dropped — only if it is still the very file this process
+/// bound (a socket with the same device, inode and change time), never a file another
+/// process put there later. The change time guards against inode reuse after the
+/// original was deleted.
 #[derive(Debug)]
-pub struct SocketGuard(pub PathBuf);
+pub struct SocketGuard {
+    path: PathBuf,
+    id: (u64, u64, i64, i64),
+}
+
+fn file_id(m: &std::fs::Metadata) -> (u64, u64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
+}
+
+impl SocketGuard {
+    fn new(path: PathBuf) -> io::Result<SocketGuard> {
+        let m = std::fs::symlink_metadata(&path)?;
+        Ok(SocketGuard { path, id: file_id(&m) })
+    }
+}
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Ok(m) = std::fs::symlink_metadata(&self.path)
+            && m.file_type().is_socket()
+            && file_id(&m) == self.id
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -709,7 +783,10 @@ async fn introspection_session(server: &Server, stream: UnixStream) {
     let ft = Duration::from_millis(server.config.limits.frame_timeout_ms);
     let (mut rd, mut wr) = stream.into_split();
     let (mut buf, mut scratch) = (Vec::new(), Vec::new());
-    while let Ok(true) = read_frame(&mut rd, max, &mut buf, ft, None).await {
+    // E3: an idle introspection client is dropped after the handshake timeout, so the four
+    // permits cannot be held forever; requests are stop-and-wait (at most 4 queued).
+    let idle = Duration::from_millis(server.config.limits.handshake_timeout_ms);
+    while let Ok(Ok(true)) = timeout(idle, read_frame(&mut rd, max, &mut buf, ft, None)).await {
         let Ok(req) = ipb::IntrospectRequest::decode(buf.as_slice()) else { return };
         if req.introspect_version != 1 {
             return;
@@ -726,8 +803,9 @@ async fn introspection_session(server: &Server, stream: UnixStream) {
         }
         let Ok(resp) = rx.await else { return };
         // Responses can exceed the driver frame limit with many tags; use the ceiling.
+        let wt = Duration::from_millis(server.config.limits.ack_write_timeout_ms);
         if frame::encode_frame(&resp, frame::MAX_FRAME_BYTES_CEILING, &mut scratch).is_err()
-            || wr.write_all(&scratch).await.is_err()
+            || timed_write(&mut wr, &scratch, wt).await.is_err()
         {
             return;
         }

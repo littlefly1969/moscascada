@@ -15,6 +15,7 @@ use scada_protocol::driver_v1::{AckStatus, ErrorCode};
 use scada_protocol::introspect_v1 as ipb;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::capture::CaptureWriter;
 use crate::convert;
 use crate::diag::{self, Diag, Stage};
 
@@ -103,6 +104,9 @@ pub struct SequencerContext {
     pub scheduler: String,
     /// Requests taken from the queue per wake-up (>= 1).
     pub drain_max: u32,
+    /// Test only (`--test-fail-sequencer-after N`): panic after N requests, to prove that
+    /// the host stops instead of running without its single writer.
+    pub fail_after: Option<u64>,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -112,11 +116,12 @@ pub fn spawn(
     kernel: Kernel,
     rx: mpsc::Receiver<Request>,
     ctx: SequencerContext,
+    capture: Option<CaptureWriter>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
     let (alive, stopped) = oneshot::channel::<()>();
     let handle = thread::Builder::new().name("scada-sequencer".into()).spawn(move || {
         let _alive = alive;
-        run(kernel, rx, ctx)
+        run(kernel, rx, ctx, capture)
     })?;
     Ok((handle, stopped))
 }
@@ -124,12 +129,20 @@ pub fn spawn(
 /// Runtime-only state of the sequencer (never part of the kernel state or digest).
 struct Links {
     next_generation: u64,
+    /// D5 capture of every input handed to `apply` (diagnostics only).
+    capture: Option<CaptureWriter>,
+    handled: u64,
     /// Per configured source (config order): active link generation and its takeover signal.
     active: Vec<Option<(u64, oneshot::Sender<()>)>>,
 }
 
-fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContext) -> Kernel {
-    let mut links = Links { next_generation: 0, active: Vec::new() };
+fn run(
+    mut kernel: Kernel,
+    mut rx: mpsc::Receiver<Request>,
+    ctx: SequencerContext,
+    capture: Option<CaptureWriter>,
+) -> Kernel {
+    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new() };
     links.active.resize_with(kernel.config().sources().len(), || None);
     let drain = ctx.drain_max.max(1) as usize;
     if drain == 1 {
@@ -161,10 +174,26 @@ fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContex
     kernel
 }
 
+/// The only place where the sequencer calls `Kernel::apply`.
+fn apply(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    input: SequencedInput,
+) -> Result<TransitionOutcome, scada_core::ApplyError> {
+    if let Some(c) = capture {
+        c.record(&input);
+    }
+    kernel.apply(input)
+}
+
 fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerContext) {
+    links.handled = links.handled.saturating_add(1);
+    if ctx.fail_after.is_some_and(|n| links.handled > n) {
+        panic!("--test-fail-sequencer-after reached: simulated sequencer failure");
+    }
     match req {
         Request::Connect { source_id, source_epoch, reply, superseded } => {
-            let r = connect(kernel, &mut links.next_generation, source_id, source_epoch);
+            let r = connect(kernel, &mut links.capture, &mut links.next_generation, source_id, source_epoch);
             if let ConnectReply::Welcome { link_generation, .. } = r
                 && let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
                 && let Some((_, old)) = slot.replace((link_generation, superseded))
@@ -188,7 +217,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 return;
             };
             let op = Operation::SourceDisconnected { source_id, link_generation };
-            if let Err(e) = kernel.apply(SequencedInput { operation_sequence, operation: op }) {
+            if let Err(e) = apply(kernel, &mut links.capture, SequencedInput { operation_sequence, operation: op }) {
                 eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
             }
         }
@@ -202,7 +231,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 }
             }
             let t0 = diag::now(d);
-            let mut r = apply_batch(kernel, batch, &ctx.counters);
+            let mut r = apply_batch(kernel, &mut links.capture, batch, &ctx.counters);
             if let (Some(d), Some(t0)) = (d, t0) {
                 d.since(Stage::Apply, t0);
                 r.sent = Some(Instant::now());
@@ -211,6 +240,10 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             let _ = reply.send(r);
         }
         Request::Introspect { include_tags, reset_diagnostics, reply } => {
+            // Everything applied before this answer is on disk for a test that replays it.
+            if let Some(c) = &mut links.capture {
+                c.flush();
+            }
             let _ = reply.send(introspect(kernel, include_tags, ctx));
             if reset_diagnostics && let Some(d) = &ctx.diag {
                 d.reset();
@@ -222,7 +255,13 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
     }
 }
 
-fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, source_epoch: u64) -> ConnectReply {
+fn connect(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    next_generation: &mut u64,
+    source_id: SourceId,
+    source_epoch: u64,
+) -> ConnectReply {
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
         return ConnectReply::Rejected(ErrorCode::OperationSequenceExhausted);
     };
@@ -230,7 +269,7 @@ fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, 
         return ConnectReply::Rejected(ErrorCode::Internal);
     };
     let op = Operation::SourceConnected { source_id, link_generation, source_epoch };
-    match kernel.apply(SequencedInput { operation_sequence, operation: op }) {
+    match apply(kernel, capture, SequencedInput { operation_sequence, operation: op }) {
         Ok(TransitionOutcome::Applied {
             kind: AppliedKind::Connected { full_state_required, last_accepted_source_sequence, .. },
             ..
@@ -246,7 +285,12 @@ fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, 
     }
 }
 
-fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters) -> BatchReply {
+fn apply_batch(
+    kernel: &mut Kernel,
+    capture: &mut Option<CaptureWriter>,
+    batch: ObservationBatch,
+    counters: &Counters,
+) -> BatchReply {
     let source_id = batch.source_id;
     let last = |k: &Kernel| k.source_status(source_id).and_then(|s| s.last_accepted_source_sequence);
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
@@ -260,7 +304,8 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
             sent: None,
         };
     };
-    let outcome = kernel.apply(SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
+    let outcome =
+        apply(kernel, capture, SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
     match outcome {
         Ok(TransitionOutcome::Applied { operation_sequence, kind }) => {
             Counters::inc(&counters.batches_applied);

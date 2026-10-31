@@ -1,6 +1,8 @@
-# Contratto semantico VS-001
+# Contratto semantico (VS-001, aggiornato in VS-002)
 
-Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002.
+Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009.
+
+**VS-002 non modifica lo schema `scada.driver.v1`** (nessun campo, messaggio o valore enum nuovo; `buf breaking` contro la baseline v1.0 è verde) né la semantica di `Kernel::apply`, di `APPLIED_VOLATILE`, della deduplicazione e della qualità. Cambiano solo due comportamenti del runtime, entrambi espressi con messaggi già esistenti (§2.1), e si aggiunge una procedura raccomandata per il driver (§5.1). Lo schema di sola diagnostica `scada.introspect.v1` riceve solo campi additivi.
 
 ## 1. Identità
 
@@ -26,6 +28,11 @@ Relazione `driver_id` ↔ `source_id`: una connessione = una sessione logica = u
 6. Errori di framing o di decode dopo l'handshake: `ProtocolError` e chiusura (lo stream potrebbe essere desincronizzato).
 
 Se arriva un `Hello` per una sorgente già collegata, il nuovo link sostituisce il precedente (takeover): i batch successivi del link vecchio ricevono `REJECTED/LINK_SUPERSEDED` e la sua disconnessione è ignorata.
+
+### 2.1 Cambiamenti di comportamento del runtime in VS-002 (compatibili)
+
+- **Takeover (D3).** Quando il nuovo link riceve il `Welcome`, il link precedente della stessa sorgente riceve, dopo gli ACK dei batch già sottomessi, un `ProtocolError{error_code = LINK_SUPERSEDED}` e viene chiuso, anche se è inattivo. In VS-001 restava aperto (e occupava uno slot di connessione) finché non inviava un altro batch. Un batch del vecchio link che corre in parallelo al takeover riceve, come prima, `REJECTED/LINK_SUPERSEDED`. In entrambi i casi nessun dato del vecchio link è applicato dopo il takeover. Un driver VS-001 gestisce già `ProtocolError` come errore fatale della connessione.
+- **Peer che non legge (D2).** Ogni scrittura verso il driver (ACK, `Welcome`, rifiuti) deve completarsi entro `ack_write_timeout_ms` (default 5000 ms, `[ipc]`); altrimenti la connessione è chiusa senza ulteriori messaggi. Gli input già applicati restano applicati e i loro ACK sono persi; il driver riconcilia riconnettendosi (§5.1). Nessun ACK viene inventato o anticipato.
 
 ## 3. Ingresso e ACK
 
@@ -79,6 +86,18 @@ Deduplicazione: solo l'ultimo batch accettato per sorgente (copia canonica). Non
 4. Se `full_state_required` è vero (kernel riavviato: nuovo `kernel_instance_id`, oppure epoca nuova), invia un `FullState`.
 5. Dopo il reconnect i tag restano `Uncertain(SourceUnavailable)` finché una nuova osservazione valida non li aggiorna.
 
+### 5.1 Ripresa con fotografia fresca (VS-002, D1)
+
+Con i soli passi precedenti, un dispositivo che dopo il reconnect invia `Delta` solo per i canali che cambiano lascia gli altri tag `Uncertain` indefinitamente. Procedura raccomandata (implementata in `scada_sim_driver::resume`, senza alcuna modifica del protocollo):
+
+1. Passi 1–3 sopra: ritrasmissione, in ordine, dei soli batch non confermati con `seq > L`.
+2. Subito dopo, un `FullState` con il **valore corrente** di tutti i canali, con la sequenza successiva. Continuità `CONTINUOUS` (nessun buco) e tutti i tag della sorgente tornano `Good`, compresi quelli non cambiati.
+3. Un batch ritrasmesso già applicato (`seq == L`) produce `DUPLICATE` e **non** rinfresca la qualità: un dato vecchio non diventa prova di freschezza.
+4. Eventi intermedi che il dispositivo non ha conservato fra l'ultimo batch ritrasmesso e la fotografia sono persi: la fotografia sostituisce lo stato ma non li ricostruisce. Se il dispositivo ha perso anche la sequenza (nuova epoca o buco), la fotografia è `BASELINE_ESTABLISHED` o `RESYNCHRONIZED`, che dichiarano esplicitamente la discontinuità.
+5. Un dispositivo che non può produrre una fotografia salta il passo 2: i suoi canali non osservati restano, correttamente, `Uncertain`.
+
+Test: `vs002.rs::reconnection_with_partial_deltas_then_fresh_full_state`, `simulator_resume_procedure_reasserts_all_channels`, `continuous_replay_vs_sequence_loss`.
+
 ## 6. Qualità
 
 | Evento | Tag della sorgente con valore | Tag senza valore |
@@ -105,3 +124,5 @@ Un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i
 - I4 Le revisioni non diminuiscono mai; cambiano solo se cambia `(value, quality)`.
 - I5 Nessuna struttura del core cresce oltre la capacità iniziale.
 - I6 Ordine di applicazione dei tag e digest indipendenti dall'ordine delle osservazioni nel batch.
+- I7 (VS-002) Equivalenza: il `Kernel::apply` ottimizzato dà lo stesso esito e lo stesso snapshot logico della copia congelata di VS-001 (`tests/reference/vs001_kernel.rs`) su ogni input (`tests/equivalence.rs`, e sugli stream catturati da kernel reali in `vs002.rs`).
+- I8 (VS-002) Per ogni sorgente, ACK nello stesso ordine dei batch e `operation_sequence` strettamente crescenti, con qualunque scheduler; nessun `operation_sequence` assegnato due volte.
