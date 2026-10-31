@@ -17,7 +17,7 @@ jobs:
       - name: Checks (includes runtime tests in release under multi_thread(2))
         run: ./scripts/check.sh
       - name: Runtime tests in release, current_thread
-        run: cargo test --release -p scada-runtime
+        run: cargo build --release -p scada-sim-driver && cargo test --release -p scada-runtime
 
   fuzz-smoke:
     # Separate from the stable gate: cargo-fuzz needs nightly (libFuzzer + sanitizers).

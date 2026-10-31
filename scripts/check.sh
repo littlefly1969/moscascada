@@ -7,6 +7,8 @@ echo "== fmt";    cargo fmt --all --check
 echo "== clippy"; cargo clippy --workspace --all-targets -- -D warnings
 echo "== test";   cargo test --workspace
 echo "== test (release, runtime under multi_thread(2))"
+# The multiprocess tests spawn the simulator binary, which `-p scada-runtime` does not build.
+cargo build --release -p scada-sim-driver
 SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime
 echo "== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)"
 hits=$(grep -rln --include=*.rs -E '\bunsafe\b *(\{|fn|impl)' crates apps | grep -v '^apps/scada-bench/src/alloc.rs$' || true)

@@ -58,7 +58,7 @@ cargo +nightly fuzz run -O batch_validation corpus/batch_validation -- -max_tota
 cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=300   # VS-002 C3
 ```
 
-Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
+Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `cargo build --release -p scada-sim-driver && SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
 
 ## Esecuzione della demo
 
