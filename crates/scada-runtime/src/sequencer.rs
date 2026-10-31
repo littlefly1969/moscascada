@@ -102,8 +102,6 @@ pub struct SequencerContext {
     pub diag: Option<Arc<Diag>>,
     /// Scheduler description reported by the introspection.
     pub scheduler: String,
-    /// Requests taken from the queue per wake-up (>= 1).
-    pub drain_max: u32,
     /// Test only (`--test-fail-sequencer-after N`): panic after N requests, to prove that
     /// the host stops instead of running without its single writer.
     pub fail_after: Option<u64>,
@@ -144,32 +142,11 @@ fn run(
 ) -> Kernel {
     let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new() };
     links.active.resize_with(kernel.config().sources().len(), || None);
-    let drain = ctx.drain_max.max(1) as usize;
-    if drain == 1 {
-        // VS-001 path: one request per wake-up.
-        while let Some(req) = rx.blocking_recv() {
-            if let Some(d) = &ctx.diag {
-                d.record_ns(Stage::DrainSize, 1);
-            }
-            handle(&mut kernel, &mut links, req, &ctx);
-        }
-        return kernel;
-    }
-    // Take what is already queued, up to `drain`, without waiting for more; then apply
-    // each request in order. Preallocated once; `recv_many` never grows it (len 0 <= cap).
-    let mut taken: Vec<Request> = Vec::with_capacity(drain);
-    loop {
-        taken.clear();
-        let n = rx.blocking_recv_many(&mut taken, drain);
-        if n == 0 {
-            break; // every sender dropped and the queue is empty
-        }
-        if let Some(d) = &ctx.diag {
-            d.record_ns(Stage::DrainSize, n as u64);
-        }
-        for req in taken.drain(..) {
-            handle(&mut kernel, &mut links, req, &ctx);
-        }
+    // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
+    // N = 4/16/64) was measured in VS-002 and removed: no repeatable effect on throughput
+    // or on the rare source's latency (ADR 0005).
+    while let Some(req) = rx.blocking_recv() {
+        handle(&mut kernel, &mut links, req, &ctx);
     }
     kernel
 }

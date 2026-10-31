@@ -1,0 +1,50 @@
+# Profilo Server (VS-002 §10): molti driver concorrenti, p99.9 sotto controllo.
+# Stesso codice e stesso wire protocol del profilo Micro; cambiano solo i limiti.
+# worker_threads è esplicito e va scelto per l'host (nessun valore derivato dalla CPU):
+# 2 è il valore misurato su una VM a 4 vCPU (docs/benchmarks/vs002.md), non una regola.
+# Verifica: scada-kernel --config config/profiles/server.toml --check-config
+
+[runtime]
+scheduler = "multi_thread"
+worker_threads = 2               # + main + sequencer = 4 thread
+memory_budget_bytes = 16777216   # 16 MiB; bound configurativo calcolato ~6,7 MiB
+
+[ipc]
+socket_path = "/run/moscascada/driver.sock"
+max_frame_bytes = 65536
+max_driver_connections = 64
+input_queue_capacity = 64
+max_inflight_per_connection = 32
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+ack_write_timeout_ms = 5000
+read_buffer_bytes = 8192
+ack_coalesce_max = 32
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "door_contact"
+type = "bool"
+
+[[tags]]
+id = 102
+name = "tamper_switch"
+type = "bool"
+
+[[tags]]
+id = 103
+name = "case_temperature_centi_c"   # hundredths of °C, scaled integer
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "sim-enclosure-1"
+# authorized_uids = [1000]   # optional: peer effective UIDs allowed for this source
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "i64" },
+]

@@ -78,8 +78,8 @@ message IntrospectResponse {
   string scheduler = 9;
 }
 
-// VS-002: summary of one diagnostic histogram. Values are nanoseconds (except the
-// "drain_size" stage, a count), wall clock, bucket resolution about 3 %.
+// VS-002: summary of one diagnostic histogram. Values are nanoseconds,
+// wall clock, bucket resolution about 3 %.
 message StageStats {
   string name = 1;
   uint64 count = 2;

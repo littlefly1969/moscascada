@@ -103,8 +103,6 @@ struct FileRuntime {
     /// Required with `multi_thread`, forbidden with `current_thread`. Never derived from
     /// the number of CPUs: the operator chooses it (brief §4 B2).
     worker_threads: Option<u32>,
-    /// Maximum requests the sequencer takes from its queue per wake-up (C1). 1 = VS-001.
-    sequencer_drain_max: Option<u32>,
     /// E1: refuse startup if the configured worst-case allocation bound exceeds this.
     memory_budget_bytes: Option<u64>,
 }
@@ -213,30 +211,13 @@ impl fmt::Display for Scheduler {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeSettings {
     pub scheduler: Scheduler,
-    /// Requests taken from the queue per sequencer wake-up (`blocking_recv_many` limit).
-    /// They are still applied one at a time, in queue order; nothing is merged or
-    /// reordered. Taken requests leave the queue, so up to `input_queue_capacity +
-    /// sequencer_drain_max` requests can be admitted at once (memory bound, ADR 0005).
-    pub sequencer_drain_max: u32,
     /// E1: optional ceiling for the configured worst-case allocation bound (`budget.rs`).
     pub memory_budget_bytes: Option<u64>,
 }
 
-/// Upper bound for `sequencer_drain_max`.
-pub const MAX_SEQUENCER_DRAIN: u32 = 1024;
-
 impl Default for RuntimeSettings {
     fn default() -> Self {
-        RuntimeSettings { scheduler: Scheduler::CurrentThread, sequencer_drain_max: 1, memory_budget_bytes: None }
-    }
-}
-
-/// Validate `sequencer_drain_max`.
-pub fn check_drain(n: u32) -> Result<u32, String> {
-    if (1..=MAX_SEQUENCER_DRAIN).contains(&n) {
-        Ok(n)
-    } else {
-        Err(format!("sequencer_drain_max={n} outside 1..={MAX_SEQUENCER_DRAIN}"))
+        RuntimeSettings { scheduler: Scheduler::CurrentThread, memory_budget_bytes: None }
     }
 }
 
@@ -339,9 +320,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
     let scheduler =
         Scheduler::parse(f.runtime.scheduler.as_deref().unwrap_or("current_thread"), f.runtime.worker_threads)
             .map_err(LoadError::Runtime)?;
-    let sequencer_drain_max = check_drain(f.runtime.sequencer_drain_max.unwrap_or(1)).map_err(LoadError::Runtime)?;
-    let runtime =
-        RuntimeSettings { scheduler, sequencer_drain_max, memory_budget_bytes: f.runtime.memory_budget_bytes };
+    let runtime = RuntimeSettings { scheduler, memory_budget_bytes: f.runtime.memory_budget_bytes };
 
     let spec = ConfigSpec {
         limits: CoreLimits { max_observations_per_batch: f.core.max_observations_per_batch },

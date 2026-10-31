@@ -28,7 +28,7 @@ pub const MAX_ACK_FRAME_BYTES: u128 = 96;
 /// Upper bound of the handshake messages the kernel encodes (Welcome / HandshakeRejected).
 pub const MAX_HANDSHAKE_FRAME_BYTES: u128 = 512;
 /// Diagnostic histograms when `--diag` is on.
-pub const DIAG_BYTES: u128 = 13 * 1184 * 8 + 13 * 64;
+pub const DIAG_BYTES: u128 = 12 * 1184 * 8 + 12 * 64;
 
 /// Itemized bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,7 +37,7 @@ pub struct Budget {
     pub per_connection: u128,
     /// `per_connection * max_driver_connections`.
     pub connections: u128,
-    /// Sequencer queue and drained requests with their observation vectors.
+    /// Sequencer queue and the request being applied, with their observation vectors.
     pub sequencer_queue: u128,
     /// Kernel RTDB + configuration metadata.
     pub kernel: u128,
@@ -89,13 +89,10 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
         .saturating_add(MAX_HANDSHAKE_FRAME_BYTES)
         .saturating_add(TASK_ESTIMATE_BYTES);
     let connections = m(per_connection, u128::from(l.max_driver_connections));
-    // Requests that left the sessions: queued (capacity) + taken by a drain + the one
-    // being applied. Each batch request owns its observation vector.
-    let queued = u128::from(l.input_queue_capacity)
-        .saturating_add(u128::from(cfg.runtime.sequencer_drain_max))
-        .saturating_add(1);
-    let sequencer_queue = m(queued, (size_of::<Request>() as u128).saturating_add(obs_core))
-        .saturating_add(m(u128::from(cfg.runtime.sequencer_drain_max), size_of::<Request>() as u128));
+    // Requests that left the sessions: queued (capacity) + the one being applied. Each
+    // batch request owns its observation vector.
+    let queued = u128::from(l.input_queue_capacity).saturating_add(1);
+    let sequencer_queue = m(queued, (size_of::<Request>() as u128).saturating_add(obs_core));
     let kernel = Kernel::storage_bound_bytes(&cfg.core).saturating_add(cfg.core.heap_bytes());
     let introspection = if introspection {
         // 4 sessions; each response is encoded in one buffer bounded by the frame ceiling,

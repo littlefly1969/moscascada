@@ -34,9 +34,9 @@ pub fn decode_driver_message<'a>(
         && let Ok(len) = prost::encoding::decode_varint(&mut rest)
         && usize::try_from(len).is_ok_and(|l| l == rest.len())
     {
-        scratch.mode = 0;
-        scratch.source_sequence = 0;
-        scratch.observations.clear();
+        // `clear` resets every field (including any added later) and keeps the
+        // observation vector's capacity.
+        scratch.clear();
         scratch.merge(rest)?;
         return Ok(Decoded::Batch(scratch));
     }

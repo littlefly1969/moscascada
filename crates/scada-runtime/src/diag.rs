@@ -157,15 +157,13 @@ pub enum Stage {
     AckWrite,
     /// Frame complete → its ACK written: time the batch spent inside the kernel process.
     InKernel,
-    /// Requests taken per sequencer wake-up (a count, not nanoseconds).
-    DrainSize,
     /// `QueueWait` of the probe source only (see `--diag-probe-source`).
     ProbeQueueWait,
     /// `InKernel` of the probe source only.
     ProbeInKernel,
 }
 
-pub const STAGES: [Stage; 13] = [
+pub const STAGES: [Stage; 12] = [
     Stage::FrameRead,
     Stage::Decode,
     Stage::Convert,
@@ -176,7 +174,6 @@ pub const STAGES: [Stage; 13] = [
     Stage::ReplyWait,
     Stage::AckWrite,
     Stage::InKernel,
-    Stage::DrainSize,
     Stage::ProbeQueueWait,
     Stage::ProbeInKernel,
 ];
@@ -194,14 +191,13 @@ impl Stage {
             Stage::ReplyWait => "reply_wait",
             Stage::AckWrite => "ack_write",
             Stage::InKernel => "in_kernel",
-            Stage::DrainSize => "drain_size",
             Stage::ProbeQueueWait => "probe_queue_wait",
             Stage::ProbeInKernel => "probe_in_kernel",
         }
     }
 }
 
-/// All histograms. Allocated once at startup when diagnostics are enabled (~13 × 9 KiB).
+/// All histograms. Allocated once at startup when diagnostics are enabled (~12 × 9 KiB).
 #[derive(Debug)]
 pub struct Diag {
     hist: Box<[Histogram]>,

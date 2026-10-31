@@ -3,7 +3,7 @@
 //! ```text
 //! scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH]
 //!              [--scheduler current_thread|multi_thread] [--worker-threads N]
-//!              [--sequencer-drain-max N] [--read-buffer-bytes N]
+//!              [--read-buffer-bytes N]
 //!              [--diag [--diag-probe-source ID]] [--capture-inputs FILE] [--throttle-sequencer-us N] [--check-config]
 //! ```
 //! Prints `READY instance=<hex> socket=<path>` on stdout once it accepts connections.
@@ -33,7 +33,6 @@ struct Args {
     worker_threads: Option<u32>,
     diag: bool,
     probe_source: Option<u32>,
-    drain: Option<u32>,
     read_buffer: Option<u32>,
     coalesce: Option<u32>,
     capture: Option<PathBuf>,
@@ -52,7 +51,6 @@ fn parse_args() -> Result<Args, String> {
         worker_threads: None,
         diag: false,
         probe_source: None,
-        drain: None,
         read_buffer: None,
         coalesce: None,
         capture: None,
@@ -89,10 +87,6 @@ fn parse_args() -> Result<Args, String> {
             "--ack-coalesce-max" => {
                 a.coalesce = Some(val("--ack-coalesce-max")?.parse().map_err(|e| format!("--ack-coalesce-max: {e}"))?)
             }
-            "--sequencer-drain-max" => {
-                a.drain =
-                    Some(val("--sequencer-drain-max")?.parse().map_err(|e| format!("--sequencer-drain-max: {e}"))?)
-            }
             "--diag-probe-source" => {
                 a.probe_source =
                     Some(val("--diag-probe-source")?.parse().map_err(|e| format!("--diag-probe-source: {e}"))?)
@@ -125,7 +119,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH] \
                  [--scheduler current_thread|multi_thread] [--worker-threads N] \
-                 [--sequencer-drain-max N] [--read-buffer-bytes N] [--capture-inputs FILE] [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--check-config]"
+                 [--read-buffer-bytes N] [--capture-inputs FILE] [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--check-config]"
             );
             return ExitCode::from(2);
         }
@@ -148,15 +142,6 @@ fn main() -> ExitCode {
         });
         match config::Scheduler::parse(name, args.worker_threads) {
             Ok(s) => cfg.runtime.scheduler = s,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(2);
-            }
-        }
-    }
-    if let Some(n) = args.drain {
-        match config::check_drain(n) {
-            Ok(n) => cfg.runtime.sequencer_drain_max = n,
             Err(e) => {
                 eprintln!("error: {e}");
                 return ExitCode::from(2);
@@ -268,7 +253,6 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
             throttle,
             diag: diag.clone(),
             scheduler: cfg.runtime.scheduler.to_string(),
-            drain_max: cfg.runtime.sequencer_drain_max,
             fail_after,
         },
         capture,
@@ -280,11 +264,10 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         None => None,
     };
     println!(
-        "READY instance={} socket={} scheduler={} drain={}",
+        "READY instance={} socket={} scheduler={}",
         hex(&kernel_instance_id),
         cfg.socket_path.display(),
-        cfg.runtime.scheduler,
-        cfg.runtime.sequencer_drain_max
+        cfg.runtime.scheduler
     );
     let _ = std::io::stdout().flush();
 

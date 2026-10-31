@@ -123,6 +123,10 @@ struct Stats {
 fn stats(mut v: Vec<u64>) -> Stats {
     v.sort_unstable();
     let n = v.len();
+    if n == 0 {
+        // e.g. `mixed --hv 0` (idle cell): no high-volume samples.
+        return Stats { n: 0, p50: 0, p99: 0, p999: 0, max: 0 };
+    }
     let at = |q: f64| v[((q * n as f64).ceil() as usize).clamp(1, n) - 1];
     Stats { n, p50: at(0.50), p99: at(0.99), p999: at(0.999), max: v[n - 1] }
 }

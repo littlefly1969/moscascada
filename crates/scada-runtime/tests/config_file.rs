@@ -108,3 +108,20 @@ fn scheduler_override_on_command_line_is_validated() {
     assert_eq!(run(&["--scheduler", "multi_thread"]).status.code(), Some(2));
     assert_eq!(run(&["--worker-threads", "2"]).status.code(), Some(2));
 }
+
+// VS-002 §10: both shipped profiles are valid, select the declared scheduler and fit
+// their explicit memory budget.
+#[test]
+fn shipped_profiles_are_valid_and_fit_their_budget() {
+    use scada_runtime::{budget, config::Scheduler};
+    for (text, sched) in [
+        (include_str!("../../../config/profiles/micro.toml"), Scheduler::CurrentThread),
+        (include_str!("../../../config/profiles/server.toml"), Scheduler::MultiThread { worker_threads: 2 }),
+    ] {
+        let c = config::parse(text).unwrap();
+        assert_eq!(c.runtime.scheduler, sched);
+        assert!(c.runtime.memory_budget_bytes.is_some());
+        let b = budget::compute(&c, false, false);
+        budget::check(&c, &b).unwrap();
+    }
+}
