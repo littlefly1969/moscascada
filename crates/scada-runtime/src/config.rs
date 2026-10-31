@@ -16,6 +16,8 @@ struct FileConfig {
     ipc: FileIpc,
     #[serde(default)]
     core: FileCore,
+    #[serde(default)]
+    runtime: FileRuntime,
     tags: Vec<FileTag>,
     sources: Vec<FileSource>,
 }
@@ -70,6 +72,18 @@ impl Default for FileCore {
 
 fn d_max_obs() -> u32 {
     128
+}
+
+/// `[runtime]`: how the I/O edge is scheduled. Never touches the core or the sequencer
+/// model (one OS thread, one writer).
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileRuntime {
+    /// `"current_thread"` (default) or `"multi_thread"`.
+    scheduler: Option<String>,
+    /// Required with `multi_thread`, forbidden with `current_thread`. Never derived from
+    /// the number of CPUs: the operator chooses it (brief §4 B2).
+    worker_threads: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -128,12 +142,65 @@ pub struct IpcLimits {
     pub frame_timeout_ms: u64,
 }
 
+/// Upper bound for `worker_threads` (a guardrail against typos, not a recommendation).
+pub const MAX_WORKER_THREADS: u32 = 64;
+
+/// Tokio scheduler of the I/O edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheduler {
+    /// One thread runs every session (VS-001 behaviour, default, Micro profile).
+    CurrentThread,
+    /// Work-stealing pool with an explicit number of workers (Server profile). Different
+    /// sessions may run in parallel; one session is still one task (no intra-session
+    /// parallelism, no reordering).
+    MultiThread { worker_threads: u32 },
+}
+
+impl Scheduler {
+    /// Parse the `--scheduler` / `[runtime]` pair. `workers` must be given exactly for
+    /// `multi_thread`.
+    pub fn parse(name: &str, workers: Option<u32>) -> Result<Scheduler, String> {
+        match (name, workers) {
+            ("current_thread", None) => Ok(Scheduler::CurrentThread),
+            ("current_thread", Some(_)) => Err("worker_threads is only valid with scheduler = \"multi_thread\"".into()),
+            ("multi_thread", Some(n)) if (1..=MAX_WORKER_THREADS).contains(&n) => {
+                Ok(Scheduler::MultiThread { worker_threads: n })
+            }
+            ("multi_thread", Some(n)) => Err(format!("worker_threads={n} outside 1..={MAX_WORKER_THREADS}")),
+            ("multi_thread", None) => Err("scheduler = \"multi_thread\" requires an explicit worker_threads".into()),
+            (other, _) => Err(format!("unknown scheduler {other:?} (current_thread | multi_thread)")),
+        }
+    }
+}
+
+impl fmt::Display for Scheduler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Scheduler::CurrentThread => f.write_str("current_thread"),
+            Scheduler::MultiThread { worker_threads } => write!(f, "multi_thread({worker_threads})"),
+        }
+    }
+}
+
+/// `[runtime]` settings after validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeSettings {
+    pub scheduler: Scheduler,
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        RuntimeSettings { scheduler: Scheduler::CurrentThread }
+    }
+}
+
 /// Validated runtime configuration.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub socket_path: PathBuf,
     pub socket_group_gid: Option<u32>,
     pub limits: IpcLimits,
+    pub runtime: RuntimeSettings,
     pub core: ValidatedConfig,
     /// (source, authorized uids) sorted by source; `None` = socket permissions only.
     pub authorization: Vec<(SourceId, Option<Vec<u32>>)>,
@@ -156,6 +223,7 @@ pub enum LoadError {
     Io(PathBuf, std::io::Error),
     Parse(String),
     Ipc(String),
+    Runtime(String),
     Core(ConfigError),
 }
 
@@ -165,6 +233,7 @@ impl fmt::Display for LoadError {
             LoadError::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
             LoadError::Parse(e) => write!(f, "invalid TOML: {e}"),
             LoadError::Ipc(e) => write!(f, "invalid [ipc] section: {e}"),
+            LoadError::Runtime(e) => write!(f, "invalid [runtime] section: {e}"),
             LoadError::Core(e) => write!(f, "invalid configuration: {e}"),
         }
     }
@@ -215,6 +284,11 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         )));
     }
 
+    let scheduler =
+        Scheduler::parse(f.runtime.scheduler.as_deref().unwrap_or("current_thread"), f.runtime.worker_threads)
+            .map_err(LoadError::Runtime)?;
+    let runtime = RuntimeSettings { scheduler };
+
     let spec = ConfigSpec {
         limits: CoreLimits { max_observations_per_batch: f.core.max_observations_per_batch },
         tags: f
@@ -251,6 +325,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         socket_path: ipc.socket_path,
         socket_group_gid: ipc.socket_group_gid,
         limits,
+        runtime,
         core,
         authorization,
     })

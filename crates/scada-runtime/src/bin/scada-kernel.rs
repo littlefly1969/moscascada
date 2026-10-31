@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH]
-//!              [--throttle-sequencer-us N] [--check-config]
+//!              [--scheduler current_thread|multi_thread] [--worker-threads N]
+//!              [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--check-config]
 //! ```
 //! Prints `READY instance=<hex> socket=<path>` on stdout once it accepts connections.
 //! State lives only in RAM: nothing survives the process.
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 use scada_core::Kernel;
 use scada_runtime::config;
+use scada_runtime::diag::Diag;
 use scada_runtime::sequencer::{self, Counters, SequencerContext};
 use scada_runtime::server::{self, Server, SocketGuard};
 use tokio::sync::mpsc;
@@ -25,11 +27,25 @@ struct Args {
     introspection: Option<PathBuf>,
     throttle_us: u64,
     check_only: bool,
+    scheduler: Option<String>,
+    worker_threads: Option<u32>,
+    diag: bool,
+    probe_source: Option<u32>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut a = Args { config: PathBuf::new(), socket: None, introspection: None, throttle_us: 0, check_only: false };
+    let mut a = Args {
+        config: PathBuf::new(),
+        socket: None,
+        introspection: None,
+        throttle_us: 0,
+        check_only: false,
+        scheduler: None,
+        worker_threads: None,
+        diag: false,
+        probe_source: None,
+    };
     let mut have_config = false;
     while let Some(arg) = it.next() {
         let mut val = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -45,6 +61,15 @@ fn parse_args() -> Result<Args, String> {
                     val("--throttle-sequencer-us")?.parse().map_err(|e| format!("--throttle-sequencer-us: {e}"))?
             }
             "--check-config" => a.check_only = true,
+            "--diag" => a.diag = true,
+            "--diag-probe-source" => {
+                a.probe_source =
+                    Some(val("--diag-probe-source")?.parse().map_err(|e| format!("--diag-probe-source: {e}"))?)
+            }
+            "--scheduler" => a.scheduler = Some(val("--scheduler")?),
+            "--worker-threads" => {
+                a.worker_threads = Some(val("--worker-threads")?.parse().map_err(|e| format!("--worker-threads: {e}"))?)
+            }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -68,7 +93,8 @@ fn main() -> ExitCode {
             }
             eprintln!(
                 "usage: scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH] \
-                 [--throttle-sequencer-us N] [--check-config]"
+                 [--scheduler current_thread|multi_thread] [--worker-threads N] \
+                 [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--check-config]"
             );
             return ExitCode::from(2);
         }
@@ -83,18 +109,47 @@ fn main() -> ExitCode {
     if let Some(s) = args.socket {
         cfg.socket_path = s;
     }
+    // Command-line override of [runtime] (benchmarks). Same validation as the file.
+    if args.scheduler.is_some() || args.worker_threads.is_some() {
+        let name = args.scheduler.as_deref().unwrap_or(match cfg.runtime.scheduler {
+            config::Scheduler::CurrentThread => "current_thread",
+            config::Scheduler::MultiThread { .. } => "multi_thread",
+        });
+        match config::Scheduler::parse(name, args.worker_threads) {
+            Ok(s) => cfg.runtime.scheduler = s,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     if args.check_only {
-        println!("config ok: fingerprint={}", hex(&cfg.core.fingerprint()));
+        println!("config ok: fingerprint={} scheduler={}", hex(&cfg.core.fingerprint()), cfg.runtime.scheduler);
         return ExitCode::SUCCESS;
     }
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_io().enable_time().build() {
+    let built = match cfg.runtime.scheduler {
+        config::Scheduler::CurrentThread => tokio::runtime::Builder::new_current_thread(),
+        config::Scheduler::MultiThread { worker_threads } => {
+            let mut b = tokio::runtime::Builder::new_multi_thread();
+            b.worker_threads(worker_threads as usize);
+            b
+        }
+    }
+    .enable_io()
+    .enable_time()
+    .thread_name("scada-io")
+    // Nothing in the kernel uses spawn_blocking; keep the pool from growing anyway.
+    .max_blocking_threads(1)
+    .build();
+    let rt = match built {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: tokio runtime: {e}");
             return ExitCode::from(1);
         }
     };
-    match rt.block_on(run(cfg, args.introspection, Duration::from_micros(args.throttle_us))) {
+    let diag = args.diag.then(|| Arc::new(Diag::new(args.probe_source)));
+    match rt.block_on(run(cfg, args.introspection, Duration::from_micros(args.throttle_us), diag)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -103,7 +158,12 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(cfg: config::RuntimeConfig, introspection: Option<PathBuf>, throttle: Duration) -> std::io::Result<()> {
+async fn run(
+    cfg: config::RuntimeConfig,
+    introspection: Option<PathBuf>,
+    throttle: Duration,
+    diag: Option<Arc<Diag>>,
+) -> std::io::Result<()> {
     let cfg = Arc::new(cfg);
     let kernel_instance_id = server::new_instance_id()?;
     let counters = Arc::new(Counters::default());
@@ -117,16 +177,23 @@ async fn run(cfg: config::RuntimeConfig, introspection: Option<PathBuf>, throttl
             counters: counters.clone(),
             input_queue_capacity: cfg.limits.input_queue_capacity,
             throttle,
+            diag: diag.clone(),
+            scheduler: cfg.runtime.scheduler.to_string(),
         },
     )?;
     let listener = server::bind_socket(&cfg.socket_path, 0o660, cfg.socket_group_gid)?;
     let _guard = SocketGuard(cfg.socket_path.clone());
-    let srv = Arc::new(Server { config: cfg.clone(), kernel_instance_id, counters, requests: tx });
+    let srv = Arc::new(Server { config: cfg.clone(), kernel_instance_id, counters, requests: tx, diag });
     let intro = match &introspection {
         Some(p) => Some((server::bind_socket(p, 0o600, None)?, SocketGuard(p.clone()))),
         None => None,
     };
-    println!("READY instance={} socket={}", hex(&kernel_instance_id), cfg.socket_path.display());
+    println!(
+        "READY instance={} socket={} scheduler={}",
+        hex(&kernel_instance_id),
+        cfg.socket_path.display(),
+        cfg.runtime.scheduler
+    );
     let _ = std::io::stdout().flush();
 
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

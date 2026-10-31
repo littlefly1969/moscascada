@@ -137,6 +137,7 @@ impl KernelProc {
             .arg(&cfg)
             .arg("--introspection-socket")
             .arg(&intro)
+            .args(scheduler_args_from_env(extra))
             .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -176,8 +177,13 @@ impl KernelProc {
         let mut s = UnixStream::connect(&self.intro).expect("introspection socket");
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut w = Vec::new();
-        frame::write_message(&mut s, &IntrospectRequest { include_tags: true, introspect_version: 1 }, 1024, &mut w)
-            .unwrap();
+        frame::write_message(
+            &mut s,
+            &IntrospectRequest { include_tags: true, introspect_version: 1, ..Default::default() },
+            1024,
+            &mut w,
+        )
+        .unwrap();
         let mut r = Vec::new();
         frame::read_message(&mut s, frame::MAX_FRAME_BYTES_CEILING, &mut r).unwrap().expect("response")
     }
@@ -219,6 +225,30 @@ impl KernelProc {
         assert!(status.success(), "kernel exit {status:?}\n{err}");
         assert!(!err.contains("panicked"), "kernel panicked:\n{err}");
         err
+    }
+}
+
+/// `SCADA_TEST_SCHEDULER=current_thread|multi_thread:N` runs every multi-process test with
+/// that scheduler (CI runs the suite with `current_thread` and `multi_thread:2`). Tests that
+/// choose a scheduler explicitly (`--scheduler` in `extra`) are left alone.
+pub fn scheduler_args_from_env(extra: &[&str]) -> Vec<String> {
+    if extra.contains(&"--scheduler") {
+        return Vec::new();
+    }
+    match std::env::var("SCADA_TEST_SCHEDULER").ok().as_deref() {
+        None | Some("") | Some("current_thread") => Vec::new(),
+        Some(v) => {
+            let n = v.strip_prefix("multi_thread:").expect("SCADA_TEST_SCHEDULER=current_thread|multi_thread:N");
+            vec!["--scheduler".into(), "multi_thread".into(), "--worker-threads".into(), n.into()]
+        }
+    }
+}
+
+/// Scheduler arguments for an explicit mode: `None` = current_thread, `Some(n)` = multi_thread(n).
+pub fn scheduler_args(workers: Option<u32>) -> Vec<String> {
+    match workers {
+        None => vec!["--scheduler".into(), "current_thread".into()],
+        Some(n) => vec!["--scheduler".into(), "multi_thread".into(), "--worker-threads".into(), n.to_string()],
     }
 }
 

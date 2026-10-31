@@ -8,5 +8,6 @@
 
 pub mod config;
 pub mod convert;
+pub mod diag;
 pub mod sequencer;
 pub mod server;

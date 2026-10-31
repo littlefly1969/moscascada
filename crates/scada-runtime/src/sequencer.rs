@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use scada_core::{
     AppliedKind, Kernel, LinkState, ObservationBatch, Operation, Quality, SequencedInput, SourceId, TransitionOutcome,
@@ -16,6 +16,7 @@ use scada_protocol::introspect_v1 as ipb;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::convert;
+use crate::diag::{self, Diag, Stage};
 
 /// Runtime counters. Metrics only: never part of the logical state or the digest.
 #[derive(Debug, Default)]
@@ -52,15 +53,33 @@ pub struct BatchReply {
     pub error_code: ErrorCode,
     pub continuity: Option<scada_protocol::driver_v1::Continuity>,
     pub last_accepted: Option<u64>,
+    /// When the sequencer sent the reply (diagnostics only, never part of the state).
+    pub sent: Option<Instant>,
 }
 
 /// Requests admitted into the bounded input queue.
 #[derive(Debug)]
 pub enum Request {
-    Connect { source_id: SourceId, source_epoch: u64, reply: oneshot::Sender<ConnectReply> },
-    Disconnect { source_id: SourceId, link_generation: u64 },
-    Batch { batch: ObservationBatch, reply: oneshot::Sender<BatchReply> },
-    Introspect { include_tags: bool, reply: oneshot::Sender<ipb::IntrospectResponse> },
+    Connect {
+        source_id: SourceId,
+        source_epoch: u64,
+        reply: oneshot::Sender<ConnectReply>,
+    },
+    Disconnect {
+        source_id: SourceId,
+        link_generation: u64,
+    },
+    /// `submitted`: when the session started to submit it (diagnostics only).
+    Batch {
+        batch: ObservationBatch,
+        reply: oneshot::Sender<BatchReply>,
+        submitted: Option<Instant>,
+    },
+    Introspect {
+        include_tags: bool,
+        reset_diagnostics: bool,
+        reply: oneshot::Sender<ipb::IntrospectResponse>,
+    },
 }
 
 /// Static data the sequencer needs besides the kernel.
@@ -71,6 +90,10 @@ pub struct SequencerContext {
     pub input_queue_capacity: u32,
     /// Artificial delay after each request (saturation tests only; 0 in production).
     pub throttle: Duration,
+    /// Stage timings (`--diag`); `None` in production.
+    pub diag: Option<Arc<Diag>>,
+    /// Scheduler description reported by the introspection.
+    pub scheduler: String,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -109,13 +132,29 @@ fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContex
                     eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
                 }
             }
-            Request::Batch { batch, reply } => {
-                let r = apply_batch(&mut kernel, batch, &ctx.counters);
+            Request::Batch { batch, reply, submitted } => {
+                let d = ctx.diag.as_deref();
+                let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
+                if let (Some(d), Some(t)) = (d, submitted) {
+                    d.since(Stage::QueueWait, t);
+                    if probe {
+                        d.since(Stage::ProbeQueueWait, t);
+                    }
+                }
+                let t0 = diag::now(d);
+                let mut r = apply_batch(&mut kernel, batch, &ctx.counters);
+                if let (Some(d), Some(t0)) = (d, t0) {
+                    d.since(Stage::Apply, t0);
+                    r.sent = Some(Instant::now());
+                }
                 // ACK only after `apply` returned; if the session is gone the ACK is moot.
                 let _ = reply.send(r);
             }
-            Request::Introspect { include_tags, reply } => {
+            Request::Introspect { include_tags, reset_diagnostics, reply } => {
                 let _ = reply.send(introspect(&kernel, include_tags, &ctx));
+                if reset_diagnostics && let Some(d) = &ctx.diag {
+                    d.reset();
+                }
             }
         }
         if !ctx.throttle.is_zero() {
@@ -160,6 +199,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
             error_code: ErrorCode::OperationSequenceExhausted,
             continuity: None,
             last_accepted: last(kernel),
+            sent: None,
         };
     };
     let outcome = kernel.apply(SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
@@ -176,6 +216,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Unspecified,
                 continuity,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Ok(TransitionOutcome::Duplicate { .. }) => {
@@ -186,6 +227,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Unspecified,
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Ok(TransitionOutcome::Ignored(_)) => {
@@ -196,6 +238,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: ErrorCode::Internal,
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
         Err(e) => {
@@ -206,6 +249,7 @@ fn apply_batch(kernel: &mut Kernel, batch: ObservationBatch, counters: &Counters
                 error_code: convert::error_code(&e),
                 continuity: None,
                 last_accepted: last(kernel),
+                sent: None,
             }
         }
     }
@@ -270,5 +314,23 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             input_queue_capacity: ctx.input_queue_capacity,
             active_connections: u32::try_from(ld(&c.active_connections)).unwrap_or(u32::MAX),
         }),
+        stages: ctx
+            .diag
+            .as_deref()
+            .map(|d| {
+                d.summaries()
+                    .map(|(s, m)| ipb::StageStats {
+                        name: s.name().to_owned(),
+                        count: m.count,
+                        sum_ns: m.sum_ns,
+                        p50_ns: m.p50_ns,
+                        p99_ns: m.p99_ns,
+                        p999_ns: m.p999_ns,
+                        max_ns: m.max_ns,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        scheduler: ctx.scheduler.clone(),
     }
 }

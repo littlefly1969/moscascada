@@ -6,7 +6,7 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use scada_core::SourceId;
 use scada_protocol::driver_v1::{
@@ -23,6 +23,7 @@ use tokio::time::timeout;
 
 use crate::config::RuntimeConfig;
 use crate::convert;
+use crate::diag::{self, Diag, Stage};
 use crate::sequencer::{BatchReply, ConnectReply, Counters, Request};
 
 /// Shared, immutable state of the I/O side.
@@ -32,6 +33,8 @@ pub struct Server {
     pub kernel_instance_id: [u8; KERNEL_INSTANCE_ID_LEN],
     pub counters: Arc<Counters>,
     pub requests: mpsc::Sender<Request>,
+    /// Stage timings (`--diag`); `None` in production.
+    pub diag: Option<Arc<Diag>>,
 }
 
 /// Generate the kernel instance id (16 random bytes from the OS).
@@ -105,12 +108,14 @@ async fn read_frame<R: AsyncRead + Unpin>(
     max: u32,
     buf: &mut Vec<u8>,
     frame_timeout: Duration,
+    diag: Option<&Diag>,
 ) -> Result<bool, ReadError> {
     let mut header = [0u8; HEADER_LEN];
     let n = r.read(&mut header).await.map_err(|e| ReadError::Frame(e.into()))?;
     if n == 0 {
         return Ok(false);
     }
+    let t0 = diag::now(diag);
     let rest = async {
         if let Some(tail) = header.get_mut(n..) {
             r.read_exact(tail).await.map_err(|e| ReadError::Frame(e.into()))?;
@@ -119,6 +124,9 @@ async fn read_frame<R: AsyncRead + Unpin>(
         buf.clear();
         buf.resize(len, 0);
         r.read_exact(buf).await.map_err(|e| ReadError::Frame(e.into()))?;
+        if let (Some(d), Some(t0)) = (diag, t0) {
+            d.since(Stage::FrameRead, t0);
+        }
         Ok(true)
     };
     timeout(frame_timeout, rest).await.map_err(|_| ReadError::Timeout)?
@@ -155,7 +163,12 @@ async fn submit(server: &Server, req: Request) -> Result<(), ()> {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(req)) => {
             Counters::inc(&server.counters.input_queue_full_waits);
-            server.requests.send(req).await.map_err(|_| ())
+            let t0 = diag::now(server.diag.as_deref());
+            let r = server.requests.send(req).await.map_err(|_| ());
+            if let (Some(d), Some(t0)) = (server.diag.as_deref(), t0) {
+                d.since(Stage::SubmitWait, t0);
+            }
+            r
         }
         Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
     }
@@ -201,8 +214,16 @@ pub async fn serve(server: Arc<Server>, listener: UnixListener) {
 }
 
 enum Pending {
-    Wait { source_sequence: u64, reply: oneshot::Receiver<BatchReply> },
-    Ready { source_sequence: u64, reply: BatchReply },
+    /// `frame_done`: when the frame was fully read (diagnostics only).
+    Wait {
+        source_sequence: u64,
+        reply: oneshot::Receiver<BatchReply>,
+        frame_done: Option<Instant>,
+    },
+    Ready {
+        source_sequence: u64,
+        reply: BatchReply,
+    },
     Fatal(KernelMessage),
 }
 
@@ -218,7 +239,7 @@ async fn session(server: &Server, stream: UnixStream) {
     // ---- Handshake ----
     let hs = timeout(
         Duration::from_millis(limits.handshake_timeout_ms),
-        read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms)),
+        read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), None),
     )
     .await;
     let hello = match hs {
@@ -332,26 +353,42 @@ async fn data_phase(
     let max_obs = server.config.core.limits().max_observations_per_batch;
     let (pending_tx, pending_rx) = mpsc::channel::<Pending>(limits.max_inflight_per_connection as usize);
     let (closed_tx, mut closed_rx) = oneshot::channel::<()>();
-    let writer = writer_task(server.kernel_instance_id, max, wr, pending_rx, closed_tx);
+    let diag = server.diag.as_deref();
+    let probe = diag.is_some_and(|d| d.is_probe(source_id.0));
+    let writer = writer_task(server.kernel_instance_id, max, wr, pending_rx, closed_tx, diag, probe);
     let reader = async move {
         loop {
             let frame = tokio::select! {
-                r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms)) => r,
+                r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => r,
                 _ = &mut closed_rx => return, // writer stopped (peer gone or link superseded)
             };
+            let frame_done = diag::now(diag);
             let fatal = match frame {
                 Ok(false) => return,
                 Ok(true) => match DriverMessage::decode(buf.as_slice()) {
                     Ok(DriverMessage { body: Some(driver_message::Body::Batch(b)) }) => {
+                        let t_conv = diag::now(diag);
+                        if let (Some(d), Some(t)) = (diag, frame_done) {
+                            d.since(Stage::Decode, t);
+                        }
                         let source_sequence = b.source_sequence;
-                        let pending = match convert::batch_from_wire(source_id, link_generation, b, max_obs) {
+                        let converted = convert::batch_from_wire(source_id, link_generation, b, max_obs);
+                        if let (Some(d), Some(t)) = (diag, t_conv) {
+                            d.since(Stage::Convert, t);
+                        }
+                        let pending = match converted {
                             Ok(batch) => {
                                 let (tx, rx) = oneshot::channel();
                                 // Reserve the ACK slot first (bounded in-flight per connection),
                                 // then enqueue for the sequencer (bounded global queue).
+                                let t_slot = diag::now(diag);
                                 let Ok(slot) = pending_tx.reserve().await else { return };
-                                slot.send(Pending::Wait { source_sequence, reply: rx });
-                                if submit(server, Request::Batch { batch, reply: tx }).await.is_err() {
+                                if let (Some(d), Some(t)) = (diag, t_slot) {
+                                    d.since(Stage::SlotWait, t);
+                                }
+                                slot.send(Pending::Wait { source_sequence, reply: rx, frame_done });
+                                let submitted = diag::now(diag);
+                                if submit(server, Request::Batch { batch, reply: tx, submitted }).await.is_err() {
                                     return;
                                 }
                                 continue;
@@ -366,6 +403,7 @@ async fn data_phase(
                                         error_code: code,
                                         continuity: None,
                                         last_accepted: None,
+                                        sent: None,
                                     },
                                 }
                             }
@@ -399,15 +437,22 @@ async fn writer_task(
     mut wr: OwnedWriteHalf,
     mut pending: mpsc::Receiver<Pending>,
     closed: oneshot::Sender<()>,
+    diag: Option<&Diag>,
+    probe: bool,
 ) {
     let mut scratch = Vec::new();
     while let Some(p) = pending.recv().await {
-        let (source_sequence, reply) = match p {
-            Pending::Wait { source_sequence, reply } => match reply.await {
-                Ok(r) => (source_sequence, r),
+        let (source_sequence, reply, frame_done) = match p {
+            Pending::Wait { source_sequence, reply, frame_done } => match reply.await {
+                Ok(r) => {
+                    if let (Some(d), Some(t)) = (diag, r.sent) {
+                        d.since(Stage::ReplyWait, t);
+                    }
+                    (source_sequence, r, frame_done)
+                }
                 Err(_) => break, // sequencer gone: close the connection, never fake an ACK
             },
-            Pending::Ready { source_sequence, reply } => (source_sequence, reply),
+            Pending::Ready { source_sequence, reply } => (source_sequence, reply, None),
             Pending::Fatal(msg) => {
                 let _ = write_msg(&mut wr, &msg, max, &mut scratch).await;
                 break;
@@ -424,8 +469,18 @@ async fn writer_task(
                 last_accepted_source_sequence: reply.last_accepted,
             })),
         };
+        let t_w = diag::now(diag);
         if write_msg(&mut wr, &ack, max, &mut scratch).await.is_err() {
             break;
+        }
+        if let (Some(d), Some(t_w)) = (diag, t_w) {
+            d.since(Stage::AckWrite, t_w);
+            if let Some(t) = frame_done {
+                d.since(Stage::InKernel, t);
+                if probe {
+                    d.since(Stage::ProbeInKernel, t);
+                }
+            }
         }
         if reply.error_code == ErrorCode::LinkSuperseded {
             break; // a newer link owns the source; this one is closed
@@ -457,13 +512,19 @@ async fn introspection_session(server: &Server, stream: UnixStream) {
     let ft = Duration::from_millis(server.config.limits.frame_timeout_ms);
     let (mut rd, mut wr) = stream.into_split();
     let (mut buf, mut scratch) = (Vec::new(), Vec::new());
-    while let Ok(true) = read_frame(&mut rd, max, &mut buf, ft).await {
+    while let Ok(true) = read_frame(&mut rd, max, &mut buf, ft, None).await {
         let Ok(req) = ipb::IntrospectRequest::decode(buf.as_slice()) else { return };
         if req.introspect_version != 1 {
             return;
         }
         let (tx, rx) = oneshot::channel();
-        if submit(server, Request::Introspect { include_tags: req.include_tags, reply: tx }).await.is_err() {
+        if submit(
+            server,
+            Request::Introspect { include_tags: req.include_tags, reset_diagnostics: req.reset_diagnostics, reply: tx },
+        )
+        .await
+        .is_err()
+        {
             return;
         }
         let Ok(resp) = rx.await else { return };
