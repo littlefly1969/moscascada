@@ -34,7 +34,7 @@ pub struct Limits {
     pub read_buffer_bytes: u32,
     pub ack_coalesce_max: u32,
     /// VS-003 `[ipc]` ingress lines (empty = `fifo`). Default from the environment
-    /// variable `SCADA_TEST_INGRESS` (`source_fair:4`, `source_capped:2`, ...), so that the
+    /// variable `SCADA_TEST_INGRESS` (`source_fair:4`, `source_fair:1`, ...), so that the
     /// whole VS-001/VS-002 suite can be run under every policy.
     pub ingress: String,
 }

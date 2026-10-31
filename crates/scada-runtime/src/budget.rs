@@ -167,7 +167,6 @@ fn ingress_bytes(cfg: &RuntimeConfig) -> u128 {
     let semaphores = m(sources, SEMAPHORE_ESTIMATE_BYTES.saturating_add(8));
     match l.ingress {
         crate::config::IngressPolicy::Fifo => 0,
-        crate::config::IngressPolicy::SourceCapped { .. } => semaphores,
         crate::config::IngressPolicy::SourceFair { per_source } => {
             let lanes = sources.saturating_add(1);
             let entry = (size_of::<Request>() as u128).saturating_add(ENTRY_OVERHEAD_BYTES);
@@ -265,10 +264,9 @@ channels = [{{ channel = 1, tag = 1, type = "i64" }}]
     fn ingress_policy_is_in_the_bound() {
         let fifo = compute(&cfg(""), false, false);
         assert_eq!(fifo.ingress, 0);
-        let capped = compute(&cfg("ingress_policy = \"source_capped\"\nper_source_pending_limit = 4\n"), false, false);
         let fair4 = compute(&cfg("ingress_policy = \"source_fair\"\nper_source_pending_limit = 4\n"), false, false);
         let fair32 = compute(&cfg("ingress_policy = \"source_fair\"\nper_source_pending_limit = 32\n"), false, false);
-        assert!(0 < capped.ingress && capped.ingress < fair4.ingress && fair4.ingress < fair32.ingress);
+        assert!(0 < fair4.ingress && fair4.ingress < fair32.ingress);
         assert_eq!(fair4.total, fifo.total + fair4.ingress);
         // Many sources × the largest limit: still a finite u128, far from overflow.
         let mut text = String::from(
@@ -306,6 +304,10 @@ channels = [{{ channel = 1, tag = 1, type = "i64" }}]
         assert!(bad("per_source_pending_limit = 4"), "limit without a per-source policy");
         assert!(bad("ingress_policy = \"fifo\"\nper_source_pending_limit = 4"));
         assert!(!bad("ingress_policy = \"fifo\""));
-        assert!(!bad("ingress_policy = \"source_capped\"\nper_source_pending_limit = 32"));
+        assert!(
+            bad("ingress_policy = \"source_capped\"\nper_source_pending_limit = 2"),
+            "B measured, not kept (ADR 0010)"
+        );
+        assert!(!bad("ingress_policy = \"source_fair\"\nper_source_pending_limit = 32"));
     }
 }

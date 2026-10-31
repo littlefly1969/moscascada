@@ -13,7 +13,6 @@ SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime
 echo "== test (release, VS-001/VS-002/VS-003 runtime suite under the VS-003 ingress policies, ADR 0010)"
 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
 SCADA_TEST_INGRESS=source_fair:1 cargo test --release -p scada-runtime
-SCADA_TEST_INGRESS=source_capped:2 cargo test --release -p scada-runtime
 echo "== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)"
 hits=$(grep -rln --include=*.rs -E '\bunsafe\b *(\{|fn|impl)' crates apps | grep -v '^apps/scada-bench/src/alloc.rs$' || true)
 if [ -n "$hits" ]; then echo "unexpected unsafe in: $hits" >&2; exit 1; fi

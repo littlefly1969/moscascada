@@ -1,9 +1,9 @@
 # ADR 0010 — Ingresso fair: quote per sorgente e servizio round-robin davanti all'unico writer
 
-- **Stato:** **proposta di progettazione** (VS-003). Nessuna decisione di adozione: la scelta fra A/B/C/D si prende solo dopo la campagna sulla baseline VS-002 finale (brief §0, §3, §9). Questo documento fissa semantica, invarianti e criteri *prima* dell'implementazione.
+- **Stato:** **deciso dopo misura** (VS-003). §1–§8 sono la progettazione scritta *prima* dell'implementazione (invariata salvo note); §11 è la decisione presa sulla campagna. Esito: **FIFO resta il default**; `source_fair` (C) resta come opzione esplicita **sperimentale**; B misurata e non tenuta; D non implementata.
 - **Data:** 2026-10-31
 - **Ambito:** `scada-runtime::{server, sequencer, config, budget}`, nuovo crate puro `scada-sched`. `scada-core` **invariato**. Wire `scada.driver.v1` **invariato**.
-- **Base:** progettazione scritta su `fd5e992` (VS-002 pre-review). Le correzioni P1/P2 di VS-002 toccano `server.rs`, `convert.rs`, `budget.rs`, non `sequencer.rs` né `config.rs`: questo ADR non dipende da esse, ma l'implementazione runtime sì e verrà ribasata sullo SHA finale.
+- **Base:** progettazione scritta su `fd5e992`; implementazione e campagna su VS-002 finale `d9502c1` (P1/P2, CI verde), poi riallineata su `main` `9d97882` (merge di #1 e #2, stesso albero di `d9502c1`).
 
 ## 1. Contesto e problema
 
@@ -187,7 +187,37 @@ Ordine di preferenza a parità di beneficio: A (nessun cambiamento) < B (solo se
 
 Dettagli e tabella in `docs/benchmarks/vs003.md` §1. Sintesi: con `mt2`, 16 hv, Q64 l'attesa in coda del sequencer è ~37 % del p99 end-to-end della rara (2,9 su 7,8 ms); il resto è scheduling dei writer sui worker saturi e contesa CPU con i client. Con `ct` la coda pesa ancora meno (thread runtime saturo). Il limite superiore stimato del guadagno della variante C sul solo termine di coda è ~1,5× su `mt2`, quindi l'obiettivo ~2× **non è atteso** dalla sola politica di servizio: la campagna dovrà dire se la diversa ammissione (meno batch pendenti per sorgente) riduce anche il termine `reply_wait`. Se no, la conclusione onesta potrà essere B (semplice) o FIFO.
 
-## 10. Fonti
+## 11. Decisione (dopo la campagna, `docs/benchmarks/vs003.md` §4)
+
+**Fatti misurati** (VM 4 vCPU con client co-residenti, 7 run randomizzati per cella, 532 run in tutto, 0 falliti; Δ rispetto alla FIFO, `**` = ripetibile):
+
+| scenario | variante | rara p99 | throughput hv |
+|---|---|---:|---:|
+| Server `mt2`, 16 hv, Q64 (cella del target) | C4 (`source_fair`, 4/sorgente) | +6 % (n.s.) | −10 % (n.s.); −11 % ** in 8×128 |
+| | C1 | **−60 %** | **−47 %** |
+| | B1 (`source_capped`, 1) | **−56 %** | **−47 %** |
+| | B4 | +5 % (n.s.) | −1 % (n.s.) |
+| | FIFO Q16 (VS-002, riferimento) | −46 % | −43 % |
+| `mt2`, 16 hv × 1 oss. | C4 | +10 % (n.s.) | **−39 %** |
+| Micro `ct`, 16 hv, Q16 | C4 | **−75 %** (15,7 → 4,0 ms) | **−21 %** |
+| | B1 / C1 | **−73 %** / **−62 %** | **−14 %** / **−20 %** |
+| | B4 | +8 % (n.s.) | +1 % (n.s.) |
+| `ct`, 8 hv, Q16 | C4 / B4 | +13 % / +5 % (n.s.) | +7 % / +11 % (n.s.) |
+| | B1 / C1 | **−46 %** / **−53 %** | **−53 %** / **−55 %** |
+| underload 1×1 stop-and-wait (`mt2`, `ct`) | C4 | p99 +10 % ** su `mt2` (205 → 227 µs), ~ su `ct` | ~ |
+| fifo del nuovo binario vs VS-002 `d9502c1` | A | nessuna differenza ripetibile | nessuna |
+
+**Perché il modello (§3.1) sbagliava:** con `--diag` (c2) C4 riduce davvero l'attesa in coda della rara (p50 434 → 131 µs) ma il suo p99 end-to-end non cambia: su questo host il tail è dominato da `reply_wait` (risposta pronta, task writer non ancora eseguito: 2,8–3,1 ms al p99) e dal tempo fuori dal kernel, cioè dalla saturazione CPU dei 2 worker I/O e dei client sugli stessi 4 vCPU. Le varianti con 1 batch per sorgente (B1/C1) migliorano il p99 perché **dimezzano il lavoro ammesso**, non per l'equità: stanno sulla stessa frontiera di Pareto di una coda globale corta (Q16).
+
+**Decisione:**
+
+1. **Nessuna variante raggiunge il target sperimentale** del brief (p99 rara ~2× con throughput hv ≥ −10 % in 16hv/Q64 server). Per §8 e brief §9 **la FIFO resta il default** e i profili Micro/Server non cambiano.
+2. **`source_fair` (C) resta come opzione esplicita sperimentale**, perché (a) ha l'unica garanzia logica nuova provata end-to-end (attesa della rara ≤ un turno per sorgente attiva: 36 ms contro 174 ms con sequencer rallentato a 2 ms/richiesta, `vs003.rs`), (b) ammette un `Hello` anche con le code dati sature, (c) nel caso Micro saturo (`ct`, Q16, 16 hv) dà −75 % di p99 rara a −21 % di throughput, (d) è neutra in underload su `ct`, in RSS e senza perdita di correttezza. **Costo dichiarato:** −10…−39 % di throughput su `multi_thread` senza beneficio di tail; non consigliata per il profilo Server.
+3. **B (`source_capped`) non è tenuta**: dove migliora (cap 1) equivale a ridurre la coda globale (già configurabile con `input_queue_capacity`), con cap 4 non ha effetto. Codice riproducibile dal commit `b21dc31`.
+4. **D (DRR) non implementata**: il modello non mostra squilibrio utile (−1/2 % di attesa) e la misura mostra che l'ordine di servizio non è il termine dominante.
+5. Il default resta modificabile solo con una nuova campagna che mostri il beneficio su hardware con core dedicati (vedi lavoro futuro in `vs003.md` §6).
+
+## 12. Fonti
 
 - Tokio `Semaphore::acquire_owned`, `mpsc::Sender::reserve` (cancel safety): https://docs.rs/tokio/latest/tokio/sync/
 - M. Shreedhar, G. Varghese, *Efficient Fair Queuing Using Deficit Round-Robin*, IEEE/ACM ToN 4(3), 1996.

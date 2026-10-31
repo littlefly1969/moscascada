@@ -4,7 +4,7 @@ Percorso `driver esterno → IPC → validazione → sequencer → state machine
 
 **Stato:** VS-001 e VS-002 implementate e verificate su Linux x86_64 (VM KVM, 4 vCPU). VS-002 rende multicore il bordo di ingestion (Tokio `multi_thread` opzionale, sequencer e `Kernel::apply` invariati, un solo writer), ottimizza il percorso IPC e il lookup nel core, aggiunge liveness del writer, chiusura del link superato, procedura di ripresa con fotografia fresca, bound configurativo della memoria e hardening del socket. ARM64: **NOT TESTED ON HARDWARE** (solo `cargo check`). Lo stato è solo in RAM: nessun ACK è durevole; nessuna garanzia hard real-time; nessuna ridondanza.
 
-**VS-003** (ADR 0010, [vs003.md](docs/benchmarks/vs003.md)): politica di ingresso esplicita verso l'unico writer, `[ipc] ingress_policy = "fifo"` (default, VS-002) | `"source_capped"` (quota per sorgente) | `"source_fair"` (lane per sorgente servite round-robin), con modello puro dello scheduler (`crates/scada-sched`), test di ordine/barriera/cancellazione/fair progress sotto ogni politica e campagna A/B/C misurata prima della scelta.
+**VS-003** (ADR 0010, [vs003.md](docs/benchmarks/vs003.md)): politica di ingresso esplicita verso l'unico writer, `[ipc] ingress_policy = "fifo"` (default, VS-002, invariato) | `"source_fair"` (sperimentale: lane per sorgente servite round-robin), con modello puro dello scheduler (`crates/scada-sched`), test di ordine/barriera/cancellazione/fair progress sotto entrambe le politiche e campagna A/B/C misurata prima della scelta. **Decisione:** l'obiettivo del brief (p99 rara ~2× a throughput −10 %) non è raggiunto da nessuna variante sul profilo Server; FIFO resta il default, `source_fair` è un'opzione per il profilo Micro sotto saturazione, con costo di throughput dichiarato.
 
 Documenti:
 - [Contratto semantico](docs/contract.md) · [Architettura](docs/architecture.md)
@@ -63,7 +63,7 @@ cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_
 
 Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `cargo build --release -p scada-sim-driver && SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
 
-Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4`, `source_fair:1`, `source_capped:2`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
+Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4` e `source_fair:1`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
 
 ## Esecuzione della demo
 

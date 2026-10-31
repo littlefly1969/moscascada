@@ -41,8 +41,7 @@ Se arriva un `Hello` per una sorgente già collegata, il nuovo link sostituisce 
 | `ingress_policy` | Ammissione | Ordine di servizio |
 |---|---|---|
 | `fifo` (default) | coda globale `input_queue_capacity` | ordine di ammissione |
-| `source_capped` | + al più `per_source_pending_limit` batch ammessi e non ancora applicati per sorgente | ordine di ammissione (quota, **non** fair scheduling) |
-| `source_fair` | al più `per_source_pending_limit` per sorgente e `input_queue_capacity` in totale | round-robin fra le sorgenti con richieste in coda, una richiesta per turno |
+| `source_fair` (sperimentale) | al più `per_source_pending_limit` per sorgente e `input_queue_capacity` in totale | round-robin fra le sorgenti con richieste in coda, una richiesta per turno |
 
 Garanzie con ogni politica: (1) ordine dei batch e degli ACK di una sorgente = ordine del socket; (2) `APPLIED_VOLATILE` solo dopo `apply`; (3) `operation_sequence` = ordine effettivo di applicazione (l'ordine **fra sorgenti** non è un contratto: cambia fra politiche ed esecuzioni; è riproducibile solo come stream catturato, §8); (4) un batch che il kernel ha ammesso riceve un esito tipizzato, o la connessione viene chiusa senza ACK (peer morto, takeover, arresto) — mai un ACK inventato; (5) `SourceDisconnected` di un link è applicato dopo tutti i batch che quel link ha fatto ammettere.
 

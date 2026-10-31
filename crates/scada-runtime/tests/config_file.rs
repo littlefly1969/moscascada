@@ -131,19 +131,19 @@ fn shipped_profiles_are_valid_and_fit_their_budget() {
 #[test]
 fn shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies() {
     use scada_runtime::{budget, config::IngressPolicy};
-    for text in [include_str!("../../../config/profiles/micro.toml"), include_str!("../../../config/profiles/server.toml")]
+    for text in
+        [include_str!("../../../config/profiles/micro.toml"), include_str!("../../../config/profiles/server.toml")]
     {
         assert_eq!(config::parse(text).unwrap().limits.ingress, IngressPolicy::Fifo);
-        for policy in ["source_capped", "source_fair"] {
-            let t = text.replace(
-                "# ingress_policy = \"fifo\"\n# per_source_pending_limit = 4",
-                &format!("ingress_policy = \"{policy}\"\nper_source_pending_limit = 4"),
-            );
-            assert_ne!(t, text, "profile lost its commented VS-003 keys");
-            let c = config::parse(&t).unwrap();
-            assert!(c.limits.ingress.per_source() == Some(4));
-            let b = budget::compute(&c, true, false);
-            budget::check(&c, &b).unwrap_or_else(|e| panic!("{policy}: {e}"));
-        }
+        let policy = "source_fair";
+        let t = text.replace(
+            "# ingress_policy = \"fifo\"\n# per_source_pending_limit = 4",
+            &format!("ingress_policy = \"{policy}\"\nper_source_pending_limit = 4"),
+        );
+        assert_ne!(t, text, "profile lost its commented VS-003 keys");
+        let c = config::parse(&t).unwrap();
+        assert!(c.limits.ingress.per_source() == Some(4));
+        let b = budget::compute(&c, true, false);
+        budget::check(&c, &b).unwrap_or_else(|e| panic!("{policy}: {e}"));
     }
 }

@@ -1,4 +1,4 @@
-//! VS-003 gates (brief §7, ADR 0010): ingress policies `fifo` / `source_capped` /
+//! VS-003 gates (brief §7, ADR 0010): ingress policies `fifo` /
 //! `source_fair` with real kernel and driver processes. The whole VS-001/VS-002 suite also
 //! runs under every policy with `SCADA_TEST_INGRESS=source_fair:4` (CI).
 //!
@@ -20,7 +20,7 @@ use support::*;
 /// Per source: last accepted sequence and link (state, generation).
 type Normalized = BTreeMap<u32, (Option<u64>, (LinkState, u64))>;
 
-const POLICIES: [&str; 4] = ["fifo", "source_capped:2", "source_fair:1", "source_fair:4"];
+const POLICIES: [&str; 3] = ["fifo", "source_fair:1", "source_fair:4"];
 
 fn limits(policy: &str) -> Limits {
     Limits {
@@ -125,8 +125,8 @@ fn policy_is_reported_and_check_config_counts_it() {
             text.split_whitespace().find_map(|w| w.strip_prefix("memory_bound_bytes=")).unwrap().parse().unwrap();
         n
     };
-    let (fifo, capped, fair) = (bound("fifo"), bound("source_capped:2"), bound("source_fair:4"));
-    assert!(fifo < capped && capped < fair, "{fifo} {capped} {fair}");
+    let (fifo, fair1, fair4) = (bound("fifo"), bound("source_fair:1"), bound("source_fair:4"));
+    assert!(fifo < fair1 && fair1 < fair4, "{fifo} {fair1} {fair4}");
 }
 
 // §7.2 + §7.3 + §7.1: 16 pipelined sources + one with dedup/gap/rejections, under every
@@ -407,7 +407,7 @@ fn takeover_with_a_full_lane_under_fair_policy() {
 // sequencer: clean exit, no panic.
 #[test]
 fn shutdown_with_sessions_waiting_for_permits() {
-    for p in ["source_fair:1", "source_capped:1"] {
+    for p in ["source_fair:1", "source_fair:4"] {
         let k = start(p, Some(2), &["--throttle-sequencer-us", "5000"]);
         let mut ss = Vec::new();
         for n in 1..=8u32 {

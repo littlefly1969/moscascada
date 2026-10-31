@@ -1,8 +1,8 @@
 //! VS-003 ingress (ADR 0010): how admitted requests reach the single writer.
 //!
 //! * `fifo` (A, default): one bounded Tokio `mpsc` (`input_queue_capacity`), VS-002.
-//! * `source_capped` (B): the same `mpsc`, but a batch first takes one of
-//!   `per_source_pending_limit` permits of its source's semaphore. Not fair scheduling.
+//! * (B, `source_capped`, a per-source semaphore in front of the same `mpsc`, was measured
+//!   in the VS-003 campaign and not kept: ADR 0010 §11, reproducible from commit b21dc31.)
 //! * `source_fair` (C): a batch takes a permit of its source, then one of
 //!   `input_queue_capacity` global permits, then is pushed into its source's lane of a
 //!   [`scada_sched::FairQueue`] (round-robin, one request per turn) under a mutex; the
@@ -44,7 +44,6 @@ const INTROSPECTION_SESSIONS: u32 = 4;
 #[derive(Debug)]
 pub enum Ingress {
     Fifo(mpsc::Sender<Request>),
-    Capped { tx: mpsc::Sender<Request>, sources: Arc<SourceSemaphores> },
     Fair(FairSender),
 }
 
@@ -105,10 +104,6 @@ pub fn channel(cfg: &Arc<RuntimeConfig>) -> (Ingress, Inbox) {
             let (tx, rx) = mpsc::channel(q);
             (Ingress::Fifo(tx), Inbox::Fifo(rx))
         }
-        IngressPolicy::SourceCapped { per_source } => {
-            let (tx, rx) = mpsc::channel(q);
-            (Ingress::Capped { tx, sources: Arc::new(SourceSemaphores::new(cfg, per_source)) }, Inbox::Fifo(rx))
-        }
         IngressPolicy::SourceFair { per_source } => {
             let n = cfg.core.sources().len() as u32;
             let control = cfg.limits.max_driver_connections.saturating_add(INTROSPECTION_SESSIONS);
@@ -139,23 +134,9 @@ impl Ingress {
     /// Hand `req` to the sequencer. Waiting here is the backpressure (the session stops
     /// reading its socket). Cancel-safe. `full` is called once when the request had to
     /// wait for room (counter `input_queue_full_waits`).
-    pub async fn submit(&self, mut req: Request, full: impl FnOnce()) -> Result<(), Closed> {
+    pub async fn submit(&self, req: Request, full: impl FnOnce()) -> Result<(), Closed> {
         match self {
             Ingress::Fifo(tx) => send_fifo(tx, req, full).await,
-            Ingress::Capped { tx, sources } => {
-                // Only batches take a quota permit; control requests go straight in.
-                if matches!(req, Request::Batch { .. }) {
-                    let lane = sources.lane(&req).ok_or(Closed)?;
-                    let p = match sources.per_source[lane].clone().try_acquire_owned() {
-                        Ok(p) => p,
-                        Err(_) => sources.acquire(lane).await.map_err(|_| Closed)?,
-                    };
-                    if let Request::Batch { permits, .. } = &mut req {
-                        permits._source = Some(p);
-                    }
-                }
-                send_fifo(tx, req, full).await
-            }
             Ingress::Fair(f) => f.submit(req, full).await,
         }
     }

@@ -48,7 +48,7 @@ struct FileIpc {
     /// C5: at most this many already-available ACKs per socket write (1 = one per write).
     #[serde(default = "d_ack_coalesce")]
     ack_coalesce_max: u32,
-    /// VS-003 (ADR 0010): `"fifo"` (default, VS-002), `"source_capped"`, `"source_fair"`.
+    /// VS-003 (ADR 0010): `"fifo"` (default, VS-002) or `"source_fair"` (experimental).
     ingress_policy: Option<String>,
     /// VS-003: batches one source may have admitted and not yet applied. Only with a
     /// policy other than `fifo` (required there, forbidden with `fifo`).
@@ -179,9 +179,6 @@ pub struct IpcLimits {
 pub enum IngressPolicy {
     /// A: one global bounded FIFO (`input_queue_capacity`), VS-002 behaviour.
     Fifo,
-    /// B: the same FIFO, plus at most `per_source` admitted, not yet applied batches per
-    /// source. Not fair scheduling: only a quota.
-    SourceCapped { per_source: u32 },
     /// C: per-source bounded lanes served round-robin (one request per turn), at most
     /// `per_source` batches per source and `input_queue_capacity` in total.
     SourceFair { per_source: u32 },
@@ -191,7 +188,7 @@ impl IngressPolicy {
     pub fn per_source(&self) -> Option<u32> {
         match *self {
             IngressPolicy::Fifo => None,
-            IngressPolicy::SourceCapped { per_source } | IngressPolicy::SourceFair { per_source } => Some(per_source),
+            IngressPolicy::SourceFair { per_source } => Some(per_source),
         }
     }
 }
@@ -200,7 +197,6 @@ impl fmt::Display for IngressPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IngressPolicy::Fifo => write!(f, "fifo"),
-            IngressPolicy::SourceCapped { per_source } => write!(f, "source_capped({per_source})"),
             IngressPolicy::SourceFair { per_source } => write!(f, "source_fair({per_source})"),
         }
     }
@@ -219,9 +215,8 @@ fn parse_ingress(policy: Option<&str>, limit: Option<u32>, inflight: u32) -> Res
             Err("per_source_pending_limit is only valid with a per-source ingress_policy".into())
         }
         "fifo" => Ok(IngressPolicy::Fifo),
-        "source_capped" => Ok(IngressPolicy::SourceCapped { per_source: need("source_capped")? }),
         "source_fair" => Ok(IngressPolicy::SourceFair { per_source: need("source_fair")? }),
-        other => Err(format!("unknown ingress_policy {other:?} (fifo | source_capped | source_fair)")),
+        other => Err(format!("unknown ingress_policy {other:?} (fifo | source_fair)")),
     }
 }
 
