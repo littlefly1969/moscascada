@@ -10,7 +10,8 @@
 
 | termine | composizione |
 |---|---|
-| per connessione | `max_frame_bytes` (buffer payload riusato, cresce fino al frame più grande) + `read_buffer_bytes` + batch decodificato riusato (`max_observations_per_batch × size_of::<pb::Observation>()`) + batch convertito in attesa di slot/coda + `max_inflight × (voce coda + cella oneshot)` + buffer ACK (`(ack_coalesce_max + 1) × 96 B`) + handshake (512 B) + stima fissa per task Tokio (16 KiB) |
+| per connessione | `max_frame_bytes` (buffer payload riusato, cresce fino al frame più grande) + `read_buffer_bytes` + batch decodificato riusato (`max(2·max_observations_per_batch, 4) × size_of::<pb::Observation>()`: capacità massima trattenuta per la crescita del `Vec`, garantita dal limite applicato durante il decode, review P1) + termine transitorio `max(max_frame_bytes, batch decodificato)` per la decodifica generica o la validazione dell'`Hello` (liberato subito) + batch convertito in attesa di slot/coda + `max_inflight × (voce coda + cella oneshot)` + buffer ACK (`(ack_coalesce_max + 1) × 96 B`) + handshake (512 B) + stima fissa per task Tokio (16 KiB) |
+| decode transitorio (review P1) | `worker del runtime × 3 × (max_frame_bytes/2 + 1) × size_of::<pb::Observation>()`: crescita massima dello scratch su un frame oversized, scartata prima di ogni `await` |
 | connessioni | per connessione × `max_driver_connections` |
 | coda sequencer | `(input_queue_capacity + 1) × (size_of::<Request>() + batch convertito massimo)` |
 | kernel | `Kernel::storage_bound_bytes` (RTDB: celle tag, stato sorgenti, staging) + `ValidatedConfig::heap_bytes` (metadati, indici, tabelle dense) |
@@ -20,6 +21,15 @@
 Il risultato è stampato da `--check-config` e su stderr all'avvio; se `[runtime] memory_budget_bytes` è impostato e il bound lo supera, l'avvio è rifiutato (exit 3).
 
 **Cosa non è.** Non è un bound dell'RSS del processo: stack dei thread (2 o N+2), frammentazione e metadati dell'allocatore, strutture interne di Tokio, binario e libc, buffer socket del kernel Linux (memoria kernel, governata da `net.core.*mem`) sono esclusi; lo stato per task Tokio è una **stima** dichiarata (16 KiB). La validità del bound è verificata empiricamente dal soak test (RSS stabile e sotto il bound per la parte applicativa; vedi `docs/benchmarks/vs002.md`).
+
+**Revisione P1.** Prima della correzione il termine del batch decodificato era `max_obs × 24 B`, ma il decoder poteva trattenere fino a `max_frame_bytes / 2` osservazioni (768 KiB per connessione con frame da 64 KiB): il bound non era conservativo. Ora (ADR 0006 §P1, variante B) lo scratch non trattiene mai più di `retained_capacity_bound(max_obs) = max(2·max_obs, 4)` osservazioni (termine per connessione) e il picco transitorio di un frame oversized, che è sincrono e scartato prima di ogni `await`, è contato una volta **per worker del runtime**: nuovo termine `decode_workers = workers × 3 × (max_frame_bytes/2 + 1) × 24 B` (`current_thread`: 1; `multi_thread(N)`: N; lo scheduler è quello effettivo, anche se imposto da riga di comando). Effetto sui profili:
+
+| profilo | prima | dopo | budget |
+|---|---:|---:|---:|
+| Micro (`current_thread`, `max_frame_bytes` 64 KiB → **8 KiB**) | 885 220 B | 811 564 B | 2 MiB |
+| Server (`multi_thread(2)`, 64 KiB) | 7 029 860 B | 16 139 508 B | 16 MiB (16 777 216 B) |
+
+Con frame da 64 KiB il Micro non stava più nel suo budget (3,8 MB: l'avvio veniva rifiutato, come previsto): `max_frame_bytes = 8192` resta 3,3 volte sopra il massimo necessario per 128 osservazioni (2464 B, verificato all'avvio) e riduce anche i buffer per connessione. Il Server resta nel budget con margine ridotto (4 %): un `max_frame_bytes` più basso o un budget più alto sono le leve, da scegliere con i carichi reali.
 
 **Allocazione lazy.** I buffer per connessione partono vuoti e crescono solo fino al frame più grande effettivamente ricevuto (mai oltre `max_frame_bytes`, verificato sull'header **prima** del `resize`); la tabella densa esiste solo per le sorgenti compatte; la diagnostica solo con `--diag`.
 

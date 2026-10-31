@@ -51,8 +51,25 @@ Non sono decisioni di progetto nuove ma prove: vedi `docs/architecture.md` §"Or
 
 Nessun timeout del dispositivo dentro `Kernel::apply`; nessun motore di allarmi. Una futura supervisione dovrà produrre input sequenziati.
 
+### Revisione P2 — takeover di un link in backpressure
+
+**Problema (review della PR #2).** Il segnale di takeover era osservato dal reader solo mentre aspettava un frame. Un vecchio link che produce input senza leggere gli ACK porta il reader a bloccarsi su `pending_tx.reserve()` (coda ACK piena), su `submit()` (coda del sequencer piena) o su `pending_tx.send(Fatal)`, e il writer su una `write` verso un peer che non legge. In quello stato il segnale non veniva visto: lo slot restava occupato fino alla scadenza D2 (`ack_write_timeout_ms`, default 5 s; nel test 20 s) e, con `max_driver_connections` basso, il takeover successivo veniva rifiutato.
+
+**Riproduzione.** `vs002.rs::takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly`: `max_driver_connections = 2`, `ack_write_timeout_ms = 20000`; il vecchio client invia `Delta` senza leggere finché le sue scritture si bloccano (pipeline piena fino al socket), poi la stessa sorgente si ricollega; 3 takeover consecutivi, in `current_thread` e in `multi_thread(2)`. Prima della correzione: `links_superseded = 0`, `active_connections = 2` oltre il limite di attesa (test fallito).
+
+**Decisione.**
+
+1. Ogni attesa del reader (lettura del frame, `reserve`, `submit`, ogni `send` sulla coda ACK) è in `select!` con il segnale di takeover. Tutte le operazioni interrotte sono cancel-safe: un `send`/`reserve`/`submit` cancellato non accoda nulla, quindi non nasce nessun ACK né richiesta parziale.
+2. Al takeover il reader incrementa `links_superseded` e invia un segnale di abort al writer (`oneshot`). Il writer interrompe subito qualunque attesa (ACK in sospeso, `write` bloccata), tenta **una sola** scrittura non bloccante (`try_write`) di `ProtocolError LINK_SUPERSEDED` e chiude il socket (shutdown con la stessa scadenza di scrittura, poi drop).
+3. Gli ACK del vecchio link non ancora scritti sono scartati. Non è una perdita silenziosa di stato: i batch già sottomessi sono applicati (o rifiutati) dal sequencer nell'ordine di sempre e i successivi alla nuova generazione sono rifiutati dal core (`LINK_SUPERSEDED`); il driver riconcilia per stato con `Welcome.last_accepted_source_sequence` (contratto §2.1, §5). Era già il comportamento di D2 per un peer che non legge.
+
+**Risultato.** Rilascio dello slot dopo il `Hello` di takeover: 0,7–1,1 ms in `current_thread`, 0,5–0,8 ms in `multi_thread(2)` (6 takeover, output del test); il test richiede < 2 s e `ack_write_timeouts = 0` (lo slot è liberato dal takeover, non dalla scadenza). Verificati anche: nessun ACK inventato (il valore del tag corrisponde a `last_accepted_source_sequence` riportato dal nuovo `Welcome`), continuità `Continuous` sul nuovo link, chiusure tardive dei vecchi socket senza effetti sul link attivo (`Connected`, qualità `Good`). `repeated_takeovers_do_not_exhaust_connection_slots` e `ipc.rs::superseded_link_cannot_overwrite_new_generation` restano verdi.
+
+**Alternativa scartata.** Mandare `LINK_SUPERSEDED` attraverso la coda ACK dopo gli ACK pendenti (comportamento precedente): richiede che il peer legga, cioè esattamente ciò che un peer in backpressure non fa.
+
 ## Conseguenze e limiti
 
 - La scadenza D2 chiude anche un driver che legge, ma più lentamente di quanto il buffer socket assorba per `ack_write_timeout_ms`: è voluto (risorse limitate) e configurabile.
 - Fra applicazione e ACK perso non c'è alcuna garanzia di consegna; la riconciliazione è per stato (sequenza accettata), non per messaggio.
-- La chiusura D3 è asincrona: per un breve intervallo il vecchio link può ancora essere aperto; i suoi batch sono comunque rifiutati dal core.
+- La chiusura D3 è asincrona: per un breve intervallo (misurato < 1 ms) il vecchio link può ancora essere aperto; i suoi batch sono comunque rifiutati dal core.
+- Dopo il takeover il vecchio link può non ricevere gli ACK dei batch già sottomessi né il `ProtocolError` (scrittura non bloccante, best effort): la riconciliazione è sempre per sequenza accettata.

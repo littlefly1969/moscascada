@@ -1,0 +1,470 @@
+== toolchain
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+== fmt
+== clippy
+    Checking scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+    Checking scada-bench v0.1.0 (/home/claude/moscascada/apps/scada-bench)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.51s
+== test
+   Compiling scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+   Compiling scada-bench v0.1.0 (/home/claude/moscascada/apps/scada-bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.53s
+     Running unittests src/main.rs (target/debug/deps/scada_bench-196d3cdeab6629fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_core-dd39634a3ec3519a)
+
+running 4 tests
+test kernel::tests::source_sequence_overflow_is_explicit ... ok
+test kernel::tests::revision_overflow_is_rejected_without_mutation ... ok
+test kernel::tests::operation_sequence_exhaustion_is_explicit ... ok
+test kernel::tests::apply_never_grows_internal_storage ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/config_validation.rs (target/debug/deps/config_validation-4b3e408d2fcae485)
+
+running 11 tests
+test channel_bound_to_unknown_tag ... ok
+test duplicate_source_id ... ok
+test duplicate_channel ... ok
+test duplicate_tag_name ... ok
+test incompatible_types ... ok
+test reserved_zero_ids_and_empty_sets ... ok
+test duplicate_tag_id ... ok
+test tag_bound_twice ... ok
+test source_with_more_channels_than_a_full_state_can_carry ... ok
+test tag_without_binding ... ok
+test demo_config_is_valid_and_sorted ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (target/debug/deps/determinism-1a06a2c4d8ffb7be)
+
+running 6 tests
+test digest_v1_golden_value ... ok
+test replaying_the_same_stream_gives_the_same_final_digest ... ok
+test prop_one_bad_observation_rejects_whole_batch ... ok
+test prop_observation_order_irrelevant ... ok
+test prop_two_kernels_same_stream ... ok
+test seeded_random_streams_are_deterministic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.84s
+
+     Running tests/equivalence.rs (target/debug/deps/equivalence-ad99fbeac9b69038)
+
+running 3 tests
+test dense_index_only_for_compact_numbering_and_lookup_matches_binary_search ... ok
+test prop_optimized_kernel_matches_vs001 ... ok
+test optimized_kernel_matches_vs001_on_seeded_streams ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/transitions.rs (target/debug/deps/transitions-af2e00c3949069bc)
+
+running 16 tests
+test first_full_state_may_start_at_any_positive_sequence ... ok
+test digest_excludes_nothing_logical ... ok
+test batch_with_unknown_channel_changes_nothing ... ok
+test disconnect_preserves_value_reconnect_stays_uncertain ... ok
+test initial_state_is_unknown ... ok
+test identical_duplicate_of_last_batch ... ok
+test gap_stale_type_and_resync ... ok
+test never_observed_tags_stay_unknown_on_disconnect ... ok
+test invalid_connect_inputs ... ok
+test late_disconnect_of_old_generation_is_ignored ... ok
+test new_epoch_requires_full_state ... ok
+test rejected_and_duplicate_inputs_do_not_consume_operation_sequence ... ok
+test out_of_order_operation_sequence_is_rejected ... ok
+test same_sequence_different_payload_is_a_conflict ... ok
+test other_validation_errors_change_nothing ... ok
+test value_quality_revision_and_identical_reacquisition ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_protocol-bd8e29de3d5aea6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frame.rs (target/debug/deps/frame-72310d585e35f246)
+
+running 9 tests
+test corrupt_payload_is_a_decode_error ... ok
+test oversize_length_rejected_before_allocation ... ok
+test encode_refuses_messages_above_limit ... ok
+test roundtrip ... ok
+test truncated_header_and_payload ... ok
+test zero_length_is_invalid ... ok
+test wire_format_anchor ... ok
+test roundtrip_arbitrary_batches ... ok
+test arbitrary_bytes_never_panic ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_runtime-800caf10719546bb)
+
+running 17 tests
+test capture::tests::round_trip ... ok
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.40s
+
+     Running unittests src/bin/scada-kernel.rs (target/debug/deps/scada_kernel-999792b09087c4b9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/debug/deps/config_file-4a664c26d4bed1c8)
+
+running 6 tests
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_files_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/debug/deps/ipc-c09a2f58e11e2cc4)
+
+running 9 tests
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test demo_scenario_with_separate_driver_process ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test backpressure_when_queue_is_full ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running tests/socket_security.rs (target/debug/deps/socket_security-9aa9dbeaeb06ed94)
+
+running 7 tests
+test non_socket_and_live_socket_are_not_replaced ... ok
+test guard_removes_only_its_own_socket ... ok
+test missing_directory_is_created_private ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/debug/deps/vs002-6cd8c6f503eb8998)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test malformed_input_unbuffered ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_with_read_buffer ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.93s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_sim_driver-422626a2ad63968f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/scada_sim_driver-91c918594e31ca87)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-f7d491dc04c2ea80)
+
+running 2 tests
+test unreachable_socket_is_reported_not_panicked ... ok
+test missing_arguments_exit_with_usage ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_sim_driver
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, runtime under multi_thread(2))
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-3216cc35b1e09510)
+
+running 17 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test capture::tests::round_trip ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-ac877a1fce4a05ad)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-2e5ffe71a77ca889)
+
+running 6 tests
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_files_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-b8d16841f3f9af80)
+
+running 9 tests
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test demo_scenario_with_separate_driver_process ... ok
+test kernel_survives_driver_kill ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test backpressure_when_queue_is_full ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-b41c770cec350b3b)
+
+running 7 tests
+test missing_directory_is_created_private ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test guard_removes_only_its_own_socket ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-cd2382fdfdef3267)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test malformed_input_unbuffered ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)
+ok
+== core dependency audit (no tokio/prost/toml/serde in scada-core)
+ok
+== core purity audit (no clocks, sockets, threads, randomness in scada-core/src)
+ok
+== cargo deny
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /home/claude/moscascada/Cargo.lock:37:1
+   │  
+37 │ ╭ hashbrown 0.15.5 registry+https://github.com/rust-lang/crates.io-index
+38 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.15.5
+     └── petgraph v0.8.3
+         └── prost-build v0.14.4
+             └── (build) scada-protocol v0.1.0
+                 ├── scada-bench v0.1.0
+                 ├── scada-runtime v0.1.0
+                 │   └── (dev) scada-bench v0.1.0 (*)
+                 └── scada-sim-driver v0.1.0
+                     ├── scada-bench v0.1.0 (*)
+                     └── (dev) scada-runtime v0.1.0 (*)
+   ├ hashbrown v0.17.1
+     └── indexmap v2.14.2
+         └── petgraph v0.8.3
+             └── prost-build v0.14.4
+                 └── (build) scada-protocol v0.1.0
+                     ├── scada-bench v0.1.0
+                     ├── scada-runtime v0.1.0
+                     │   └── (dev) scada-bench v0.1.0 (*)
+                     └── scada-sim-driver v0.1.0
+                         ├── scada-bench v0.1.0 (*)
+                         └── (dev) scada-runtime v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+   ┌─ /home/claude/moscascada/Cargo.lock:94:1
+   │  
+94 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+95 │ │ syn 3.0.9 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ syn v2.0.119
+     ├── logos-codegen v0.16.1
+     │   └── logos-derive v0.16.1
+     │       └── logos v0.16.1
+     │           ├── prost-reflect v0.16.5
+     │           │   └── protox v0.10.0
+     │           │       └── (build) scada-protocol v0.1.0
+     │           │           ├── scada-bench v0.1.0
+     │           │           ├── scada-runtime v0.1.0
+     │           │           │   └── (dev) scada-bench v0.1.0 (*)
+     │           │           └── scada-sim-driver v0.1.0
+     │           │               ├── scada-bench v0.1.0 (*)
+     │           │               └── (dev) scada-runtime v0.1.0 (*)
+     │           └── protox-parse v0.10.0
+     │               └── protox v0.10.0 (*)
+     ├── miette-derive v7.6.0
+     │   └── miette v7.6.0
+     │       ├── prost-reflect v0.16.5 (*)
+     │       ├── protox v0.10.0 (*)
+     │       └── protox-parse v0.10.0 (*)
+     ├── prettyplease v0.2.37
+     │   └── prost-build v0.14.4
+     │       └── (build) scada-protocol v0.1.0 (*)
+     ├── prost-build v0.14.4 (*)
+     ├── prost-derive v0.14.4
+     │   └── prost v0.14.4
+     │       ├── prost-build v0.14.4 (*)
+     │       ├── prost-reflect v0.16.5 (*)
+     │       ├── prost-types v0.14.4
+     │       │   ├── prost-build v0.14.4 (*)
+     │       │   ├── prost-reflect v0.16.5 (*)
+     │       │   ├── protox v0.10.0 (*)
+     │       │   └── protox-parse v0.10.0 (*)
+     │       ├── protox v0.10.0 (*)
+     │       ├── scada-protocol v0.1.0 (*)
+     │       └── scada-runtime v0.1.0 (*)
+     └── zerocopy-derive v0.8.63
+         └── zerocopy v0.8.63
+             └── half v2.7.1
+                 └── ciborium-ll v0.2.2
+                     └── ciborium v0.2.2
+                         └── criterion v0.8.2
+                             └── (dev) scada-bench v0.1.0 (*)
+   ├ syn v3.0.9
+     ├── serde_derive v1.0.229
+     │   └── serde v1.0.229
+     │       ├── ciborium v0.2.2
+     │       │   └── criterion v0.8.2
+     │       │       └── (dev) scada-bench v0.1.0
+     │       ├── criterion v0.8.2 (*)
+     │       ├── scada-runtime v0.1.0
+     │       │   └── (dev) scada-bench v0.1.0 (*)
+     │       └── tinytemplate v1.2.1
+     │           └── criterion v0.8.2 (*)
+     ├── thiserror-impl v2.0.21
+     │   └── thiserror v2.0.21
+     │       ├── protox v0.10.0
+     │       │   └── (build) scada-protocol v0.1.0
+     │       │       ├── scada-bench v0.1.0 (*)
+     │       │       ├── scada-runtime v0.1.0 (*)
+     │       │       └── scada-sim-driver v0.1.0
+     │       │           ├── scada-bench v0.1.0 (*)
+     │       │           └── (dev) scada-runtime v0.1.0 (*)
+     │       └── protox-parse v0.10.0
+     │           └── protox v0.10.0 (*)
+     └── tokio-macros v2.7.2
+         └── tokio v1.54.1
+             └── scada-runtime v0.1.0 (*)
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /home/claude/moscascada/deny.toml:17:4
+   │
+17 │   "BSD-2-Clause",
+   │    ━━━━━━━━━━━━ unmatched license allowance
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /home/claude/moscascada/deny.toml:18:4
+   │
+18 │   "BSD-3-Clause",
+   │    ━━━━━━━━━━━━ unmatched license allowance
+
+advisories ok, bans ok, licenses ok, sources ok
+== proto
+1.75.0
+buf lint: ok; buf breaking vs baseline v1.0: ok
+buf breaking detects a renumbered field: ok
+== aarch64 compile check (not a runtime proof: NOT TESTED ON HARDWARE)
+    Checking scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.98s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+ALL CHECKS PASSED

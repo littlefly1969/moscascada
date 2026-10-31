@@ -224,11 +224,13 @@ Brief: `MoscaSCADA_VS002_Agent_Brief.md`. Base `b17413f` (VS-001), branch `vs-00
 | C1 | Drain del sequencer | ✅ misurato, ❌ non adottato | ADR 0005 (codice rimosso dopo la misura) |
 | C2 | ACK senza allocazioni ripetute | ✅ | `server.rs::set_ack`, test `reused_ack_encodes_identically`, dhat |
 | C3 | Decode/conversione senza allocazioni ripetute | ✅ | `convert.rs::decode_driver_message`, proptest + fuzz `decode_equivalence` |
+| P1 (review) | Memoria del decoder entro il budget: nessuna capacità trattenuta oltre `2·max`, picco transitorio contato per worker | ✅ | ADR 0006 §P1 (varianti A0/A/B misurate, B adottata), ADR 0009, `adversarial_many_small_observations_are_rejected_without_retained_memory` (`ct` e `mt2`), `convert.rs::adversarial`, proptest con limite, fuzz `results/vs002/fuzz/p1/`, `vs002.md` §12 |
 | C4 | Lookup/sort del core | ✅ | ADR 0007 |
 | C5 | Syscall per batch (buffer lettura, ACK raggruppati) | ✅ | ADR 0006, campagna 1 |
 | D1 | Ripresa con fotografia fresca | ✅ | `scada_sim_driver::resume`, contratto §5.1, `reconnection_with_partial_deltas_then_fresh_full_state`, `simulator_resume_procedure_reasserts_all_channels` |
 | D2 | Scadenza scrittura ACK / peer non leggente | ✅ | `ack_write_timeout_ms`, `non_reading_peer_is_closed_and_reconciles_by_reconnect` |
 | D3 | Takeover: chiusura del vecchio link | ✅ | `repeated_takeovers_do_not_exhaust_connection_slots` |
+| P2 (review) | Takeover di un link in backpressure che non legge: slot liberato subito | ✅ | ADR 0008 §P2, contratto §2.1, `takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly` (`current_thread` e `multi_thread(2)`) |
 | D4 | Ordine su runtime multicore | ✅ | `ingestion_modes_preserve_order_and_give_the_same_normalized_state`, suite runtime con `multi_thread:2` |
 | D5 | Replay deterministico dello stream sequenziato | ✅ | `capture.rs`, `captured_streams_replay_to_the_live_digest_in_every_mode` (replay su `Kernel` e sul kernel VS-001 congelato) |
 | D6 | Nessun timeout del dispositivo nel core | ✅ | Nessuna modifica a `apply` |
@@ -277,5 +279,9 @@ Brief: `MoscaSCADA_VS002_Agent_Brief.md`. Base `b17413f` (VS-001), branch `vs-00
 6. Il thread sequencer è al 64 % con `mt2` a 125 kbatch/s: con più core per l'I/O diventerà il collo di bottiglia (single writer per progetto).
 7. Finestra `bind`→`chmod` del socket; controllo solo della directory immediata, non dei componenti superiori del percorso.
 8. Bound di memoria = allocazioni applicative con una stima fissa per task Tokio; non è un bound dell'RSS.
-9. D3 cambia un comportamento osservabile (il link superato viene chiuso subito); documentato nel contratto §2.1.
+9. D3 cambia un comportamento osservabile (il link superato viene chiuso subito, anche in backpressure, e i suoi ACK non ancora scritti possono andare persi); documentato nel contratto §2.1.
 10. Miri non eseguito.
+11. **Fairness per sorgente**: non implementata; serve un ADR dedicato (code per sorgente con round robin nel sequencer vs. quote per sorgente) prima di affrontarla. Follow-up indicato dalla review.
+12. **Raspberry Pi / ARM64 reale**: nessun test su hardware; da eseguire (build nativa, suite, campagna 3 ridotta, soak). Follow-up indicato dalla review.
+13. **Limiti funzionali**: nessuna durabilità né supervisione remota (`APPLIED_VOLATILE`, nessun journal, nessuna replica).
+14. Le prove di qualità (test, proptest, fuzz a tempo, benchmark su una VM) non sono una **prova formale**: riducono il rischio, non lo escludono.
