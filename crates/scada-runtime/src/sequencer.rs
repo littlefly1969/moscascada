@@ -13,7 +13,9 @@ use scada_core::{
 };
 use scada_protocol::driver_v1::{AckStatus, ErrorCode};
 use scada_protocol::introspect_v1 as ipb;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
+
+use crate::ingress::Inbox;
 
 use crate::capture::CaptureWriter;
 use crate::convert;
@@ -78,10 +80,13 @@ pub enum Request {
         link_generation: u64,
     },
     /// `submitted`: when the session started to submit it (diagnostics only).
+    /// `permits`: VS-003 admission permits (empty with `fifo`), released when the request
+    /// is dropped after `apply`.
     Batch {
         batch: ObservationBatch,
         reply: oneshot::Sender<BatchReply>,
         submitted: Option<Instant>,
+        permits: crate::ingress::Permits,
     },
     Introspect {
         include_tags: bool,
@@ -112,7 +117,7 @@ pub struct SequencerContext {
 /// it), so the host can stop instead of running without its single writer.
 pub fn spawn(
     kernel: Kernel,
-    rx: mpsc::Receiver<Request>,
+    rx: Inbox,
     ctx: SequencerContext,
     capture: Option<CaptureWriter>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
@@ -134,12 +139,7 @@ struct Links {
     active: Vec<Option<(u64, oneshot::Sender<()>)>>,
 }
 
-fn run(
-    mut kernel: Kernel,
-    mut rx: mpsc::Receiver<Request>,
-    ctx: SequencerContext,
-    capture: Option<CaptureWriter>,
-) -> Kernel {
+fn run(mut kernel: Kernel, mut rx: Inbox, ctx: SequencerContext, capture: Option<CaptureWriter>) -> Kernel {
     let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new() };
     links.active.resize_with(kernel.config().sources().len(), || None);
     // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
@@ -198,7 +198,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
             }
         }
-        Request::Batch { batch, reply, submitted } => {
+        Request::Batch { batch, reply, submitted, permits } => {
             let d = ctx.diag.as_deref();
             let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
             if let (Some(d), Some(t)) = (d, submitted) {
@@ -215,6 +215,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             }
             // ACK only after `apply` returned; if the session is gone the ACK is moot.
             let _ = reply.send(r);
+            drop(permits); // VS-003: the batch is applied, its admission slots are free
         }
         Request::Introspect { include_tags, reset_diagnostics, reply } => {
             // Everything applied before this answer is on disk for a test that replays it.

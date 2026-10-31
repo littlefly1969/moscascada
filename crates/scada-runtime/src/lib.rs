@@ -11,5 +11,6 @@ pub mod capture;
 pub mod config;
 pub mod convert;
 pub mod diag;
+pub mod ingress;
 pub mod sequencer;
 pub mod server;

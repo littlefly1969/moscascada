@@ -48,6 +48,11 @@ struct FileIpc {
     /// C5: at most this many already-available ACKs per socket write (1 = one per write).
     #[serde(default = "d_ack_coalesce")]
     ack_coalesce_max: u32,
+    /// VS-003 (ADR 0010): `"fifo"` (default, VS-002), `"source_capped"`, `"source_fair"`.
+    ingress_policy: Option<String>,
+    /// VS-003: batches one source may have admitted and not yet applied. Only with a
+    /// policy other than `fifo` (required there, forbidden with `fifo`).
+    per_source_pending_limit: Option<u32>,
 }
 
 fn d_write_timeout() -> u64 {
@@ -165,6 +170,59 @@ pub struct IpcLimits {
     pub read_buffer_bytes: u32,
     /// ACKs per socket write (C5): only ACKs already available are grouped, never waited for.
     pub ack_coalesce_max: u32,
+    /// VS-003 ingress policy (ADR 0010).
+    pub ingress: IngressPolicy,
+}
+
+/// How admitted requests reach the single writer (ADR 0010). Never changes the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressPolicy {
+    /// A: one global bounded FIFO (`input_queue_capacity`), VS-002 behaviour.
+    Fifo,
+    /// B: the same FIFO, plus at most `per_source` admitted, not yet applied batches per
+    /// source. Not fair scheduling: only a quota.
+    SourceCapped { per_source: u32 },
+    /// C: per-source bounded lanes served round-robin (one request per turn), at most
+    /// `per_source` batches per source and `input_queue_capacity` in total.
+    SourceFair { per_source: u32 },
+}
+
+impl IngressPolicy {
+    pub fn per_source(&self) -> Option<u32> {
+        match *self {
+            IngressPolicy::Fifo => None,
+            IngressPolicy::SourceCapped { per_source } | IngressPolicy::SourceFair { per_source } => Some(per_source),
+        }
+    }
+}
+
+impl fmt::Display for IngressPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IngressPolicy::Fifo => write!(f, "fifo"),
+            IngressPolicy::SourceCapped { per_source } => write!(f, "source_capped({per_source})"),
+            IngressPolicy::SourceFair { per_source } => write!(f, "source_fair({per_source})"),
+        }
+    }
+}
+
+fn parse_ingress(policy: Option<&str>, limit: Option<u32>, inflight: u32) -> Result<IngressPolicy, String> {
+    let need = |name: &str| -> Result<u32, String> {
+        let l = limit.ok_or_else(|| format!("ingress_policy = \"{name}\" requires per_source_pending_limit"))?;
+        if l == 0 || l > inflight {
+            return Err(format!("per_source_pending_limit={l} outside 1..=max_inflight_per_connection ({inflight})"));
+        }
+        Ok(l)
+    };
+    match policy.unwrap_or("fifo") {
+        "fifo" if limit.is_some() => {
+            Err("per_source_pending_limit is only valid with a per-source ingress_policy".into())
+        }
+        "fifo" => Ok(IngressPolicy::Fifo),
+        "source_capped" => Ok(IngressPolicy::SourceCapped { per_source: need("source_capped")? }),
+        "source_fair" => Ok(IngressPolicy::SourceFair { per_source: need("source_fair")? }),
+        other => Err(format!("unknown ingress_policy {other:?} (fifo | source_capped | source_fair)")),
+    }
 }
 
 /// Upper bound for `worker_threads` (a guardrail against typos, not a recommendation).
@@ -292,6 +350,12 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         ack_write_timeout_ms: ipc.ack_write_timeout_ms,
         read_buffer_bytes: ipc.read_buffer_bytes,
         ack_coalesce_max: ipc.ack_coalesce_max,
+        ingress: parse_ingress(
+            ipc.ingress_policy.as_deref(),
+            ipc.per_source_pending_limit,
+            ipc.max_inflight_per_connection,
+        )
+        .map_err(LoadError::Ipc)?,
     };
     let range = |name: &str, v: u64, lo: u64, hi: u64| {
         if v < lo || v > hi { Err(LoadError::Ipc(format!("{name}={v} outside {lo}..={hi}"))) } else { Ok(()) }

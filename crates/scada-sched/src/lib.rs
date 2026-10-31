@@ -29,9 +29,12 @@
 //!
 //! # Guarantees (logical, proved by the tests in `tests/`)
 //!
-//! * Bounded: `len() <= lanes * (lane_capacity + control_capacity)`; no allocation after
-//!   [`FairQueue::new`] (all `VecDeque`s are created with their final capacity and never
-//!   exceed it).
+//! * Bounded: `len() <= lanes * (lane_capacity + control_capacity)`. Each lane is created
+//!   with room for `lane_capacity + min(control_capacity, PREALLOC_CONTROL)` entries and
+//!   the ready ring with room for every lane, so the data path never allocates after
+//!   [`FairQueue::new`]; a lane grows (bounded by `control_capacity`) only when more than
+//!   `PREALLOC_CONTROL` control requests of one lane are queued at once (a flood of
+//!   connects for one source).
 //! * No loss and no double service: every pushed value is returned exactly once, by
 //!   [`FairQueue::pop`] or [`FairQueue::drain`].
 //! * Per-lane FIFO order.
@@ -83,6 +86,13 @@ impl fmt::Display for ParamError {
 }
 
 impl std::error::Error for ParamError {}
+
+/// Control entries preallocated per lane (see the crate documentation).
+pub const PREALLOC_CONTROL: u32 = 2;
+
+fn prealloc(p: &Params) -> usize {
+    p.lane_capacity as usize + p.control_capacity.min(PREALLOC_CONTROL) as usize
+}
 
 /// Kind of a queued request. Only the admission accounting differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +162,8 @@ pub struct FairQueue<T> {
 }
 
 impl<T> FairQueue<T> {
-    /// Allocate every lane and the ready ring with their final capacity.
+    /// Allocate every lane (data capacity + [`PREALLOC_CONTROL`] control entries) and the
+    /// ready ring.
     pub fn new(params: Params) -> Result<FairQueue<T>, ParamError> {
         if params.lanes == 0 {
             return Err(ParamError("lanes must be >= 1"));
@@ -167,7 +178,7 @@ impl<T> FairQueue<T> {
             }
             _ => {}
         }
-        let per_lane = params.lane_capacity as usize + params.control_capacity as usize;
+        let per_lane = prealloc(&params);
         let lanes = (0..params.lanes)
             .map(|_| Lane { items: VecDeque::with_capacity(per_lane), data: 0, control: 0, queued: false, deficit: 0 })
             .collect();
@@ -329,7 +340,7 @@ impl<T> FairQueue<T> {
         if let Some((t, _)) = self.turn {
             in_ring[t as usize] += 1;
         }
-        let per_lane = self.params.lane_capacity as usize + self.params.control_capacity as usize;
+        let per_lane = prealloc(&self.params);
         for (i, l) in self.lanes.iter().enumerate() {
             let d = l.items.iter().filter(|e| e.kind == Kind::Data).count() as u32;
             let c = l.items.len() as u32 - d;

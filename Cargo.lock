@@ -746,6 +746,7 @@ dependencies = [
  "prost",
  "scada-core",
  "scada-protocol",
+ "scada-sched",
  "scada-sim-driver",
  "serde",
  "tempfile",
