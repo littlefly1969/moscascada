@@ -30,6 +30,8 @@ pub struct Limits {
     pub max_inflight_per_connection: u32,
     pub handshake_timeout_ms: u64,
     pub frame_timeout_ms: u64,
+    pub ack_write_timeout_ms: u64,
+    pub read_buffer_bytes: u32,
 }
 
 impl Default for Limits {
@@ -41,6 +43,8 @@ impl Default for Limits {
             max_inflight_per_connection: 32,
             handshake_timeout_ms: 2_000,
             frame_timeout_ms: 2_000,
+            ack_write_timeout_ms: 5_000,
+            read_buffer_bytes: 0,
         }
     }
 }
@@ -58,6 +62,8 @@ input_queue_capacity = {q}
 max_inflight_per_connection = {inf}
 handshake_timeout_ms = {ht}
 frame_timeout_ms = {ft}
+ack_write_timeout_ms = {wt}
+read_buffer_bytes = {rb}
 
 [[tags]]
 id = 101
@@ -91,7 +97,7 @@ name = "restricted"
 authorized_uids = [4294967294]
 channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
 {load}"#,
-        load = (1..=8)
+        load = (1..=16)
             .map(|n| format!(
                 "\n[[tags]]\nid = {t}\nname = \"load_{n}\"\ntype = \"i64\"\n\n[[sources]]\nid = {s}\nname = \"load-{n}\"\nchannels = [ {{ channel = 1, tag = {t}, type = \"i64\" }} ]\n",
                 t = 300 + n,
@@ -105,6 +111,8 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         inf = l.max_inflight_per_connection,
         ht = l.handshake_timeout_ms,
         ft = l.frame_timeout_ms,
+        wt = l.ack_write_timeout_ms,
+        rb = l.read_buffer_bytes,
     )
 }
 

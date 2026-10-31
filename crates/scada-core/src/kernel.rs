@@ -417,6 +417,8 @@ impl Kernel {
 
     fn batch(&mut self, b: &ObservationBatch, op: u64) -> Result<TransitionOutcome, ApplyError> {
         let src = self.source_index(b.source_id)?;
+        // C4: removing this `Arc::clone` (split borrows) was measured: -8..-18 % on `apply`
+        // but not repeatable (p > 0.05 in 4 of 7 cases, ADR 0007); kept as in VS-001.
         let config = Arc::clone(&self.config);
         let meta = config.sources().get(src).ok_or(ApplyError::UnknownSource(b.source_id))?;
         let rt = self.sources.get(src).ok_or(ApplyError::UnknownSource(b.source_id))?;
@@ -448,6 +450,8 @@ impl Kernel {
             let tag_index = u32::try_from(tag_index).map_err(|_| ApplyError::UnknownChannel(o.channel_id))?;
             self.staging.push(Staged { tag_index, channel_id: o.channel_id, value: o.value });
         }
+        // C4: an `is_sorted` pre-check was measured and dropped (within noise in all cases):
+        // the unstable sort already handles sorted or reversed input in linear time.
         self.staging.sort_unstable_by_key(|s| s.tag_index);
         for w in self.staging.windows(2) {
             if let [a, c] = w

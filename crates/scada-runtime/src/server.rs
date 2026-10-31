@@ -290,7 +290,10 @@ async fn session(server: &Server, stream: UnixStream) {
         Some(true) => {}
     }
     let (tx, rx) = oneshot::channel();
-    if submit(server, Request::Connect { source_id, source_epoch: hello.source_epoch, reply: tx }).await.is_err() {
+    let (superseded_tx, superseded_rx) = oneshot::channel();
+    let connect =
+        Request::Connect { source_id, source_epoch: hello.source_epoch, reply: tx, superseded: superseded_tx };
+    if submit(server, connect).await.is_err() {
         reject(server, &mut wr, ErrorCode::KernelShuttingDown, "sequencer stopped", &mut scratch).await;
         return;
     }
@@ -322,9 +325,10 @@ async fn session(server: &Server, stream: UnixStream) {
             last_accepted_source_sequence: last_accepted,
         })),
     };
-    if write_msg(&mut wr, &welcome, max, &mut scratch).await.is_ok() {
+    let write_timeout = Duration::from_millis(limits.ack_write_timeout_ms);
+    if matches!(timeout(write_timeout, write_msg(&mut wr, &welcome, max, &mut scratch)).await, Ok(Ok(()))) {
         // ---- Data phase ----
-        data_phase(server, rd, wr, source_id, link_generation, buf).await;
+        data_phase(server, rd, wr, source_id, link_generation, buf, superseded_rx).await;
     }
     // Every Connected link gets exactly one Disconnected, queued after all of its batches.
     let _ = submit(server, Request::Disconnect { source_id, link_generation }).await;
@@ -342,11 +346,12 @@ async fn reject(server: &Server, wr: &mut OwnedWriteHalf, code: ErrorCode, detai
 
 async fn data_phase(
     server: &Server,
-    mut rd: OwnedReadHalf,
+    rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     source_id: SourceId,
     link_generation: u64,
     mut buf: Vec<u8>,
+    mut superseded: oneshot::Receiver<()>,
 ) {
     let limits = server.config.limits;
     let max = limits.max_frame_bytes;
@@ -355,7 +360,21 @@ async fn data_phase(
     let (closed_tx, mut closed_rx) = oneshot::channel::<()>();
     let diag = server.diag.as_deref();
     let probe = diag.is_some_and(|d| d.is_probe(source_id.0));
-    let writer = writer_task(server.kernel_instance_id, max, wr, pending_rx, closed_tx, diag, probe);
+    let ws = WriterSettings {
+        instance_id: server.kernel_instance_id,
+        max_frame: max,
+        write_timeout: Duration::from_millis(limits.ack_write_timeout_ms),
+        coalesce_max: limits.ack_coalesce_max,
+    };
+    let counters = &server.counters;
+    let writer = writer_task(ws, wr, pending_rx, closed_tx, diag, probe, counters);
+    // C5: optional read buffer, so that one `recv` can deliver several pipelined frames.
+    // 0 = read straight from the socket (VS-001). Frame limits are unchanged: the length
+    // is still validated before the payload buffer is resized.
+    let mut rd = match limits.read_buffer_bytes {
+        0 => Reader::Plain(rd),
+        n => Reader::Buffered(tokio::io::BufReader::with_capacity(n as usize, rd)),
+    };
     let reader = async move {
         // C3: decoded batch reused across frames (observation buffer keeps its capacity).
         let mut wire = pb::ObservationBatch::default();
@@ -363,6 +382,16 @@ async fn data_phase(
             let frame = tokio::select! {
                 r = read_frame(&mut rd, max, &mut buf, Duration::from_millis(limits.frame_timeout_ms), diag) => r,
                 _ = &mut closed_rx => return, // writer stopped (peer gone or link superseded)
+                r = &mut superseded => {
+                    // Ok: a newer link of this source was welcomed (D3). Err: the
+                    // sequencer is gone. Either way this link is finished.
+                    if r.is_ok() {
+                        Counters::inc(&server.counters.links_superseded);
+                        let msg = protocol_error(ErrorCode::LinkSuperseded, "a newer link took over this source");
+                        let _ = pending_tx.send(Pending::Fatal(msg)).await;
+                    }
+                    return;
+                }
             };
             let frame_done = diag::now(diag);
             let fatal = match frame {
@@ -447,59 +476,204 @@ async fn data_phase(
     tokio::join!(reader, writer);
 }
 
+/// Read half of a data-phase connection, with or without the C5 read buffer.
+enum Reader {
+    Plain(OwnedReadHalf),
+    Buffered(tokio::io::BufReader<OwnedReadHalf>),
+}
+
+impl AsyncRead for Reader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match self.get_mut() {
+            Reader::Plain(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+            Reader::Buffered(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+        }
+    }
+}
+
+/// Settings of one connection's ACK writer.
+#[derive(Debug, Clone, Copy)]
+struct WriterSettings {
+    instance_id: [u8; KERNEL_INSTANCE_ID_LEN],
+    max_frame: u32,
+    /// D2: every socket write must complete within this time, otherwise the connection is
+    /// closed. A peer that stops reading cannot hold the session (and its slots) forever.
+    write_timeout: Duration,
+    /// C5: at most this many ACKs that are already available are encoded into one write.
+    /// 1 = one write per ACK (VS-001).
+    coalesce_max: u32,
+}
+
+/// What the writer does with one pending entry once it is resolved.
+enum Next {
+    Ack {
+        source_sequence: u64,
+        reply: BatchReply,
+        frame_done: Option<Instant>,
+    },
+    Fatal(KernelMessage),
+    /// The sequencer is gone: close without inventing an ACK.
+    Stop,
+}
+
+async fn resolve(p: Pending, diag: Option<&Diag>) -> Next {
+    match p {
+        Pending::Wait { source_sequence, reply, frame_done } => match reply.await {
+            Ok(r) => {
+                if let (Some(d), Some(t)) = (diag, r.sent) {
+                    d.since(Stage::ReplyWait, t);
+                }
+                Next::Ack { source_sequence, reply: r, frame_done }
+            }
+            Err(_) => Next::Stop,
+        },
+        Pending::Ready { source_sequence, reply } => Next::Ack { source_sequence, reply, frame_done: None },
+        Pending::Fatal(msg) => Next::Fatal(msg),
+    }
+}
+
+/// Non-blocking variant: `Err(p)` gives the entry back when its reply is not there yet.
+fn try_resolve(p: Pending, diag: Option<&Diag>) -> Result<Next, Pending> {
+    match p {
+        Pending::Wait { source_sequence, mut reply, frame_done } => match reply.try_recv() {
+            Ok(r) => {
+                if let (Some(d), Some(t)) = (diag, r.sent) {
+                    d.since(Stage::ReplyWait, t);
+                }
+                Ok(Next::Ack { source_sequence, reply: r, frame_done })
+            }
+            Err(oneshot::error::TryRecvError::Empty) => Err(Pending::Wait { source_sequence, reply, frame_done }),
+            Err(oneshot::error::TryRecvError::Closed) => Ok(Next::Stop),
+        },
+        other => Ok(ready_now(other)),
+    }
+}
+
+fn ready_now(p: Pending) -> Next {
+    match p {
+        Pending::Ready { source_sequence, reply } => Next::Ack { source_sequence, reply, frame_done: None },
+        Pending::Fatal(msg) => Next::Fatal(msg),
+        Pending::Wait { .. } => Next::Stop, // unreachable: handled by try_resolve
+    }
+}
+
+async fn timed_write(wr: &mut OwnedWriteHalf, bytes: &[u8], t: Duration) -> io::Result<()> {
+    match timeout(t, wr.write_all(bytes)).await {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "peer does not read")),
+    }
+}
+
+/// Writes the ACKs of one connection in batch order. ACKs are written only after the
+/// sequencer replied, i.e. after `apply` returned; nothing is ever acknowledged ahead.
 async fn writer_task(
-    id: [u8; KERNEL_INSTANCE_ID_LEN],
-    max: u32,
+    ws: WriterSettings,
     mut wr: OwnedWriteHalf,
     mut pending: mpsc::Receiver<Pending>,
     closed: oneshot::Sender<()>,
     diag: Option<&Diag>,
     probe: bool,
+    counters: &Counters,
 ) {
-    let mut scratch = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
+    let mut frame = Vec::new();
     let mut ack = KernelMessage {
-        body: Some(kernel_message::Body::Ack(pb::InputAck { kernel_instance_id: id.to_vec(), ..Default::default() })),
+        body: Some(kernel_message::Body::Ack(pb::InputAck {
+            kernel_instance_id: ws.instance_id.to_vec(),
+            ..Default::default()
+        })),
     };
-    while let Some(p) = pending.recv().await {
-        let (source_sequence, reply, frame_done) = match p {
-            Pending::Wait { source_sequence, reply, frame_done } => match reply.await {
-                Ok(r) => {
-                    if let (Some(d), Some(t)) = (diag, r.sent) {
-                        d.since(Stage::ReplyWait, t);
-                    }
-                    (source_sequence, r, frame_done)
-                }
-                Err(_) => break, // sequencer gone: close the connection, never fake an ACK
+    // In-kernel timestamps of the ACKs in `out` (diagnostics only; bounded by coalesce_max).
+    let mut stamps: Vec<Instant> = Vec::new();
+    let mut head: Option<Pending> = None;
+    'conn: loop {
+        let first = match head.take() {
+            Some(p) => p,
+            None => match pending.recv().await {
+                Some(p) => p,
+                None => break,
             },
-            Pending::Ready { source_sequence, reply } => (source_sequence, reply, None),
-            Pending::Fatal(msg) => {
-                let _ = write_msg(&mut wr, &msg, max, &mut scratch).await;
+        };
+        let mut next = resolve(first, diag).await;
+        let mut n = 0u32;
+        let mut stop = false;
+        out.clear();
+        stamps.clear();
+        loop {
+            match next {
+                Next::Ack { source_sequence, reply, frame_done } => {
+                    // C2: one ACK message per connection, every per-batch field overwritten.
+                    if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
+                        set_ack(a, source_sequence, &reply);
+                    }
+                    if frame::encode_frame(&ack, ws.max_frame, &mut frame).is_err() {
+                        stop = true;
+                        break;
+                    }
+                    out.extend_from_slice(&frame);
+                    if let (Some(_), Some(t)) = (diag, frame_done) {
+                        stamps.push(t);
+                    }
+                    n += 1;
+                    if reply.error_code == ErrorCode::LinkSuperseded {
+                        stop = true; // a newer link owns the source; this one is closed
+                        break;
+                    }
+                }
+                Next::Fatal(msg) => {
+                    if frame::encode_frame(&msg, ws.max_frame, &mut frame).is_ok() {
+                        out.extend_from_slice(&frame);
+                    }
+                    stop = true;
+                    break;
+                }
+                Next::Stop => {
+                    stop = true;
+                    break;
+                }
+            }
+            if n >= ws.coalesce_max {
                 break;
             }
-        };
-        // C2: one ACK message per connection, fields overwritten per batch; the instance id
-        // is copied once instead of once per ACK. Every field is assigned: same bytes.
-        if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
-            set_ack(a, source_sequence, &reply);
+            // C5: append ACKs that are already available, never wait for more.
+            match pending.try_recv() {
+                Ok(p) => match try_resolve(p, diag) {
+                    Ok(x) => next = x,
+                    Err(p) => {
+                        head = Some(p);
+                        break;
+                    }
+                },
+                Err(_) => break,
+            }
         }
-        let t_w = diag::now(diag);
-        if write_msg(&mut wr, &ack, max, &mut scratch).await.is_err() {
-            break;
-        }
-        if let (Some(d), Some(t_w)) = (diag, t_w) {
-            d.since(Stage::AckWrite, t_w);
-            if let Some(t) = frame_done {
-                d.since(Stage::InKernel, t);
-                if probe {
-                    d.since(Stage::ProbeInKernel, t);
+        if !out.is_empty() {
+            let t_w = diag::now(diag);
+            if let Err(e) = timed_write(&mut wr, &out, ws.write_timeout).await {
+                if e.kind() == io::ErrorKind::TimedOut {
+                    Counters::inc(&counters.ack_write_timeouts);
+                }
+                break 'conn;
+            }
+            if let (Some(d), Some(t_w)) = (diag, t_w) {
+                d.since(Stage::AckWrite, t_w);
+                for t in &stamps {
+                    d.since(Stage::InKernel, *t);
+                    if probe {
+                        d.since(Stage::ProbeInKernel, *t);
+                    }
                 }
             }
         }
-        if reply.error_code == ErrorCode::LinkSuperseded {
-            break; // a newer link owns the source; this one is closed
+        if stop {
+            break;
         }
     }
-    let _ = wr.shutdown().await;
+    let _ = timeout(ws.write_timeout, wr.shutdown()).await;
     drop(closed);
 }
 

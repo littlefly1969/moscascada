@@ -58,6 +58,10 @@ message RuntimeCounters {
   uint64 input_queue_full_waits = 8;
   uint32 input_queue_capacity = 9;
   uint32 active_connections = 10;
+  // VS-002: connections closed because the peer did not read its ACKs in time.
+  uint64 ack_write_timeouts = 11;
+  // VS-002: connections closed because a newer link took over their source.
+  uint64 links_superseded = 12;
 }
 
 message IntrospectResponse {

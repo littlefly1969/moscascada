@@ -39,6 +39,19 @@ struct FileIpc {
     handshake_timeout_ms: u64,
     #[serde(default = "d_timeout")]
     frame_timeout_ms: u64,
+    /// D2: deadline for writing ACKs to a peer; a peer that does not read is closed.
+    #[serde(default = "d_write_timeout")]
+    ack_write_timeout_ms: u64,
+    /// C5: per-connection read buffer (0 = unbuffered, VS-001 behaviour).
+    #[serde(default = "d_read_buffer")]
+    read_buffer_bytes: u32,
+}
+
+fn d_write_timeout() -> u64 {
+    5_000
+}
+fn d_read_buffer() -> u32 {
+    0
 }
 
 fn d_max_frame() -> u32 {
@@ -142,6 +155,10 @@ pub struct IpcLimits {
     pub max_inflight_per_connection: u32,
     pub handshake_timeout_ms: u64,
     pub frame_timeout_ms: u64,
+    pub ack_write_timeout_ms: u64,
+    pub read_buffer_bytes: u32,
+    /// ACKs per socket write (C5). Not in the file: an A/B switch of the benchmark only.
+    pub ack_coalesce_max: u32,
 }
 
 /// Upper bound for `worker_threads` (a guardrail against typos, not a recommendation).
@@ -281,6 +298,9 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         max_inflight_per_connection: ipc.max_inflight_per_connection,
         handshake_timeout_ms: ipc.handshake_timeout_ms,
         frame_timeout_ms: ipc.frame_timeout_ms,
+        ack_write_timeout_ms: ipc.ack_write_timeout_ms,
+        read_buffer_bytes: ipc.read_buffer_bytes,
+        ack_coalesce_max: 1,
     };
     let range = |name: &str, v: u64, lo: u64, hi: u64| {
         if v < lo || v > hi { Err(LoadError::Ipc(format!("{name}={v} outside {lo}..={hi}"))) } else { Ok(()) }
@@ -291,6 +311,8 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
     range("max_inflight_per_connection", limits.max_inflight_per_connection.into(), 1, 1024)?;
     range("handshake_timeout_ms", limits.handshake_timeout_ms, 1, 600_000)?;
     range("frame_timeout_ms", limits.frame_timeout_ms, 1, 600_000)?;
+    range("ack_write_timeout_ms", limits.ack_write_timeout_ms, 1, 600_000)?;
+    range("read_buffer_bytes", limits.read_buffer_bytes.into(), 0, 1 << 20)?;
     let needed = f
         .core
         .max_observations_per_batch

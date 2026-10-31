@@ -1,0 +1,57 @@
+   Compiling scada-core v0.1.0 (/home/claude/moscascada/crates/scada-core)
+   Compiling scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+   Compiling scada-bench v0.1.0 (/home/claude/moscascada/apps/scada-bench)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 25.55s
+     Running benches/micro.rs (target/release/deps/micro-49ba383f5f65a021)
+Benchmarking apply/sorted/1
+Benchmarking apply/sorted/1: Warming up for 1.0000 s
+Benchmarking apply/sorted/1: Collecting 100 samples in estimated 3.0002 s (20M iterations)
+Benchmarking apply/sorted/1: Analyzing
+apply/sorted/1          time:   [78.377 ns 81.874 ns 86.139 ns]
+                        change: [−19.364% −13.461% −6.9854%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking apply/sorted/32
+Benchmarking apply/sorted/32: Warming up for 1.0000 s
+Benchmarking apply/sorted/32: Collecting 100 samples in estimated 3.0030 s (1.9M iterations)
+Benchmarking apply/sorted/32: Analyzing
+apply/sorted/32         time:   [1.3185 µs 1.3838 µs 1.4400 µs]
+                        change: [−6.1406% +0.3151% +7.4017%] (p = 0.93 > 0.05)
+                        No change in performance detected.
+Benchmarking apply/reversed/32
+Benchmarking apply/reversed/32: Warming up for 1.0000 s
+Benchmarking apply/reversed/32: Collecting 100 samples in estimated 3.0015 s (1.7M iterations)
+Benchmarking apply/reversed/32: Analyzing
+apply/reversed/32       time:   [1.5586 µs 1.6866 µs 1.7968 µs]
+                        change: [+7.0101% +16.463% +25.853%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking apply/shuffled/32
+Benchmarking apply/shuffled/32: Warming up for 1.0000 s
+Benchmarking apply/shuffled/32: Collecting 100 samples in estimated 3.0008 s (1.3M iterations)
+Benchmarking apply/shuffled/32: Analyzing
+apply/shuffled/32       time:   [1.7594 µs 1.8716 µs 2.0048 µs]
+                        change: [+19.857% +27.749% +36.006%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking apply/sorted/128
+Benchmarking apply/sorted/128: Warming up for 1.0000 s
+Benchmarking apply/sorted/128: Collecting 100 samples in estimated 3.0259 s (374k iterations)
+Benchmarking apply/sorted/128: Analyzing
+apply/sorted/128        time:   [5.8771 µs 5.9210 µs 5.9583 µs]
+                        change: [+16.782% +22.578% +28.518%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking apply/reversed/128
+Benchmarking apply/reversed/128: Warming up for 1.0000 s
+Benchmarking apply/reversed/128: Collecting 100 samples in estimated 3.0123 s (343k iterations)
+Benchmarking apply/reversed/128: Analyzing
+apply/reversed/128      time:   [4.3571 µs 4.6268 µs 4.9178 µs]
+                        change: [−11.497% −5.6355% +0.6185%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking apply/shuffled/128
+Benchmarking apply/shuffled/128: Warming up for 1.0000 s
+Benchmarking apply/shuffled/128: Collecting 100 samples in estimated 3.0614 s (232k iterations)
+Benchmarking apply/shuffled/128: Analyzing
+apply/shuffled/128      time:   [7.7615 µs 8.1155 µs 8.4616 µs]
+                        change: [+14.257% +19.905% +24.994%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+

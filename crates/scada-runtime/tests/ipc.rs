@@ -390,9 +390,15 @@ fn superseded_link_cannot_overwrite_new_generation() {
         status(&new.request(&batch(BatchMode::Delta, 2, &[(3, Val::I(200))])).unwrap()),
         AckStatus::AppliedVolatile
     );
-    // Old link writes: refused, then closed by the kernel.
-    let ack = old.request(&batch(BatchMode::Delta, 3, &[(3, Val::I(999))])).unwrap();
-    assert_eq!(ErrorCode::try_from(ack.error_code).unwrap(), ErrorCode::LinkSuperseded);
+    // Old link: VS-002 (D3) closes it as soon as the new link is welcomed, with a
+    // ProtocolError LINK_SUPERSEDED; a batch that races the takeover is refused with an
+    // ACK carrying the same code (VS-001 behaviour). Either way nothing is applied.
+    match old.request(&batch(BatchMode::Delta, 3, &[(3, Val::I(999))])) {
+        Ok(ack) => assert_eq!(ErrorCode::try_from(ack.error_code).unwrap(), ErrorCode::LinkSuperseded),
+        Err(ClientError::Protocol { code, .. }) => assert_eq!(code, ErrorCode::LinkSuperseded),
+        Err(ClientError::Closed) | Err(ClientError::Frame(_)) => {}
+        Err(e) => panic!("unexpected {e}"),
+    }
     assert!(matches!(old.recv(), Err(ClientError::Closed) | Err(ClientError::Frame(_))));
     drop(old);
     std::thread::sleep(Duration::from_millis(100));

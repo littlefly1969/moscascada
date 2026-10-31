@@ -178,6 +178,43 @@ fn run(seed: u64, steps: usize) -> usize {
 }
 
 #[test]
+fn dense_index_only_for_compact_numbering_and_lookup_matches_binary_search() {
+    let cfg = config();
+    let dense: Vec<bool> = cfg.sources().iter().map(|s| s.has_dense_index()).collect();
+    assert_eq!(dense, [true, false, true]);
+    // Every channel id near the configured ones resolves exactly as a binary search does.
+    for s in cfg.sources() {
+        for probe in 0..13_100u32 {
+            let ch = s.channels();
+            let want = ch.binary_search_by_key(&ChannelId(probe), |&(c, _)| c).ok().map(|i| ch[i].1 as usize);
+            assert_eq!(s.tag_index(ChannelId(probe)), want, "source {} channel {probe}", s.source_id);
+        }
+        assert_eq!(s.tag_index(ChannelId(u32::MAX)), None);
+    }
+    // Holes inside a compact range: span 6 for 4 channels is still dense.
+    let spec = ConfigSpec {
+        limits: CoreLimits::default(),
+        tags: (1..=4)
+            .map(|t| TagSpec { tag_id: TagId(t), name: format!("h{t}"), value_type: ValueType::I64 })
+            .collect(),
+        sources: vec![SourceSpec {
+            source_id: SourceId(1),
+            name: "holes".into(),
+            channels: [3u32, 4, 7, 8]
+                .iter()
+                .zip(1..)
+                .map(|(&c, t)| ChannelSpec { channel_id: ChannelId(c), tag_id: TagId(t), value_type: ValueType::I64 })
+                .collect(),
+        }],
+    };
+    let cfg = ValidatedConfig::validate(spec).unwrap();
+    let s = &cfg.sources()[0];
+    assert!(s.has_dense_index());
+    let got: Vec<Option<usize>> = (0..10).map(|c| s.tag_index(ChannelId(c))).collect();
+    assert_eq!(got, [None, None, None, Some(0), Some(1), None, None, Some(2), Some(3), None]);
+}
+
+#[test]
 fn optimized_kernel_matches_vs001_on_seeded_streams() {
     let mut applied = 0;
     for seed in 0..200 {

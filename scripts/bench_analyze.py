@@ -59,7 +59,7 @@ def perm_p(x, y, n_rand=20000):
 
 def fmt(m, v):
     if m.endswith("_ns"):
-        return f"{v / 1000:.1f}"
+        return f"{v / 1000:.2f}" if v < 100_000 else f"{v / 1000:.1f}"
     if m.endswith("_s") or m.endswith("_kib"):
         return f"{v:.0f}"
     return f"{v:.1f}"

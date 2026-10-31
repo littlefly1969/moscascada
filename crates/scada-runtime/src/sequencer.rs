@@ -30,6 +30,10 @@ pub struct Counters {
     pub batches_rejected: AtomicU64,
     pub input_queue_full_waits: AtomicU64,
     pub active_connections: AtomicU64,
+    /// D2: connections closed because the peer did not read its ACKs in time.
+    pub ack_write_timeouts: AtomicU64,
+    /// D3: connections closed because a newer link took over their source.
+    pub links_superseded: AtomicU64,
 }
 
 impl Counters {
@@ -60,10 +64,13 @@ pub struct BatchReply {
 /// Requests admitted into the bounded input queue.
 #[derive(Debug)]
 pub enum Request {
+    /// `superseded` fires (with `()`) when a later link of the same source is welcomed
+    /// (D3), so an idle old session is closed instead of holding a connection slot.
     Connect {
         source_id: SourceId,
         source_epoch: u64,
         reply: oneshot::Sender<ConnectReply>,
+        superseded: oneshot::Sender<()>,
     },
     Disconnect {
         source_id: SourceId,
@@ -114,8 +121,16 @@ pub fn spawn(
     Ok((handle, stopped))
 }
 
+/// Runtime-only state of the sequencer (never part of the kernel state or digest).
+struct Links {
+    next_generation: u64,
+    /// Per configured source (config order): active link generation and its takeover signal.
+    active: Vec<Option<(u64, oneshot::Sender<()>)>>,
+}
+
 fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContext) -> Kernel {
-    let mut next_generation: u64 = 0;
+    let mut links = Links { next_generation: 0, active: Vec::new() };
+    links.active.resize_with(kernel.config().sources().len(), || None);
     let drain = ctx.drain_max.max(1) as usize;
     if drain == 1 {
         // VS-001 path: one request per wake-up.
@@ -123,7 +138,7 @@ fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContex
             if let Some(d) = &ctx.diag {
                 d.record_ns(Stage::DrainSize, 1);
             }
-            handle(&mut kernel, &mut next_generation, req, &ctx);
+            handle(&mut kernel, &mut links, req, &ctx);
         }
         return kernel;
     }
@@ -140,21 +155,34 @@ fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContex
             d.record_ns(Stage::DrainSize, n as u64);
         }
         for req in taken.drain(..) {
-            handle(&mut kernel, &mut next_generation, req, &ctx);
+            handle(&mut kernel, &mut links, req, &ctx);
         }
     }
     kernel
 }
 
-fn handle(kernel: &mut Kernel, next_generation: &mut u64, req: Request, ctx: &SequencerContext) {
+fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerContext) {
     match req {
-        Request::Connect { source_id, source_epoch, reply } => {
-            let r = connect(kernel, next_generation, source_id, source_epoch);
+        Request::Connect { source_id, source_epoch, reply, superseded } => {
+            let r = connect(kernel, &mut links.next_generation, source_id, source_epoch);
+            if let ConnectReply::Welcome { link_generation, .. } = r
+                && let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
+                && let Some((_, old)) = slot.replace((link_generation, superseded))
+            {
+                // D3: tell the previous link of this source to close. Its own
+                // Disconnect stays queued after its batches and is ignored as stale.
+                let _ = old.send(());
+            }
             // A dropped receiver means the session died; its link will be disconnected
             // by that session's cleanup, which is always queued after this request.
             let _ = reply.send(r);
         }
         Request::Disconnect { source_id, link_generation } => {
+            if let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
+                && slot.as_ref().is_some_and(|(g, _)| *g == link_generation)
+            {
+                *slot = None;
+            }
             let Some(operation_sequence) = kernel.next_operation_sequence() else {
                 eprintln!("sequencer: operation sequence exhausted; disconnect of {source_id} not applied");
                 return;
@@ -343,6 +371,8 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             input_queue_full_waits: ld(&c.input_queue_full_waits),
             input_queue_capacity: ctx.input_queue_capacity,
             active_connections: u32::try_from(ld(&c.active_connections)).unwrap_or(u32::MAX),
+            ack_write_timeouts: ld(&c.ack_write_timeouts),
+            links_superseded: ld(&c.links_superseded),
         }),
         stages: ctx
             .diag

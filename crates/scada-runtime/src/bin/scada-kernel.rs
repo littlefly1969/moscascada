@@ -32,6 +32,8 @@ struct Args {
     diag: bool,
     probe_source: Option<u32>,
     drain: Option<u32>,
+    read_buffer: Option<u32>,
+    coalesce: Option<u32>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +49,8 @@ fn parse_args() -> Result<Args, String> {
         diag: false,
         probe_source: None,
         drain: None,
+        read_buffer: None,
+        coalesce: None,
     };
     let mut have_config = false;
     while let Some(arg) = it.next() {
@@ -64,6 +68,13 @@ fn parse_args() -> Result<Args, String> {
             }
             "--check-config" => a.check_only = true,
             "--diag" => a.diag = true,
+            "--read-buffer-bytes" => {
+                a.read_buffer =
+                    Some(val("--read-buffer-bytes")?.parse().map_err(|e| format!("--read-buffer-bytes: {e}"))?)
+            }
+            "--ack-coalesce-max" => {
+                a.coalesce = Some(val("--ack-coalesce-max")?.parse().map_err(|e| format!("--ack-coalesce-max: {e}"))?)
+            }
             "--sequencer-drain-max" => {
                 a.drain =
                     Some(val("--sequencer-drain-max")?.parse().map_err(|e| format!("--sequencer-drain-max: {e}"))?)
@@ -137,6 +148,20 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    if let Some(n) = args.read_buffer {
+        if n > 1 << 20 {
+            eprintln!("error: --read-buffer-bytes {n} outside 0..=1048576");
+            return ExitCode::from(2);
+        }
+        cfg.limits.read_buffer_bytes = n;
+    }
+    if let Some(n) = args.coalesce {
+        if !(1..=1024).contains(&n) {
+            eprintln!("error: --ack-coalesce-max {n} outside 1..=1024");
+            return ExitCode::from(2);
+        }
+        cfg.limits.ack_coalesce_max = n;
     }
     if args.check_only {
         println!("config ok: fingerprint={} scheduler={}", hex(&cfg.core.fingerprint()), cfg.runtime.scheduler);
