@@ -94,6 +94,8 @@ pub struct SequencerContext {
     pub diag: Option<Arc<Diag>>,
     /// Scheduler description reported by the introspection.
     pub scheduler: String,
+    /// Requests taken from the queue per wake-up (>= 1).
+    pub drain_max: u32,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -114,54 +116,82 @@ pub fn spawn(
 
 fn run(mut kernel: Kernel, mut rx: mpsc::Receiver<Request>, ctx: SequencerContext) -> Kernel {
     let mut next_generation: u64 = 0;
-    while let Some(req) = rx.blocking_recv() {
-        match req {
-            Request::Connect { source_id, source_epoch, reply } => {
-                let r = connect(&mut kernel, &mut next_generation, source_id, source_epoch);
-                // A dropped receiver means the session died; its link will be disconnected
-                // by that session's cleanup, which is always queued after this request.
-                let _ = reply.send(r);
+    let drain = ctx.drain_max.max(1) as usize;
+    if drain == 1 {
+        // VS-001 path: one request per wake-up.
+        while let Some(req) = rx.blocking_recv() {
+            if let Some(d) = &ctx.diag {
+                d.record_ns(Stage::DrainSize, 1);
             }
-            Request::Disconnect { source_id, link_generation } => {
-                let Some(operation_sequence) = kernel.next_operation_sequence() else {
-                    eprintln!("sequencer: operation sequence exhausted; disconnect of {source_id} not applied");
-                    continue;
-                };
-                let op = Operation::SourceDisconnected { source_id, link_generation };
-                if let Err(e) = kernel.apply(SequencedInput { operation_sequence, operation: op }) {
-                    eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
-                }
-            }
-            Request::Batch { batch, reply, submitted } => {
-                let d = ctx.diag.as_deref();
-                let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
-                if let (Some(d), Some(t)) = (d, submitted) {
-                    d.since(Stage::QueueWait, t);
-                    if probe {
-                        d.since(Stage::ProbeQueueWait, t);
-                    }
-                }
-                let t0 = diag::now(d);
-                let mut r = apply_batch(&mut kernel, batch, &ctx.counters);
-                if let (Some(d), Some(t0)) = (d, t0) {
-                    d.since(Stage::Apply, t0);
-                    r.sent = Some(Instant::now());
-                }
-                // ACK only after `apply` returned; if the session is gone the ACK is moot.
-                let _ = reply.send(r);
-            }
-            Request::Introspect { include_tags, reset_diagnostics, reply } => {
-                let _ = reply.send(introspect(&kernel, include_tags, &ctx));
-                if reset_diagnostics && let Some(d) = &ctx.diag {
-                    d.reset();
-                }
-            }
+            handle(&mut kernel, &mut next_generation, req, &ctx);
         }
-        if !ctx.throttle.is_zero() {
-            thread::sleep(ctx.throttle);
+        return kernel;
+    }
+    // Take what is already queued, up to `drain`, without waiting for more; then apply
+    // each request in order. Preallocated once; `recv_many` never grows it (len 0 <= cap).
+    let mut taken: Vec<Request> = Vec::with_capacity(drain);
+    loop {
+        taken.clear();
+        let n = rx.blocking_recv_many(&mut taken, drain);
+        if n == 0 {
+            break; // every sender dropped and the queue is empty
+        }
+        if let Some(d) = &ctx.diag {
+            d.record_ns(Stage::DrainSize, n as u64);
+        }
+        for req in taken.drain(..) {
+            handle(&mut kernel, &mut next_generation, req, &ctx);
         }
     }
     kernel
+}
+
+fn handle(kernel: &mut Kernel, next_generation: &mut u64, req: Request, ctx: &SequencerContext) {
+    match req {
+        Request::Connect { source_id, source_epoch, reply } => {
+            let r = connect(kernel, next_generation, source_id, source_epoch);
+            // A dropped receiver means the session died; its link will be disconnected
+            // by that session's cleanup, which is always queued after this request.
+            let _ = reply.send(r);
+        }
+        Request::Disconnect { source_id, link_generation } => {
+            let Some(operation_sequence) = kernel.next_operation_sequence() else {
+                eprintln!("sequencer: operation sequence exhausted; disconnect of {source_id} not applied");
+                return;
+            };
+            let op = Operation::SourceDisconnected { source_id, link_generation };
+            if let Err(e) = kernel.apply(SequencedInput { operation_sequence, operation: op }) {
+                eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
+            }
+        }
+        Request::Batch { batch, reply, submitted } => {
+            let d = ctx.diag.as_deref();
+            let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
+            if let (Some(d), Some(t)) = (d, submitted) {
+                d.since(Stage::QueueWait, t);
+                if probe {
+                    d.since(Stage::ProbeQueueWait, t);
+                }
+            }
+            let t0 = diag::now(d);
+            let mut r = apply_batch(kernel, batch, &ctx.counters);
+            if let (Some(d), Some(t0)) = (d, t0) {
+                d.since(Stage::Apply, t0);
+                r.sent = Some(Instant::now());
+            }
+            // ACK only after `apply` returned; if the session is gone the ACK is moot.
+            let _ = reply.send(r);
+        }
+        Request::Introspect { include_tags, reset_diagnostics, reply } => {
+            let _ = reply.send(introspect(kernel, include_tags, ctx));
+            if reset_diagnostics && let Some(d) = &ctx.diag {
+                d.reset();
+            }
+        }
+    }
+    if !ctx.throttle.is_zero() {
+        thread::sleep(ctx.throttle);
+    }
 }
 
 fn connect(kernel: &mut Kernel, next_generation: &mut u64, source_id: SourceId, source_epoch: u64) -> ConnectReply {
