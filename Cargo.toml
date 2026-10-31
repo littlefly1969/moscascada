@@ -4,6 +4,7 @@ members = [
     "crates/scada-core",
     "crates/scada-protocol",
     "crates/scada-runtime",
+    "crates/scada-sched",
     "apps/scada-sim-driver",
     "apps/scada-bench",
 ]

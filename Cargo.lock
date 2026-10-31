@@ -754,6 +754,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-sched"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "scada-sim-driver"
 version = "0.1.0"
 dependencies = [
