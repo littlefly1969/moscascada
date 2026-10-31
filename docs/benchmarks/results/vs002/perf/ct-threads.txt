@@ -1,0 +1,2 @@
+    62.38%  scada-kernel   
+    37.62%  scada-sequencer

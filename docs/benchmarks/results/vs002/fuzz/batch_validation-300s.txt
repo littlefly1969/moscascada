@@ -1,0 +1,4 @@
+#12	INITED cov: 619 ft: 897 corp: 10/136b exec/s: 0 rss: 37Mb
+#9099857	DONE   cov: 908 ft: 2201 corp: 386/70Kb lim: 4096 exec/s: 30232 rss: 499Mb
+Done 9099857 runs in 301 second(s)
+exit=0

@@ -1,0 +1,28 @@
+valgrind --tool=dhat, scada-kernel release, scada-bench cell --secs 3 --warmup-secs 1 (under valgrind)
+batches = blocks allocated at convert::batch_from_wire (exactly one Vec per batch in both versions)
+hot-path = allocation stacks that contain server::/sequencer::/convert:: (startup config parsing excluded)
+
+vs001  1 client x 128 obs, pipeline 32    batches=    9262 hot_allocs/batch=  9.01 hot_bytes/batch=    9257 all_allocs=94193 peak_bytes=?
+          6.00/batch  poll<scada_runtime::server::data_phase::{async_fn#0}::{async_block_env#0}>
+          1.00/batch  new<alloc::sync::ArcInner<tokio::sync::oneshot::Inner<scada_runtime::sequencer::
+          1.00/batch  poll<scada_runtime::server::writer_task::{async_fn_env#0}>
+          1.00/batch  scada_runtime::convert::batch_from_wire
+          0.00/batch  std::sys::backtrace::__rust_begin_short_backtrace::<scada_runtime::sequencer::sp
+vs001  8 client x 1 obs, pipeline 32      batches=   24072 hot_allocs/batch=  4.01 hot_bytes/batch=     252 all_allocs=107291 peak_bytes=?
+          1.00/batch  poll<scada_runtime::server::data_phase::{async_fn#0}::{async_block_env#0}>
+          1.00/batch  new<alloc::sync::ArcInner<tokio::sync::oneshot::Inner<scada_runtime::sequencer::
+          1.00/batch  poll<scada_runtime::server::writer_task::{async_fn_env#0}>
+          1.00/batch  scada_runtime::convert::batch_from_wire
+          0.00/batch  scada_runtime::server::session::{closure#0}
+vs002  1 client x 128 obs, pipeline 32    batches=   15361 hot_allocs/batch=  2.01 hot_bytes/batch=    3204 all_allocs=41613 peak_bytes=?
+          1.00/batch  new<alloc::sync::ArcInner<tokio::sync::oneshot::Inner<scada_runtime::sequencer::
+          1.00/batch  scada_runtime::convert::batch_from_wire
+          0.00/batch  std::sys::backtrace::__rust_begin_short_backtrace::<scada_runtime::sequencer::sp
+          0.00/batch  poll<scada_runtime::server::writer_task::{async_fn_env#0}>
+          0.00/batch  scada_runtime::server::serve::{closure#0}::{closure#0}
+vs002  8 client x 1 obs, pipeline 32      batches=   81483 hot_allocs/batch=  2.00 hot_bytes/batch=     149 all_allocs=174097 peak_bytes=?
+          1.00/batch  new<alloc::sync::ArcInner<tokio::sync::oneshot::Inner<scada_runtime::sequencer::
+          1.00/batch  scada_runtime::convert::batch_from_wire
+          0.00/batch  poll<scada_runtime::server::writer_task::{async_fn_env#0}>
+          0.00/batch  scada_runtime::server::serve::{closure#0}::{closure#0}
+          0.00/batch  scada_runtime::convert::decode_driver_message

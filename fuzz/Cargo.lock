@@ -524,6 +524,7 @@ dependencies = [
 name = "scada-runtime"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "scada-core",
  "scada-protocol",
  "serde",

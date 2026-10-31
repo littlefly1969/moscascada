@@ -12,7 +12,7 @@
 |---|---|
 | per connessione | `max_frame_bytes` (buffer payload riusato, cresce fino al frame più grande) + `read_buffer_bytes` + batch decodificato riusato (`max_observations_per_batch × size_of::<pb::Observation>()`) + batch convertito in attesa di slot/coda + `max_inflight × (voce coda + cella oneshot)` + buffer ACK (`(ack_coalesce_max + 1) × 96 B`) + handshake (512 B) + stima fissa per task Tokio (16 KiB) |
 | connessioni | per connessione × `max_driver_connections` |
-| coda sequencer | `(input_queue_capacity + sequencer_drain_max + 1) × (size_of::<Request>() + batch convertito massimo)` |
+| coda sequencer | `(input_queue_capacity + 1) × (size_of::<Request>() + batch convertito massimo)` |
 | kernel | `Kernel::storage_bound_bytes` (RTDB: celle tag, stato sorgenti, staging) + `ValidatedConfig::heap_bytes` (metadati, indici, tabelle dense) |
 | introspezione | 4 sessioni × risposta limitata (se il socket è abilitato) |
 | diagnostica | istogrammi fissi (se `--diag`) |

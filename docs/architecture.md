@@ -14,7 +14,7 @@
                                             │            ogni write con scadenza (D2)                        ││
                                             │                                                                ▼│
                                             │  thread "scada-sequencer" (unico writer, unico thread OS)       │
-                                            │    blocking_recv / blocking_recv_many(≤ N) (C1)                 │
+                                            │    blocking_recv: una richiesta per risveglio (C1 non adottato) │
                                             │    assegna operation_sequence / link_generation                 │
                                             │    Kernel::apply(SequencedInput)  ← scada-core (puro)           │
                                             │    risposta oneshot → ACK solo dopo il ritorno di apply         │
@@ -44,7 +44,7 @@ Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, cloc
 2. `convert::decode_driver_message`: se il frame è esattamente un campo `batch` (il caso di ogni driver conforme) lo decodifica, con `prost`, in un `ObservationBatch` riusato della sessione (capacità conservata); ogni altra forma passa dal decoder generico (C3). Solo `ObservationBatch` è ammesso dopo il `Welcome`.
 3. `convert::batch_from_wire` rifiuta modalità sconosciute e valori mancanti e costruisce lo `scada_core::ObservationBatch` (un `Vec` per batch, di capacità esatta).
 4. La sessione prenota uno slot nella propria coda ACK (`max_inflight_per_connection`), poi invia la richiesta alla coda del sequencer (`input_queue_capacity`). Se una delle due è piena la sessione smette di leggere dal socket: la backpressure arriva al `write` del produttore.
-5. Il thread sequencer preleva una richiesta (`blocking_recv`) o fino a `sequencer_drain_max` richieste già presenti (`blocking_recv_many`, C1), e le applica **una alla volta, nell'ordine della coda**. Nessuna attesa per riempire un gruppo, nessuna fusione, nessuna riscrittura di sequenze.
+5. Il thread sequencer preleva una richiesta per risveglio (`blocking_recv`) e la applica, **nell'ordine della coda**. Nessuna fusione, nessuna riscrittura di sequenze. Un drain limitato (`blocking_recv_many`) è stato misurato e rimosso: nessun vantaggio ripetibile e più attesa per la sorgente rara (ADR 0005).
 6. L'esito torna alla sessione via `oneshot`; il writer invia gli `InputAck` nell'ordine dei batch. Se ACK successivi sono già disponibili (senza attendere) li codifica nella stessa `write` (fino a `ack_coalesce_max`, C5). Ogni `write` ha la scadenza `ack_write_timeout_ms` (D2).
 
 ## Ordine e concorrenza

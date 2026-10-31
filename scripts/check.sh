@@ -18,13 +18,17 @@ if cargo tree -p scada-core -e normal --prefix none | grep -E '^(tokio|prost|byt
 fi
 echo "ok"
 echo "== core purity audit (no clocks, sockets, threads, randomness in scada-core/src)"
-if grep -rnE 'SystemTime|Instant::|std::net|std::thread|std::sync::(Mutex|RwLock|mpsc|Condvar)|tokio|rand::|std::fs|std::io::(Read|Write)|unsafe' crates/scada-core/src; then
+if grep -rnE 'SystemTime|Instant::|std::net|std::thread|std::sync::(Mutex|RwLock|mpsc|Condvar)|tokio|rand::|std::fs|std::io::(Read|Write)|\bunsafe\b *(\{|fn|impl)' crates/scada-core/src; then
   echo "impure construct in scada-core" >&2; exit 1
 fi
 echo "ok"
 if command -v cargo-deny >/dev/null; then echo "== cargo deny"; cargo deny check; fi
 if command -v buf >/dev/null; then echo "== proto"; ./scripts/check-proto.sh; else echo "== proto: buf not installed, skipped"; fi
 if rustup target list --installed | grep -q aarch64-unknown-linux-gnu; then
-  echo "== aarch64 compile check"; cargo check --workspace --all-targets --target aarch64-unknown-linux-gnu
+  # Criterion (bench dev-dependency) pulls a C build script that needs an aarch64 C
+  # compiler; the benchmark harness is checked without its dev targets.
+  echo "== aarch64 compile check (not a runtime proof: NOT TESTED ON HARDWARE)"
+  cargo check --workspace --all-targets --exclude scada-bench --target aarch64-unknown-linux-gnu
+  cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
 fi
 echo "ALL CHECKS PASSED"

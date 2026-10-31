@@ -30,7 +30,7 @@ Il sequencer conserva, per ogni sorgente, la generazione attiva e un `oneshot::S
 - Nessun lock, nessuno stato condiviso nuovo: è un messaggio prodotto dall'unico writer, nello stesso ordine in cui la generazione è stata assegnata. Il core non cambia: i batch eventualmente già in coda del vecchio link sono ancora rifiutati da `Kernel::apply` (`LINK_SUPERSEDED`) e la sua `SourceDisconnected` tardiva è `Ignored(StaleLinkGeneration)` — non degrada il nuovo link.
 - **Cambio di comportamento osservabile** (contratto §2.1): prima un link superato poteva restare aperto fino al batch successivo; ora viene chiuso. Il codice di errore è lo stesso già esistente in `scada.driver.v1`, quindi nessuna modifica di wire protocol. Un driver conforme a VS-001 non deve cambiare nulla: il link superato era già inutilizzabile.
 - Alternativa scartata: timeout di inattività sui link (chiude anche link legittimi silenziosi, introduce una politica di tempo che il contratto non prevede).
-- Test: `vs002.rs::repeated_takeovers_do_not_exhaust_connection_slots` (`max_driver_connections` × 3 takeover con vecchi link inattivi; ogni nuova connessione accettata; contatore = numero di takeover); `ipc.rs::superseded_link_cannot_overwrite_new_generation` adattato.
+- Test: `vs002.rs::repeated_takeovers_do_not_exhaust_connection_slots` (`max_driver_connections = 2`, 30 takeover consecutivi con i vecchi socket tenuti aperti dal client; nessun rifiuto per limite, `links_superseded = 29`, le chiusure tardive non degradano il link attivo); `ipc.rs::superseded_link_cannot_overwrite_new_generation` adattato.
 
 ### D1 — procedura di ripresa con fotografia fresca
 
