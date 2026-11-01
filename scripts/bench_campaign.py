@@ -8,7 +8,9 @@ one of them. Every raw line printed by `scada-bench` is appended to OUT, prefixe
 `round=<r> variant=<name>`; nothing is aggregated here (see bench_analyze.py).
 
   bench_campaign.py --out FILE --runs 7 [--seed 1] [--secs 3] [--warmup 1]
-      --variant NAME=KERNEL_PATH[,kernel-arg,...]   (repeatable)
+      --variant NAME=KERNEL_PATH[,kernel-arg,...]   (repeatable; a kernel-arg of the form
+                                                   @ipc:key=value becomes an extra [ipc]
+                                                   config line, e.g. a VS-003 ingress policy)
       --cell 'cell clients=8 size=128 pipeline=32'  (repeatable)
       --cell 'mixed hv=8 rare_interval_us=1000 queue=64'
 """
@@ -40,7 +42,10 @@ def cell_cmd(spec):
     if kind == "cell":
         args += ["--clients", d["clients"], "--size", d["size"], "--pipeline", d["pipeline"]]
     elif kind == "mixed":
-        args += ["--hv", d["hv"], "--rare-interval-us", d.get("rare_interval_us", "1000")]
+        args += ["--hv", d.pop("hv"), "--rare-interval-us", d.pop("rare_interval_us", "1000")]
+        # VS-003 harness options pass through: rare_mode=open -> --rare-mode open, ...
+        for k, v in d.items():
+            args += ["--" + k.replace("_", "-"), v]
     else:
         sys.exit(f"unknown cell kind {kind}")
     return args
@@ -60,7 +65,11 @@ with open(a.out, "a") as out:
         for (name, kernel, kargs), spec in order:
             cmd = [a.bench] + cell_cmd(spec) + ["--kernel", kernel, "--label", name]
             for k in kargs:
-                cmd += ["--kernel-arg", k]
+                if k.startswith("@ipc:"):
+                    key, val = k[5:].split("=", 1)
+                    cmd += ["--ipc-line", f"{key} = {val}"]
+                else:
+                    cmd += ["--kernel-arg", k]
             p = subprocess.run(cmd, capture_output=True, text=True)
             line = next((l for l in p.stdout.splitlines() if l.startswith("kind=")), None)
             if p.returncode != 0 or line is None:

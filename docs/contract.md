@@ -1,4 +1,4 @@
-# Contratto semantico (VS-001, aggiornato in VS-002)
+# Contratto semantico (VS-001, aggiornato in VS-002 e VS-003)
 
 Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009.
 
@@ -33,6 +33,19 @@ Se arriva un `Hello` per una sorgente già collegata, il nuovo link sostituisce 
 
 - **Takeover (D3, rivisto dopo la review P2).** Quando il nuovo link riceve il `Welcome`, il link precedente della stessa sorgente viene chiuso **subito**, anche se è inattivo o bloccato in backpressure (coda ACK piena, coda del sequencer piena, peer che non legge): il kernel tenta, senza attendere, di scrivergli un `ProtocolError{error_code = LINK_SUPERSEDED}` e chiude. Gli ACK del vecchio link non ancora scritti in quel momento **possono andare persi** (mai inventati né anticipati): i batch corrispondenti sono applicati o rifiutati come sempre e il driver riconcilia con `Welcome.last_accepted_source_sequence` del nuovo link (§5). Lo slot di connessione è liberato entro il tempo di uno scheduling del runtime (misurato < 1 ms; limite verificato dal test: 2 s, comunque mai legato a `ack_write_timeout_ms`). In VS-001 restava aperto (e occupava uno slot di connessione) finché non inviava un altro batch. Un batch del vecchio link che corre in parallelo al takeover riceve, come prima, `REJECTED/LINK_SUPERSEDED`. In entrambi i casi nessun dato del vecchio link è applicato dopo il takeover. Un driver VS-001 gestisce già `ProtocolError` come errore fatale della connessione.
 - **Peer che non legge (D2).** Ogni scrittura verso il driver (ACK, `Welcome`, rifiuti) deve completarsi entro `ack_write_timeout_ms` (default 5000 ms, `[ipc]`); altrimenti la connessione è chiusa senza ulteriori messaggi. Gli input già applicati restano applicati e i loro ACK sono persi; il driver riconcilia riconnettendosi (§5.1). Nessun ACK viene inventato o anticipato.
+
+### 2.2 Politica di ingresso (VS-003, ADR 0010) — opzionale, default invariato
+
+`[ipc] ingress_policy` sceglie come le richieste ammesse raggiungono l'unico writer. **Default `fifo`: comportamento VS-002 identico.** Le altre politiche non cambiano wire, core, ACK né semantica per sorgente; cambiano solo **quando** una richiesta di una sorgente è servita rispetto a quelle delle altre.
+
+| `ingress_policy` | Ammissione | Ordine di servizio |
+|---|---|---|
+| `fifo` (default) | coda globale `input_queue_capacity` | ordine di ammissione |
+| `source_fair` (sperimentale) | al più `per_source_pending_limit` per sorgente e `input_queue_capacity` in totale | round-robin fra le sorgenti con richieste in coda, una richiesta per turno |
+
+Garanzie con ogni politica: (1) ordine dei batch e degli ACK di una sorgente = ordine del socket; (2) `APPLIED_VOLATILE` solo dopo `apply`; (3) `operation_sequence` = ordine effettivo di applicazione (l'ordine **fra sorgenti** non è un contratto: cambia fra politiche ed esecuzioni; è riproducibile solo come stream catturato, §8); (4) un batch che il kernel ha ammesso riceve un esito tipizzato, o la connessione viene chiusa senza ACK (peer morto, takeover, arresto) — mai un ACK inventato; (5) `SourceDisconnected` di un link è applicato dopo tutti i batch che quel link ha fatto ammettere.
+
+Con `source_fair`, inoltre: un `Hello` è ammesso anche con le code dati sature (le richieste di controllo non consumano la quota dati) ed è servito dopo al più `per_source_pending_limit` batch già ammessi della stessa sorgente e dopo al più un turno per ogni altra sorgente attiva; un batch del vecchio link ammesso prima del `Hello` è applicato con la vecchia generazione, uno ammesso dopo è rifiutato `LINK_SUPERSEDED`. Il limite è in **turni di servizio**, non un tempo: nessuna garanzia hard real-time.
 
 ## 3. Ingresso e ACK
 

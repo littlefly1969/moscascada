@@ -4,6 +4,7 @@ members = [
     "crates/scada-core",
     "crates/scada-protocol",
     "crates/scada-runtime",
+    "crates/scada-sched",
     "apps/scada-sim-driver",
     "apps/scada-bench",
 ]
@@ -28,6 +29,7 @@ todo = "warn"
 scada-core = { path = "crates/scada-core" }
 scada-protocol = { path = "crates/scada-protocol" }
 scada-runtime = { path = "crates/scada-runtime" }
+scada-sched = { path = "crates/scada-sched" }
 blake3 = { version = "1.8.7", default-features = false, features = ["pure"] }
 prost = { version = "0.14.4", default-features = false, features = ["std", "derive"] }
 prost-build = "0.14.4"

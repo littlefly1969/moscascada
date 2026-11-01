@@ -1,4 +1,4 @@
-# Matrice di tracciabilità VS-001 + VS-002
+# Matrice di tracciabilità VS-001 + VS-002 + VS-003
 
 La parte VS-002 è in fondo ([§VS-002](#vs-002)); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
@@ -285,3 +285,64 @@ Brief: `MoscaSCADA_VS002_Agent_Brief.md`. Base `b17413f` (VS-001), branch `vs-00
 12. **Raspberry Pi / ARM64 reale**: nessun test su hardware; da eseguire (build nativa, suite, campagna 3 ridotta, soak). Follow-up indicato dalla review.
 13. **Limiti funzionali**: nessuna durabilità né supervisione remota (`APPLIED_VOLATILE`, nessun journal, nessuna replica).
 14. Le prove di qualità (test, proptest, fuzz a tempo, benchmark su una VM) non sono una **prova formale**: riducono il rischio, non lo escludono.
+
+---
+
+## VS-003
+
+Brief: `MoscaSCADA_VS003_Agent_Brief.md`. Base: VS-002 finale `d9502c1` (P1/P2, CI `stable` + `fuzz-smoke` verdi), poi `main` `9d97882` (merge di #1 e #2, stesso albero). Branch dedicato, PR verso `main` senza merge. Decisione: ADR 0010 §11; misure: `docs/benchmarks/vs003.md`.
+
+### Gate §0
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| PR #2, SHA finale, commit correttivi | ✅ | `add3461`, `95840c5`, `d9502c1`; CI verde su push e PR; poi merge in `main` `9d97882` (merge commit, nessuna riscrittura) |
+| P1 / P2 chiusi e testati | ✅ | test VS-002 `adversarial_many_small_observations…`, `takeover_of_a_backpressured_non_reading_link…` verdi anche sotto `source_fair` (`SCADA_TEST_INGRESS`) |
+| Baseline riproducibile | ✅ | binario `d9502c1` misurato nella stessa campagna (`vs002_mt2`), nessun numero di build precedenti usato come riferimento |
+| Lavoro prima del gate | ✅ | solo preparazione (ADR, modello, harness, profilo su `fd5e992` dichiarato non baseline) finché il gate non è stato verde |
+
+### Vincoli §2
+
+| Vincolo | Stato | Evidenza |
+|---|---|---|
+| `Kernel::apply` puro, un solo writer, stesso modello | ✅ | core non modificato; `check.sh` audit di purezza; unico chiamante `sequencer::apply` |
+| `operation_sequence` = ordine di commit; ordine/ACK per sorgente | ✅ | `vs003.rs::every_policy_keeps_per_source_order_and_replays_to_the_live_digest` (`ct`/`mt2` × 3 politiche) |
+| Nessuna coda illimitata, nessun drop/coalescenza di osservazioni | ✅ | lane limitate (`scada-sched`), semafori, bound `u128`; nessun percorso di scarto |
+| Wire `scada.driver.v1` invariato, nessuna dipendenza esterna nuova, nessun `unsafe` | ✅ | nessuna modifica a `proto/`; `scada-sched` senza dipendenze; audit `unsafe` |
+| Profili Micro/Server, worker non derivati dalle CPU | ✅ | profili invariati (FIFO), chiavi VS-003 commentate; test `shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies` |
+| Default FIFO | ✅ | `IngressPolicy::Fifo` di default; test |
+
+### Strategia §3–§4
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| A FIFO / B quote / C lane RR / D DRR confrontate | ✅ / ✅ / ✅ / modello | campagna c1–c3 (532 run); D solo nel modello (beneficio −1/2 %, ADR 0010 §3.1) |
+| ADR con stati, ammissione, barriera, takeover, control plane, shutdown, cancel-safety | ✅ | ADR 0010 §4 |
+| Modello puro con oracle: boundedness, fair progress, no perdita/doppio, wakeup | ✅ | `crates/scada-sched/tests/model.rs` (proptest + test di mutazione), `tests/sim.rs` |
+| Soluzione minima, decisione misurata | ✅ | FIFO default; C opt-in sperimentale; B rimossa (`b21dc31`) |
+
+### Test §7
+
+| # | Stato | Evidenza |
+|---|---|---|
+| 1 equivalenza core / replay | ✅ | replay dello stream catturato = digest live sotto ogni politica; digest live di run diverse **non** confrontati |
+| 2 ordine per sorgente | ✅ | come sopra, con dedup/gap/rifiuti |
+| 3 no perdita/duplicato | ✅ | sequenze uniche, contatori, `drain` del modello |
+| 4 fair progress in turni | ✅ | `fair_policy_bounds_the_rare_source_wait_in_turns` (36 ms ≈ 18 turni contro 174 ms ≈ 87 turni, sequencer a 2 ms/richiesta, `ct` e `mt2`) |
+| 5 wakeup race | ✅ | modello con finestra di race esplicita + mutazione; runtime: `Condvar` sotto lo stesso lock, semafori Tokio |
+| 6 cancellazione / permit leak | ✅ | `cancelled_and_superseded_waiters_leak_no_permit` |
+| 7 takeover e barriera | ✅ | `takeover_with_a_full_lane_under_fair_policy`, `disconnect_is_never_applied_before_the_same_links_batches` (stream catturato), suite VS-002 sotto `source_fair` |
+| 8 congestione / payload avversario | ✅ | suite VS-002 (P1) sotto `source_fair:1` e `:4` |
+| 9 introspezione | 🟡 | lane di controllo propria; interferenza non misurata separatamente |
+| 10 shutdown | ✅ | `shutdown_with_sessions_waiting_for_permits` |
+| 11 risorse / `u128` | ✅ | `budget::tests::ingress_policy_is_in_the_bound` (2000 sorgenti × 1024), `invalid_ingress_settings_are_refused` |
+| 12 fuzz/proptest | ✅ / 🟡 | proptest del modello; fuzz VS-002 invariati (percorsi di decode non modificati), nessun target fuzz nuovo |
+
+### Limiti e rischi residui (VS-003)
+
+1. Target del brief **non raggiunto** su Server; il beneficio misurato esiste solo con perdita di throughput (ADR 0010 §11).
+2. Misure su una VM con client co-residenti: il tail è dominato da scheduling I/O e contesa CPU, non dall'ordine del sequencer; risultato da ripetere su hardware dedicato e ARM64 (**NOT TESTED ON HARDWARE**).
+3. `source_fair` costa −10…−39 % di throughput su `multi_thread` (contesa del mutex, ipotesi non profilata) e +10 % di p99 in underload `mt2`.
+4. Soak ≥ 60 min, dhat e `perf` non eseguiti per `source_fair`.
+5. Garanzie in **turni di servizio**, non in tempo: nessuna garanzia hard real-time.
+6. `source_fair` è un esperimento opt-in **non qualificato per produzione**: condizioni di promozione e criterio di rimozione in ADR 0010 §11.6–§11.7; latenza della rara da giudicare su `rare_sched_p99`/`rare_late` (`vs003.md` §4).

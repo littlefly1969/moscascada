@@ -14,6 +14,7 @@ path = "src/bin/scada-kernel.rs"
 [dependencies]
 scada-core.workspace = true
 scada-protocol.workspace = true
+scada-sched.workspace = true
 # Same version as scada-protocol; used only for decode_varint / DecodeError in convert.rs (C3).
 prost.workspace = true
 serde.workspace = true

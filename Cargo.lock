@@ -746,11 +746,19 @@ dependencies = [
  "prost",
  "scada-core",
  "scada-protocol",
+ "scada-sched",
  "scada-sim-driver",
  "serde",
  "tempfile",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "scada-sched"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

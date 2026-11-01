@@ -1,0 +1,16 @@
+[package]
+name = "scada-sched"
+description = "Pure, synchronous model of the VS-003 ingress scheduler: bounded per-source lanes served round-robin (optional deficit round-robin). No Tokio, no clock, no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -17,6 +17,13 @@ frame_timeout_ms = 2000
 ack_write_timeout_ms = 5000
 read_buffer_bytes = 8192
 ack_coalesce_max = 32
+# VS-003 (ADR 0010): politica di ingresso. Default "fifo" (VS-002). Opzione sperimentale
+#   "source_fair" (lane per sorgente servite round-robin) con per_source_pending_limit
+#   (1..=max_inflight_per_connection): misurata utile solo in saturazione con current_thread
+#   e coda 16 (p99 rara -75 %, throughput -21 %); su multi_thread nessun beneficio. vs003.md.
+#   NON qualificata per produzione: condizioni di promozione in ADR 0010 §11.6.
+# ingress_policy = "fifo"
+# per_source_pending_limit = 4
 
 [core]
 max_observations_per_batch = 128

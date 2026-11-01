@@ -32,7 +32,8 @@ pub struct Server {
     pub config: Arc<RuntimeConfig>,
     pub kernel_instance_id: [u8; KERNEL_INSTANCE_ID_LEN],
     pub counters: Arc<Counters>,
-    pub requests: mpsc::Sender<Request>,
+    /// VS-003: admission into the sequencer (FIFO by default, ADR 0010).
+    pub requests: crate::ingress::Ingress,
     /// Stage timings (`--diag`); `None` in production.
     pub diag: Option<Arc<Diag>>,
 }
@@ -233,19 +234,19 @@ fn protocol_error(code: ErrorCode, detail: &str) -> KernelMessage {
 /// Submit a request to the bounded sequencer queue, recording when the queue was full.
 /// Waiting here is the backpressure: the session stops reading its socket meanwhile.
 async fn submit(server: &Server, req: Request) -> Result<(), ()> {
-    match server.requests.try_send(req) {
-        Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(req)) => {
+    let mut t0 = None;
+    let r = server
+        .requests
+        .submit(req, || {
             Counters::inc(&server.counters.input_queue_full_waits);
-            let t0 = diag::now(server.diag.as_deref());
-            let r = server.requests.send(req).await.map_err(|_| ());
-            if let (Some(d), Some(t0)) = (server.diag.as_deref(), t0) {
-                d.since(Stage::SubmitWait, t0);
-            }
-            r
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+            t0 = diag::now(server.diag.as_deref());
+        })
+        .await
+        .map_err(|_| ());
+    if let (Some(d), Some(t0)) = (server.diag.as_deref(), t0) {
+        d.since(Stage::SubmitWait, t0);
     }
+    r
 }
 
 /// Accept loop for driver connections. Runs until the listener fails fatally.
@@ -571,8 +572,11 @@ async fn data_phase(
                                 }
                                 slot.send(Pending::Wait { source_sequence, reply: rx, frame_done });
                                 let submitted = diag::now(diag);
-                                if or_superseded!(submit(server, Request::Batch { batch, reply: tx, submitted }))
-                                    .is_err()
+                                if or_superseded!(submit(
+                                    server,
+                                    Request::Batch { batch, reply: tx, submitted, permits: Default::default() }
+                                ))
+                                .is_err()
                                 {
                                     return;
                                 }

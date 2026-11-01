@@ -21,7 +21,6 @@ use scada_runtime::diag::Diag;
 use scada_runtime::sequencer::{self, Counters, SequencerContext};
 use scada_runtime::server::{self, Server};
 use scada_runtime::{budget, config};
-use tokio::sync::mpsc;
 
 struct Args {
     config: PathBuf,
@@ -170,9 +169,10 @@ fn main() -> ExitCode {
     }
     if args.check_only {
         println!(
-            "config ok: fingerprint={} scheduler={} memory_bound_bytes={}",
+            "config ok: fingerprint={} scheduler={} ingress={} memory_bound_bytes={}",
             hex(&cfg.core.fingerprint()),
             cfg.runtime.scheduler,
+            cfg.limits.ingress,
             bound.total
         );
         println!("memory bound: {bound}");
@@ -242,7 +242,7 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
     let kernel_instance_id = server::new_instance_id()?;
     let counters = Arc::new(Counters::default());
     let kernel = Kernel::new(Arc::new(cfg.core.clone()));
-    let (tx, rx) = mpsc::channel(cfg.limits.input_queue_capacity as usize);
+    let (tx, rx) = scada_runtime::ingress::channel(&cfg);
     let (seq_thread, mut seq_stopped) = sequencer::spawn(
         kernel,
         rx,
@@ -264,10 +264,11 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         None => None,
     };
     println!(
-        "READY instance={} socket={} scheduler={}",
+        "READY instance={} socket={} scheduler={} ingress={}",
         hex(&kernel_instance_id),
         cfg.socket_path.display(),
-        cfg.runtime.scheduler
+        cfg.runtime.scheduler,
+        cfg.limits.ingress
     );
     let _ = std::io::stdout().flush();
 

@@ -6,7 +6,26 @@
 //! scada-bench saturation [--secs S] [--clients N]       producers faster than the sequencer
 //! scada-bench cell  --clients N --size S --pipeline P [--secs S] [--warmup-secs W]
 //! scada-bench mixed --hv N [--rare-interval-us U] [--secs S] [--warmup-secs W]
+//!       [--hv-size S] [--hv-pipeline P] [--rare-sources R] [--rare-mode stop|open]
+//!       [--rare-max-outstanding K] [--takeover-interval-ms T]
 //! ```
+//! VS-003 harness additions (all default to the VS-002 behaviour):
+//! * `--rare-mode open`: each rare source emits on a fixed schedule (`--rare-interval-us`)
+//!   independent of its ACKs, from a sender thread, while a receiver thread timestamps the
+//!   ACKs. At most `--rare-max-outstanding` batches are outstanding (bounded client
+//!   backlog); an emission that finds the window full waits and is counted as `late`.
+//!   Latency is reported twice: from the **scheduled** emission time (`rare_sched_*`,
+//!   includes client-side waiting, no coordinated omission) and from the actual `send`
+//!   (`rare_*`, comparable with the kernel-side `--diag` probe stages).
+//! * `--rare-sources R` (1..=8): rare sources 900..900+R-1, 1 observation per batch.
+//! * `--hv-size`, `--hv-pipeline`: high-volume batch size and window (default 128, 32);
+//!   `--hv` up to 32 (the generated config holds max(16, hv) load sources).
+//! * `--takeover-interval-ms T`: control-plane probe. Source 908 reconnects every T ms
+//!   (each Hello takes over the previous link, whose socket is left open and unread) and
+//!   the Hello→Welcome latency is reported as `ctl_*`.
+//! * `--ipc-line 'key = value'` (repeatable): extra line appended to the generated `[ipc]`
+//!   section, to select a VS-003 ingress policy; an older kernel rejects unknown keys.
+//!
 //! Common options for `cell`, `mixed`, `saturation`:
 //! `--kernel PATH` (default: `scada-kernel` next to this binary), `--queue Q`,
 //! `--kernel-arg ARG` (repeatable, passed verbatim to the kernel), `--label TEXT`.
@@ -41,6 +60,12 @@ const CHANNELS: u32 = 128;
 const LOAD_SOURCES: u32 = 16;
 /// Low-traffic "critical in the benchmark" source: 1 channel. No alarm semantics in the core.
 const RARE_SOURCE: u32 = 900;
+/// Rare sources 900..900+MAX_RARE-1 are always configured (1 channel each).
+const MAX_RARE: u32 = 8;
+/// Control-plane probe source (takeover loop), 1 channel.
+const CTL_SOURCE: u32 = 908;
+/// Upper bound of `--hv`.
+const MAX_LOAD_SOURCES: u32 = 32;
 /// VS-001 table used 8 sources; kept for `core`.
 const SOURCES: u32 = 8;
 
@@ -65,6 +90,10 @@ struct KernelSpec {
     bin: PathBuf,
     queue: u32,
     args: Vec<String>,
+    /// Extra `[ipc]` lines (VS-003 policy keys).
+    ipc_lines: Vec<String>,
+    /// Load sources in the generated config.
+    load_sources: u32,
 }
 
 impl KernelSpec {
@@ -73,6 +102,8 @@ impl KernelSpec {
             bin: arg_str("--kernel").map_or_else(kernel_bin, PathBuf::from),
             queue: arg("--queue", 64) as u32,
             args: args_multi("--kernel-arg"),
+            ipc_lines: args_multi("--ipc-line"),
+            load_sources: (arg("--hv", 0) as u32).clamp(LOAD_SOURCES, MAX_LOAD_SOURCES),
         }
     }
 }
@@ -96,8 +127,16 @@ fn main() {
         }
         "mixed" => mixed(
             &KernelSpec::from_args(),
-            arg("--hv", 8) as u32,
-            arg("--rare-interval-us", 1000),
+            &MixedSpec {
+                hv: arg("--hv", 8) as u32,
+                hv_size: arg("--hv-size", u64::from(CHANNELS)) as u32,
+                hv_pipeline: arg("--hv-pipeline", 32),
+                rare_sources: arg("--rare-sources", 1) as u32,
+                interval_us: arg("--rare-interval-us", 1000),
+                open_loop: arg_str("--rare-mode").as_deref() == Some("open"),
+                max_outstanding: arg("--rare-max-outstanding", 8),
+                takeover_ms: arg("--takeover-interval-ms", 0),
+            },
             arg("--secs", 10),
             arg("--warmup-secs", 1),
             &arg_str("--label").unwrap_or_default(),
@@ -114,6 +153,7 @@ fn main() {
 struct Stats {
     n: usize,
     p50: u64,
+    p90: u64,
     p99: u64,
     p999: u64,
     max: u64,
@@ -125,10 +165,10 @@ fn stats(mut v: Vec<u64>) -> Stats {
     let n = v.len();
     if n == 0 {
         // e.g. `mixed --hv 0` (idle cell): no high-volume samples.
-        return Stats { n: 0, p50: 0, p99: 0, p999: 0, max: 0 };
+        return Stats { n: 0, p50: 0, p90: 0, p99: 0, p999: 0, max: 0 };
     }
     let at = |q: f64| v[((q * n as f64).ceil() as usize).clamp(1, n) - 1];
-    Stats { n, p50: at(0.50), p99: at(0.99), p999: at(0.999), max: v[n - 1] }
+    Stats { n, p50: at(0.50), p90: at(0.90), p99: at(0.99), p999: at(0.999), max: v[n - 1] }
 }
 
 fn us(ns: u64) -> String {
@@ -314,29 +354,39 @@ fn kernel_bin() -> PathBuf {
     std::env::current_exe().expect("exe").with_file_name("scada-kernel")
 }
 
-/// 16 load sources x 128 i64 channels (2048 tags) + the rare source (1 i64 channel).
-fn write_config(dir: &Path, queue: u32, max_conn: u32) -> PathBuf {
+/// `load` sources x 128 i64 channels (16 -> 2048 tags) + the rare and control-probe
+/// sources 900..=908 (1 i64 channel each).
+fn write_config(dir: &Path, queue: u32, max_conn: u32, load: u32, ipc_lines: &[String]) -> PathBuf {
     let mut s = format!(
-        "[ipc]\nsocket_path = \"{}\"\nmax_frame_bytes = 65536\nmax_driver_connections = {max_conn}\ninput_queue_capacity = {queue}\nmax_inflight_per_connection = 32\nhandshake_timeout_ms = 2000\nframe_timeout_ms = 2000\n\n[core]\nmax_observations_per_batch = {CHANNELS}\n",
+        "[ipc]\nsocket_path = \"{}\"\nmax_frame_bytes = 65536\nmax_driver_connections = {max_conn}\ninput_queue_capacity = {queue}\nmax_inflight_per_connection = 32\nhandshake_timeout_ms = 2000\nframe_timeout_ms = 2000\n",
         dir.join("driver.sock").display()
     );
-    for src in 1..=LOAD_SOURCES {
+    for l in ipc_lines {
+        s.push_str(l);
+        s.push('\n');
+    }
+    s.push_str(&format!("\n[core]\nmax_observations_per_batch = {CHANNELS}\n"));
+    for src in 1..=load {
         for c in 1..=CHANNELS {
             s.push_str(&format!("\n[[tags]]\nid = {}\nname = \"s{src}_c{c}\"\ntype = \"i64\"\n", src * 1000 + c));
         }
     }
-    s.push_str(&format!("\n[[tags]]\nid = {}\nname = \"rare\"\ntype = \"i64\"\n", RARE_SOURCE * 1000 + 1));
-    for src in 1..=LOAD_SOURCES {
+    for r in RARE_SOURCE..=CTL_SOURCE {
+        s.push_str(&format!("\n[[tags]]\nid = {}\nname = \"rare{r}\"\ntype = \"i64\"\n", r * 1000 + 1));
+    }
+    for src in 1..=load {
         s.push_str(&format!("\n[[sources]]\nid = {src}\nname = \"load-{src}\"\nchannels = [\n"));
         for c in 1..=CHANNELS {
             s.push_str(&format!("  {{ channel = {c}, tag = {}, type = \"i64\" }},\n", src * 1000 + c));
         }
         s.push_str("]\n");
     }
-    s.push_str(&format!(
-        "\n[[sources]]\nid = {RARE_SOURCE}\nname = \"rare\"\nchannels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
-        RARE_SOURCE * 1000 + 1
-    ));
+    for r in RARE_SOURCE..=CTL_SOURCE {
+        s.push_str(&format!(
+            "\n[[sources]]\nid = {r}\nname = \"rare{r}\"\nchannels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
+            r * 1000 + 1
+        ));
+    }
     let p = dir.join("bench.toml");
     std::fs::write(&p, s).expect("write config");
     p
@@ -356,7 +406,8 @@ impl KernelProc {
         // The kernel refuses group/world-writable socket directories (VS-002 E2).
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
-        let cfg = write_config(&dir, spec.queue, LOAD_SOURCES + 8);
+        // Room for every load source, the rare sources and the takeover probe's two links.
+        let cfg = write_config(&dir, spec.queue, spec.load_sources + 16, spec.load_sources, &spec.ipc_lines);
         let mut child = Command::new(&spec.bin)
             .arg("--config")
             .arg(&cfg)
@@ -768,11 +819,128 @@ fn e2e_bench(spec: &KernelSpec, secs: u64, warmup_secs: u64) {
 
 // ---------------------------------------------------------------- mixed: rare vs high volume
 
-/// `hv` high-volume sources (128-observation Deltas, 32 in flight each) saturate the kernel
-/// while the rare source sends one 1-observation Delta every `interval_us`, stop-and-wait.
-/// Reports the rare source's send→ACK latency and (with `--diag`) its queue wait.
-fn mixed(spec: &KernelSpec, hv: u32, interval_us: u64, secs: u64, warmup_secs: u64, label: &str) {
-    assert!(hv <= LOAD_SOURCES);
+/// Parameters of `mixed`.
+struct MixedSpec {
+    hv: u32,
+    hv_size: u32,
+    hv_pipeline: u64,
+    rare_sources: u32,
+    interval_us: u64,
+    open_loop: bool,
+    max_outstanding: u64,
+    takeover_ms: u64,
+}
+
+/// Open-loop rare client: sends on a fixed schedule from one thread, receives ACKs on
+/// another. Returns (latency from scheduled time, latency from actual send, late
+/// emissions, max outstanding observed).
+struct OpenResult {
+    sched_lat: Vec<u64>,
+    send_lat: Vec<u64>,
+    late: u64,
+    max_outstanding: u64,
+}
+
+fn run_open_rare(
+    socket: PathBuf,
+    source: u32,
+    warmup: Duration,
+    dur: Duration,
+    period: Duration,
+    max_outstanding: u64,
+) -> OpenResult {
+    use std::sync::atomic::AtomicU64;
+    let (s, seq0) = open(&socket, source, epoch_for(source), 1);
+    let max_frame = s.max_frame();
+    let mut wr = s.into_stream();
+    let mut rd = BufReader::new(wr.try_clone().expect("clone"));
+    // Bounded client backlog: the sender blocks (and counts the emission as late) when
+    // `max_outstanding` batches are unacknowledged. Each entry: (scheduled, sent, seq).
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(Instant, Instant, u64)>(max_outstanding.saturating_sub(1) as usize);
+    let outstanding = Arc::new(AtomicU64::new(0));
+    let out2 = outstanding.clone();
+    let start = Instant::now();
+    let receiver = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let (mut sched_lat, mut send_lat) = (Vec::new(), Vec::new());
+        while let Ok((sched, sent, seq)) = rx.recv() {
+            let m: scada_protocol::driver_v1::KernelMessage =
+                frame::read_message(&mut rd, 1 << 20, &mut buf).expect("ack").expect("ack");
+            let now = Instant::now();
+            out2.fetch_sub(1, Relaxed);
+            let Some(scada_protocol::driver_v1::kernel_message::Body::Ack(a)) = m.body else {
+                panic!("unexpected {m:?}")
+            };
+            assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
+            assert_eq!(a.source_sequence, seq, "ACK out of order");
+            if sched.duration_since(start) >= warmup {
+                sched_lat.push(now.duration_since(sched).as_nanos() as u64);
+                send_lat.push(now.duration_since(sent).as_nanos() as u64);
+            }
+        }
+        (sched_lat, send_lat)
+    });
+    let (mut late, mut max_out) = (0u64, 0u64);
+    let mut wbuf = Vec::new();
+    let mut i = 0u64;
+    loop {
+        let sched = start + period * (i as u32);
+        if sched.duration_since(start) >= warmup + dur {
+            break;
+        }
+        let now = Instant::now();
+        if sched > now {
+            std::thread::sleep(sched - now);
+        }
+        let seq = seq0 + i;
+        let msg = delta(seq, 1, i as i64 + 1);
+        frame::encode_frame(&msg, max_frame, &mut wbuf).expect("encode");
+        if outstanding.load(Relaxed) >= max_outstanding {
+            late += 1;
+        }
+        // Blocks while the window is full: client-side wait, included in `sched_lat`.
+        let sent = Instant::now();
+        tx.send((sched, sent, seq)).expect("receiver");
+        let o = outstanding.fetch_add(1, Relaxed) + 1;
+        max_out = max_out.max(o);
+        wr.write_all(&wbuf).expect("send");
+        i += 1;
+    }
+    drop(tx);
+    let (sched_lat, send_lat) = receiver.join().expect("receiver");
+    OpenResult { sched_lat, send_lat, late, max_outstanding: max_out }
+}
+
+/// Control-plane probe: reconnect source 908 every `every`, keeping the previous socket
+/// open and unread, and measure Hello -> Welcome (each Hello takes over the old link).
+fn run_takeover_probe(socket: PathBuf, warmup: Duration, dur: Duration, every: Duration) -> Vec<u64> {
+    let start = Instant::now();
+    let mut lat = Vec::new();
+    let mut old: Option<Session> = None;
+    let mut n = 0u64;
+    while start.elapsed() < warmup + dur {
+        let t0 = Instant::now();
+        let s = Session::connect(&socket, "bench-ctl", CTL_SOURCE, epoch_for(CTL_SOURCE) + n).expect("takeover");
+        let dt = t0.elapsed().as_nanos() as u64;
+        if start.elapsed() >= warmup {
+            lat.push(dt);
+        }
+        drop(old.replace(s));
+        n += 1;
+        std::thread::sleep(every);
+    }
+    lat
+}
+
+/// `hv` high-volume sources (`hv_size`-observation Deltas, `hv_pipeline` in flight each)
+/// saturate the kernel while `rare_sources` rare sources send 1-observation Deltas every
+/// `interval_us` (stop-and-wait after the ACK, as in VS-002, or open loop). Reports the
+/// rare send→ACK latency and (with `--diag`) the probe's queue wait.
+fn mixed(spec: &KernelSpec, m: &MixedSpec, secs: u64, warmup_secs: u64, label: &str) {
+    let hv = m.hv;
+    let interval_us = m.interval_us;
+    assert!(hv <= spec.load_sources);
+    assert!((1..=MAX_RARE).contains(&m.rare_sources));
     let probe = RARE_SOURCE.to_string();
     let extra: Vec<&str> =
         if spec.args.iter().any(|a| a == "--diag") { vec!["--diag-probe-source", &probe] } else { vec![] };
@@ -781,40 +949,82 @@ fn mixed(spec: &KernelSpec, hv: u32, interval_us: u64, secs: u64, warmup_secs: u
     let rss_idle = proc_status(k.pid(), "VmRSS:");
     let warm = Duration::from_secs(warmup_secs);
     let dur = Duration::from_secs(secs);
+    let (hv_size, hv_pipeline) = (m.hv_size, m.hv_pipeline);
     let hv_handles: Vec<_> = (1..=hv)
         .map(|c| {
             let sock = k.socket();
-            std::thread::spawn(move || run_client(sock, c, CHANNELS, CHANNELS, warm, dur, 32, None))
+            std::thread::spawn(move || run_client(sock, c, hv_size, CHANNELS, warm, dur, hv_pipeline, None))
         })
         .collect();
-    let sock = k.socket();
     let interval = Duration::from_micros(interval_us);
-    let rare = std::thread::spawn(move || run_client(sock, RARE_SOURCE, 1, 1, warm, dur, 1, Some(interval)));
+    let (open_loop, max_out) = (m.open_loop, m.max_outstanding);
+    let rare_handles: Vec<_> = (0..m.rare_sources)
+        .map(|r| {
+            let sock = k.socket();
+            std::thread::spawn(move || {
+                if open_loop {
+                    run_open_rare(sock, RARE_SOURCE + r, warm, dur, interval, max_out)
+                } else {
+                    let c = run_client(sock, RARE_SOURCE + r, 1, 1, warm, dur, 1, Some(interval));
+                    OpenResult { sched_lat: Vec::new(), send_lat: c.lat, late: 0, max_outstanding: 1 }
+                }
+            })
+        })
+        .collect();
+    let ctl = (m.takeover_ms > 0).then(|| {
+        let sock = k.socket();
+        let every = Duration::from_millis(m.takeover_ms);
+        std::thread::spawn(move || run_takeover_probe(sock, warm, dur, every))
+    });
     std::thread::sleep(warm);
     let _ = k.introspect_with(true);
     let usage = measure_window(k.pid(), dur, rss_idle);
     let intro = k.introspect();
-    let rare = rare.join().expect("rare");
+    let rare: Vec<OpenResult> = rare_handles.into_iter().map(|h| h.join().expect("rare")).collect();
+    let ctl = stats(ctl.map(|h| h.join().expect("ctl")).unwrap_or_default());
     let hv_res: Vec<ClientResult> = hv_handles.into_iter().map(|h| h.join().expect("hv")).collect();
     let hv_batches: u64 = hv_res.iter().map(|r| r.batches).sum();
     let hv_lat = stats(hv_res.into_iter().flat_map(|r| r.lat).collect());
     let c = intro.counters.unwrap_or_default();
-    let rs = stats(rare.lat);
+    let late: u64 = rare.iter().map(|r| r.late).sum();
+    let rare_max_out = rare.iter().map(|r| r.max_outstanding).max().unwrap_or(0);
+    let mut sched = Vec::new();
+    let mut send = Vec::new();
+    for r in rare {
+        sched.extend(r.sched_lat);
+        send.extend(r.send_lat);
+    }
+    let rs = stats(send);
+    let ss = stats(sched);
     println!(
-        "kind=mixed label={label} scheduler={} hv={hv} rare_interval_us={interval_us} queue={} rare_n={} rare_p50_ns={} rare_p99_ns={} rare_p999_ns={} rare_max_ns={} hv_batches_s={:.0} hv_p50_ns={} hv_p99_ns={} hv_p999_ns={} cpu_pct={:.1} cpu_threads={} rss_steady_kib={} rss_peak_kib={} threads={} queue_full_waits={} rejected={}{}",
+        "kind=mixed label={label} scheduler={} hv={hv} hv_size={hv_size} hv_pipeline={hv_pipeline} rare_sources={} rare_mode={} rare_interval_us={interval_us} queue={} rare_n={} rare_p50_ns={} rare_p90_ns={} rare_p99_ns={} rare_p999_ns={} rare_max_ns={} rare_sched_p50_ns={} rare_sched_p99_ns={} rare_sched_p999_ns={} rare_sched_max_ns={} rare_late={late} rare_max_outstanding={rare_max_out} ctl_n={} ctl_p50_ns={} ctl_p99_ns={} ctl_max_ns={} hv_batches_s={:.0} hv_obs_s={:.0} hv_p50_ns={} hv_p99_ns={} hv_p999_ns={} cpu_pct={:.1} cpu_threads={} ctx_vol_s={:.0} ctx_invol_s={:.0} rss_steady_kib={} rss_peak_kib={} threads={} queue_full_waits={} rejected={}{}",
         scheduler_of(&k.ready),
+        m.rare_sources,
+        if m.open_loop { "open" } else { "stop" },
         spec.queue,
         rs.n,
         rs.p50,
+        rs.p90,
         rs.p99,
         rs.p999,
         rs.max,
+        ss.p50,
+        ss.p99,
+        ss.p999,
+        ss.max,
+        ctl.n,
+        ctl.p50,
+        ctl.p99,
+        ctl.max,
         hv_batches as f64 / secs as f64,
+        hv_batches as f64 * f64::from(hv_size) / secs as f64,
         hv_lat.p50,
         hv_lat.p99,
         hv_lat.p999,
         usage.cpu_pct,
         usage.cpu_by_thread,
+        usage.ctx_vol_per_s,
+        usage.ctx_invol_per_s,
         usage.rss_steady,
         usage.peak,
         usage.threads,
