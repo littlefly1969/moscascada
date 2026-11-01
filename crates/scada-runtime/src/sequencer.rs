@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use scada_core::{
     AppliedKind, Kernel, LinkState, ObservationBatch, Operation, Quality, SequencedInput, SourceId, TransitionOutcome,
-    Value,
+    UncertainReason, Value,
 };
 use scada_protocol::driver_v1::{AckStatus, ErrorCode};
 use scada_protocol::introspect_v1 as ipb;
@@ -20,6 +20,7 @@ use crate::ingress::Inbox;
 use crate::capture::CaptureWriter;
 use crate::convert;
 use crate::diag::{self, Diag, Stage};
+use crate::supervision::{HeartbeatCounter, Supervisor, WatchdogShared};
 
 /// Runtime counters. Metrics only: never part of the logical state or the digest.
 #[derive(Debug, Default)]
@@ -37,6 +38,18 @@ pub struct Counters {
     pub ack_write_timeouts: AtomicU64,
     /// D3: connections closed because a newer link took over their source.
     pub links_superseded: AtomicU64,
+    /// VS-004 (operational, never in the digest).
+    pub heartbeats_valid: AtomicU64,
+    pub heartbeats_invalid: AtomicU64,
+    pub heartbeats_coalesced: AtomicU64,
+    pub liveness_expiries: AtomicU64,
+    pub liveness_recoveries: AtomicU64,
+    pub freshness_expiries: AtomicU64,
+    pub freshness_tags_expired: AtomicU64,
+    pub watchdog_ticks: AtomicU64,
+    pub watchdog_ticks_coalesced: AtomicU64,
+    pub watchdog_ticks_late: AtomicU64,
+    pub watchdog_max_late_ns: AtomicU64,
 }
 
 impl Counters {
@@ -69,11 +82,13 @@ pub struct BatchReply {
 pub enum Request {
     /// `superseded` fires (with `()`) when a later link of the same source is welcomed
     /// (D3), so an idle old session is closed instead of holding a connection slot.
+    /// `heartbeats`: VS-004 per-link heartbeat counter (liveness-supervised sources only).
     Connect {
         source_id: SourceId,
         source_epoch: u64,
         reply: oneshot::Sender<ConnectReply>,
         superseded: oneshot::Sender<()>,
+        heartbeats: Option<HeartbeatCounter>,
     },
     Disconnect {
         source_id: SourceId,
@@ -93,6 +108,9 @@ pub enum Request {
         reset_diagnostics: bool,
         reply: oneshot::Sender<ipb::IntrospectResponse>,
     },
+    /// VS-004: wake-up of an idle sequencer by the watchdog (no payload; the tick itself is
+    /// the flag in [`WatchdogShared`]).
+    Tick,
 }
 
 /// Static data the sequencer needs besides the kernel.
@@ -110,6 +128,8 @@ pub struct SequencerContext {
     /// Test only (`--test-fail-sequencer-after N`): panic after N requests, to prove that
     /// the host stops instead of running without its single writer.
     pub fail_after: Option<u64>,
+    /// VS-004: watchdog flags, `Some` only when a source is supervised.
+    pub watchdog: Option<Arc<WatchdogShared>>,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -120,11 +140,12 @@ pub fn spawn(
     rx: Inbox,
     ctx: SequencerContext,
     capture: Option<CaptureWriter>,
+    supervisor: Option<Supervisor>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
     let (alive, stopped) = oneshot::channel::<()>();
     let handle = thread::Builder::new().name("scada-sequencer".into()).spawn(move || {
         let _alive = alive;
-        run(kernel, rx, ctx, capture)
+        run(kernel, rx, ctx, capture, supervisor)
     })?;
     Ok((handle, stopped))
 }
@@ -137,18 +158,61 @@ struct Links {
     handled: u64,
     /// Per configured source (config order): active link generation and its takeover signal.
     active: Vec<Option<(u64, oneshot::Sender<()>)>>,
+    /// VS-004: `None` unless a source is supervised.
+    supervisor: Option<Supervisor>,
 }
 
-fn run(mut kernel: Kernel, mut rx: Inbox, ctx: SequencerContext, capture: Option<CaptureWriter>) -> Kernel {
-    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new() };
+fn run(
+    mut kernel: Kernel,
+    mut rx: Inbox,
+    ctx: SequencerContext,
+    capture: Option<CaptureWriter>,
+    supervisor: Option<Supervisor>,
+) -> Kernel {
+    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new(), supervisor };
     links.active.resize_with(kernel.config().sources().len(), || None);
     // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
     // N = 4/16/64) was measured in VS-002 and removed: no repeatable effect on throughput
     // or on the rare source's latency (ADR 0005).
     while let Some(req) = rx.blocking_recv() {
         handle(&mut kernel, &mut links, req, &ctx);
+        // VS-004: a due tick is served after the request in progress, whatever the queue
+        // holds (one relaxed load per request when supervision is on, nothing otherwise).
+        if let Some(w) = &ctx.watchdog
+            && let Some(raised) = w.take()
+        {
+            watchdog_tick(&mut kernel, &mut links, w, raised, &ctx);
+        }
     }
     kernel
+}
+
+/// VS-004: one supervision tick on the sequencer thread. The only clock read of the
+/// supervision path; every decision becomes a sequenced, captured operation.
+fn watchdog_tick(kernel: &mut Kernel, links: &mut Links, w: &WatchdogShared, raised: Duration, ctx: &SequencerContext) {
+    let now = w.now();
+    let late = now.saturating_sub(raised);
+    let late_ns = u64::try_from(late.as_nanos()).unwrap_or(u64::MAX);
+    ctx.counters.watchdog_max_late_ns.fetch_max(late_ns, Ordering::Relaxed);
+    if late > w.poll() {
+        Counters::inc(&ctx.counters.watchdog_ticks_late);
+    }
+    if let Some(d) = &ctx.diag {
+        d.record_ns(Stage::WatchdogLateness, late_ns);
+    }
+    let Some(sup) = links.supervisor.as_mut() else { return };
+    let capture = &mut links.capture;
+    let mut apply_one = |k: &mut Kernel, operation: Operation| -> Option<TransitionOutcome> {
+        let operation_sequence = k.next_operation_sequence()?;
+        match apply(k, capture, SequencedInput { operation_sequence, operation }) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("sequencer: supervision operation rejected: {e}");
+                None
+            }
+        }
+    };
+    sup.tick(now, kernel, &mut apply_one, &ctx.counters);
 }
 
 /// The only place where the sequencer calls `Kernel::apply`.
@@ -169,15 +233,21 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
         panic!("--test-fail-sequencer-after reached: simulated sequencer failure");
     }
     match req {
-        Request::Connect { source_id, source_epoch, reply, superseded } => {
+        Request::Connect { source_id, source_epoch, reply, superseded, heartbeats } => {
             let r = connect(kernel, &mut links.capture, &mut links.next_generation, source_id, source_epoch);
             if let ConnectReply::Welcome { link_generation, .. } = r
-                && let Some(slot) = kernel.config().source_index(source_id).and_then(|i| links.active.get_mut(i))
-                && let Some((_, old)) = slot.replace((link_generation, superseded))
+                && let Some(i) = kernel.config().source_index(source_id)
             {
-                // D3: tell the previous link of this source to close. Its own
-                // Disconnect stays queued after its batches and is ignored as stale.
-                let _ = old.send(());
+                if let Some(sup) = links.supervisor.as_mut() {
+                    sup.on_connected(i, link_generation, heartbeats, kernel);
+                }
+                if let Some(slot) = links.active.get_mut(i)
+                    && let Some((_, old)) = slot.replace((link_generation, superseded))
+                {
+                    // D3: tell the previous link of this source to close. Its own
+                    // Disconnect stays queued after its batches and is ignored as stale.
+                    let _ = old.send(());
+                }
             }
             // A dropped receiver means the session died; its link will be disconnected
             // by that session's cleanup, which is always queued after this request.
@@ -225,6 +295,11 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             let _ = reply.send(introspect(kernel, include_tags, ctx));
             if reset_diagnostics && let Some(d) = &ctx.diag {
                 d.reset();
+            }
+        }
+        Request::Tick => {
+            if let Some(w) = &ctx.watchdog {
+                w.woken();
             }
         }
     }
@@ -343,6 +418,7 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
     ipb::IntrospectResponse {
         kernel_instance_id: ctx.kernel_instance_id.to_vec(),
         state_digest: kernel.state_digest().to_vec(),
+        state_digest_version: u32::from(kernel.state_digest_version()),
         last_operation_sequence: snap.last_operation_sequence,
         config_fingerprint: snap.config_fingerprint.to_vec(),
         tags: if include_tags {
@@ -357,9 +433,14 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
                     quality: match t.quality {
                         Quality::Unknown => ipb::Quality::Unknown,
                         Quality::Good => ipb::Quality::Good,
-                        Quality::Uncertain(_) => ipb::Quality::UncertainSourceUnavailable,
+                        Quality::Uncertain(UncertainReason::SourceUnavailable) => {
+                            ipb::Quality::UncertainSourceUnavailable
+                        }
+                        Quality::Uncertain(UncertainReason::SourceSilent) => ipb::Quality::UncertainSourceSilent,
+                        Quality::Uncertain(UncertainReason::StaleData) => ipb::Quality::UncertainStaleData,
                     } as i32,
                     revision: t.revision,
+                    last_observed_operation: t.last_observed_operation,
                 })
                 .collect()
         } else {
@@ -374,12 +455,21 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
                     LinkState::Connected { generation } => (ipb::LinkState::Connected, generation),
                     LinkState::Disconnected { generation } => (ipb::LinkState::Disconnected, generation),
                 };
+                let liveness = match (s.supervision.liveness, s.link, s.silent) {
+                    (false, _, _) => ipb::Liveness::NotSupervised,
+                    (true, LinkState::Connected { .. }, true) => ipb::Liveness::Silent,
+                    (true, LinkState::Connected { .. }, false) => ipb::Liveness::Alive,
+                    (true, _, _) => ipb::Liveness::NoLink,
+                };
                 ipb::SourceState {
                     source_id: s.source_id.0,
                     link_state: state as i32,
                     link_generation: generation,
                     source_epoch: s.epoch,
                     last_accepted_source_sequence: s.last_accepted_source_sequence,
+                    liveness: liveness as i32,
+                    last_batch_operation: s.last_batch_operation,
+                    freshness_supervised: s.supervision.freshness,
                 }
             })
             .collect(),
@@ -396,6 +486,17 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             active_connections: u32::try_from(ld(&c.active_connections)).unwrap_or(u32::MAX),
             ack_write_timeouts: ld(&c.ack_write_timeouts),
             links_superseded: ld(&c.links_superseded),
+            heartbeats_valid: ld(&c.heartbeats_valid),
+            heartbeats_invalid: ld(&c.heartbeats_invalid),
+            heartbeats_coalesced: ld(&c.heartbeats_coalesced),
+            liveness_expiries: ld(&c.liveness_expiries),
+            liveness_recoveries: ld(&c.liveness_recoveries),
+            freshness_expiries: ld(&c.freshness_expiries),
+            freshness_tags_expired: ld(&c.freshness_tags_expired),
+            watchdog_ticks: ld(&c.watchdog_ticks),
+            watchdog_ticks_coalesced: ld(&c.watchdog_ticks_coalesced),
+            watchdog_ticks_late: ld(&c.watchdog_ticks_late),
+            watchdog_max_late_ns: ld(&c.watchdog_max_late_ns),
         }),
         stages: ctx
             .diag

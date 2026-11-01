@@ -87,6 +87,7 @@ fn main() {
             source_id: 1001,
             source_epoch: 9,
             supported_protocol_majors: vec![1],
+            protocol_minor: 0,
         })),
     };
     let mut stream = vec![255u8];

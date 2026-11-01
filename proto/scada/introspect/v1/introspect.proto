@@ -19,6 +19,10 @@ enum Quality {
   QUALITY_UNKNOWN = 1;
   QUALITY_GOOD = 2;
   QUALITY_UNCERTAIN_SOURCE_UNAVAILABLE = 3;
+  // VS-004 (liveness supervision): the link stayed open but the source was silent.
+  QUALITY_UNCERTAIN_SOURCE_SILENT = 4;
+  // VS-004 (freshness supervision): no new observation within the freshness timeout.
+  QUALITY_UNCERTAIN_STALE_DATA = 5;
 }
 
 message TagState {
@@ -29,6 +33,21 @@ message TagState {
   }
   Quality quality = 4;
   uint64 revision = 5;
+  // VS-004: operation sequence of the last applied observation (0 = never, or source
+  // without freshness supervision). Logical state (part of digest v2).
+  uint64 last_observed_operation = 6;
+}
+
+// VS-004: liveness of the active link, logical state (part of digest v2).
+enum Liveness {
+  LIVENESS_UNSPECIFIED = 0;
+  // The source has no liveness supervision.
+  LIVENESS_NOT_SUPERVISED = 1;
+  // Supervised and no link is active (never connected or disconnected).
+  LIVENESS_NO_LINK = 2;
+  LIVENESS_ALIVE = 3;
+  // The link is still Connected but no liveness evidence arrived in time.
+  LIVENESS_SILENT = 4;
 }
 
 enum LinkState {
@@ -44,6 +63,11 @@ message SourceState {
   uint64 link_generation = 3;
   optional fixed64 source_epoch = 4;
   optional uint64 last_accepted_source_sequence = 5;
+  // VS-004.
+  Liveness liveness = 6;
+  // VS-004: operation sequence of the last applied batch (0 = none or unsupervised).
+  uint64 last_batch_operation = 7;
+  bool freshness_supervised = 8;
 }
 
 message RuntimeCounters {
@@ -62,6 +86,25 @@ message RuntimeCounters {
   uint64 ack_write_timeouts = 11;
   // VS-002: connections closed because a newer link took over their source.
   uint64 links_superseded = 12;
+  // VS-004 (operational metrics, NOT part of the digest). Fixed cardinality.
+  uint64 heartbeats_valid = 13;
+  // Heartbeats that closed the link (sequence not increasing, or minor not negotiated).
+  uint64 heartbeats_invalid = 14;
+  // Valid heartbeats beyond the first one between two watchdog ticks of the same link
+  // (they carry no extra evidence; the coalescing is the rate limit).
+  uint64 heartbeats_coalesced = 15;
+  uint64 liveness_expiries = 16;
+  uint64 liveness_recoveries = 17;
+  // FreshnessExpired operations applied, and tags they moved to StaleData.
+  uint64 freshness_expiries = 18;
+  uint64 freshness_tags_expired = 19;
+  uint64 watchdog_ticks = 20;
+  // Ticks raised while the previous one was not yet served by the sequencer.
+  uint64 watchdog_ticks_coalesced = 21;
+  // Ticks served more than one poll interval after they were raised.
+  uint64 watchdog_ticks_late = 22;
+  // Largest tick lateness observed, nanoseconds.
+  uint64 watchdog_max_late_ns = 23;
 }
 
 message IntrospectResponse {
@@ -76,6 +119,8 @@ message IntrospectResponse {
   repeated StageStats stages = 8;
   // VS-002: scheduler of the I/O edge, e.g. "current_thread" or "multi_thread(2)".
   string scheduler = 9;
+  // VS-004: encoding version of state_digest (1 unsupervised, 2 supervised).
+  uint32 state_digest_version = 10;
 }
 
 // VS-002: summary of one diagnostic histogram. Values are nanoseconds,

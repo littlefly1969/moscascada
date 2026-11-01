@@ -5,7 +5,8 @@
 //! - it fails exactly when the generic decoder fails;
 //! - `Batch`/`Other` equal the generic result, with at most `LIMIT` observations;
 //! - `Oversized` is a generic batch with more than `LIMIT` observations and the same
-//!   header; `NotBatch` is a generic non-batch body;
+//!   header; `NotBatch` is a generic `hello` body; VS-004 `Heartbeat` is a generic
+//!   heartbeat body with the same sequence;
 //! - the scratch never retains capacity for more than `LIMIT` observations.
 //!
 //! The first input byte selects the limit (0..=15) so that oversized frames are common;
@@ -53,7 +54,11 @@ fuzz_target!(|input: &[u8]| {
                 }
                 other => panic!("Oversized but generic body is {other:?}"),
             },
-            (Ok(g), Ok(Decoded::NotBatch)) => assert!(!matches!(g.body, Some(Body::Batch(_))), "{g:?}"),
+            (Ok(g), Ok(Decoded::NotBatch)) => assert!(matches!(g.body, Some(Body::Hello(_))), "{g:?}"),
+            // VS-004: a heartbeat body after oversized batch fields, without materializing them.
+            (Ok(g), Ok(Decoded::Heartbeat { sequence })) => {
+                assert_eq!(g.body, Some(Body::Heartbeat(scada_protocol::driver_v1::Heartbeat { sequence })), "{g:?}")
+            }
             (g, f) => panic!("decoders disagree: generic={g:?} fast={f:?}"),
         }
         // Retained capacity bounded by the limit (the bound used by the memory budget).

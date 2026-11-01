@@ -161,9 +161,11 @@ pub enum Stage {
     ProbeQueueWait,
     /// `InKernel` of the probe source only.
     ProbeInKernel,
+    /// VS-004: watchdog tick raised → served by the sequencer (supervision only).
+    WatchdogLateness,
 }
 
-pub const STAGES: [Stage; 12] = [
+pub const STAGES: [Stage; 13] = [
     Stage::FrameRead,
     Stage::Decode,
     Stage::Convert,
@@ -176,6 +178,7 @@ pub const STAGES: [Stage; 12] = [
     Stage::InKernel,
     Stage::ProbeQueueWait,
     Stage::ProbeInKernel,
+    Stage::WatchdogLateness,
 ];
 
 impl Stage {
@@ -193,11 +196,12 @@ impl Stage {
             Stage::InKernel => "in_kernel",
             Stage::ProbeQueueWait => "probe_queue_wait",
             Stage::ProbeInKernel => "probe_in_kernel",
+            Stage::WatchdogLateness => "watchdog_lateness",
         }
     }
 }
 
-/// All histograms. Allocated once at startup when diagnostics are enabled (~12 × 9 KiB).
+/// All histograms. Allocated once at startup when diagnostics are enabled (~13 × 9 KiB).
 #[derive(Debug)]
 pub struct Diag {
     hist: Box<[Histogram]>,

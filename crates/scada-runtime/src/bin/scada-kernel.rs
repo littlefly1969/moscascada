@@ -20,6 +20,7 @@ use scada_runtime::capture::CaptureWriter;
 use scada_runtime::diag::Diag;
 use scada_runtime::sequencer::{self, Counters, SequencerContext};
 use scada_runtime::server::{self, Server};
+use scada_runtime::supervision::{self, Supervisor, WatchdogShared};
 use scada_runtime::{budget, config};
 
 struct Args {
@@ -176,6 +177,11 @@ fn main() -> ExitCode {
             bound.total
         );
         println!("memory bound: {bound}");
+        // VS-004: supervision summary (diagnostic output only; nothing is started).
+        match &cfg.supervision {
+            Some(s) => println!("supervision: {s} memory_bound_bytes={}", bound.supervision),
+            None => println!("supervision: disabled (no source sets liveness_timeout_ms / freshness_timeout_ms)"),
+        }
         return ExitCode::SUCCESS;
     }
     eprintln!("memory bound (application allocations, not RSS): {bound}");
@@ -243,6 +249,10 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
     let counters = Arc::new(Counters::default());
     let kernel = Kernel::new(Arc::new(cfg.core.clone()));
     let (tx, rx) = scada_runtime::ingress::channel(&cfg);
+    // VS-004: supervisor and watchdog exist only when a source is supervised.
+    let supervisor = Supervisor::new(&cfg);
+    let watchdog = supervisor.as_ref().map(|s| Arc::new(WatchdogShared::new(s.poll())));
+    let waker = watchdog.as_ref().map(|_| tx.tick_waker());
     let (seq_thread, mut seq_stopped) = sequencer::spawn(
         kernel,
         rx,
@@ -254,9 +264,15 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
             diag: diag.clone(),
             scheduler: cfg.runtime.scheduler.to_string(),
             fail_after,
+            watchdog: watchdog.clone(),
         },
         capture,
+        supervisor,
     )?;
+    if let (Some(w), Some(waker)) = (watchdog, waker) {
+        // Detached: it stops by itself once the ingress is closed.
+        drop(supervision::spawn_watchdog(w, waker, counters.clone())?);
+    }
     let (listener, _guard) = server::bind_socket(&cfg.socket_path, 0o660, cfg.socket_group_gid)?;
     let srv = Arc::new(Server { config: cfg.clone(), kernel_instance_id, counters, requests: tx, diag });
     let intro = match &introspection {
@@ -264,11 +280,12 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         None => None,
     };
     println!(
-        "READY instance={} socket={} scheduler={} ingress={}",
+        "READY instance={} socket={} scheduler={} ingress={} supervision={}",
         hex(&kernel_instance_id),
         cfg.socket_path.display(),
         cfg.runtime.scheduler,
-        cfg.limits.ingress
+        cfg.limits.ingress,
+        cfg.supervision.as_ref().map_or("off".to_owned(), |s| format!("{}", s.sources.len()))
     );
     let _ = std::io::stdout().flush();
 

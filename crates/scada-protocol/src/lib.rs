@@ -33,8 +33,10 @@ pub use prost::Message;
 
 /// Protocol major version implemented by this crate.
 pub const PROTOCOL_MAJOR: u32 = 1;
-/// Protocol minor version implemented by this crate.
-pub const PROTOCOL_MINOR: u32 = 0;
+/// Highest protocol minor version implemented by this crate (1.1 since VS-004).
+pub const PROTOCOL_MINOR: u32 = 1;
+/// VS-004: first minor version of major 1 with `DriverMessage.heartbeat` (ADR 0011).
+pub const MINOR_HEARTBEAT: u32 = 1;
 /// Length of `kernel_instance_id` in bytes.
 pub const KERNEL_INSTANCE_ID_LEN: usize = 16;
 /// Maximum length of `Hello.driver_id` in bytes.

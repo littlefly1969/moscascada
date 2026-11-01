@@ -18,6 +18,10 @@ pub enum Decoded<'a> {
     /// (it held more observation fields than the limit before a later `hello` replaced
     /// the batch body).
     NotBatch,
+    /// VS-004: a well-formed frame whose final body is a `heartbeat`, recognized without
+    /// materializing the oversized batch fields that preceded it. (A small heartbeat
+    /// frame takes the generic decoder and arrives as [`Decoded::Other`].)
+    Heartbeat { sequence: u64 },
 }
 
 /// The frame is not a valid `DriverMessage` (the generic decoder would fail too).
@@ -99,6 +103,7 @@ pub fn decode_driver_message<'a>(
                 return Ok(Decoded::Oversized { mode, source_sequence, observations });
             }
             Body::Hello => return Ok(Decoded::NotBatch),
+            Body::Heartbeat(sequence) => return Ok(Decoded::Heartbeat { sequence }),
             // Within the limit after all: the upper bound also counted `batch` fields that
             // a later `hello` discarded. A generic decode would still materialize those, so
             // merge only the `batch` fields after the last `hello`, as prost would.
@@ -158,7 +163,13 @@ fn take_len<'b>(buf: &mut &'b [u8]) -> Option<&'b [u8]> {
 enum Body {
     None,
     Hello,
-    Batch { mode: i32, source_sequence: u64, observations: u64 },
+    Batch {
+        mode: i32,
+        source_sequence: u64,
+        observations: u64,
+    },
+    /// VS-004: `heartbeat` (field 3) with its merged `sequence`.
+    Heartbeat(u64),
 }
 
 /// Exact, allocation-free mirror of the derived `DriverMessage::merge` for frames whose
@@ -182,6 +193,15 @@ fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
                 // frame) and frees them at once.
                 pb::Hello::decode(sub)?;
                 body = Body::Hello;
+            }
+            3 => {
+                // VS-004: a repeated `heartbeat` field merges into the previous one (as
+                // prost does for a oneof message field); any other body is replaced.
+                check_wire_type(WireType::LengthDelimited, wt)?;
+                let sub = take_len(&mut top).ok_or(Malformed)?;
+                let mut hb = pb::Heartbeat { sequence: if let Body::Heartbeat(s) = body { s } else { 0 } };
+                hb.merge(sub)?; // no heap fields: no allocation
+                body = Body::Heartbeat(hb.sequence);
             }
             2 => {
                 check_wire_type(WireType::LengthDelimited, wt)?;
@@ -218,13 +238,13 @@ fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
 #[inline(never)]
 fn merge_final_batch(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result<(), Malformed> {
     use prost::encoding::{DecodeContext, decode_key, skip_field};
-    // Pass 1: where the body after the last `hello` starts.
+    // Pass 1: where the body after the last `hello` (or VS-004 `heartbeat`) starts.
     let mut top = bytes;
     let mut start = bytes;
     while !top.is_empty() {
         let (tag, wt) = decode_key(&mut top)?;
         match tag {
-            1 => {
+            1 | 3 => {
                 take_len(&mut top).ok_or(Malformed)?;
                 start = top;
             }
@@ -234,7 +254,8 @@ fn merge_final_batch(bytes: &[u8], scratch: &mut pb::ObservationBatch) -> Result
             _ => skip_field(wt, tag, &mut top, DecodeContext::default())?,
         }
     }
-    // Pass 2: merge every `batch` field from there on (no hello is left in `start`).
+    // Pass 2: merge every `batch` field from there on (no hello / heartbeat is left in
+    // `start`).
     scratch.clear();
     let mut top = start;
     while !top.is_empty() {
@@ -362,7 +383,9 @@ mod tests {
         match decode_driver_message(bytes, scratch, u32::MAX) {
             Ok(Decoded::Batch(b)) => Ok(pb::DriverMessage { body: Some(driver_message::Body::Batch(b.clone())) }),
             Ok(Decoded::Other(m)) => Ok(m),
-            Ok(d @ (Decoded::Oversized { .. } | Decoded::NotBatch)) => panic!("no limit, got {d:?}"),
+            Ok(d @ (Decoded::Oversized { .. } | Decoded::NotBatch | Decoded::Heartbeat { .. })) => {
+                panic!("no limit, got {d:?}")
+            }
             Err(_) => Err(()),
         }
     }
@@ -415,6 +438,7 @@ mod tests {
                             source_id: 1,
                             source_epoch: 2,
                             supported_protocol_majors: vec![1],
+                            protocol_minor: 0,
                         })),
                     }
                     .encode_to_vec(),
@@ -468,7 +492,12 @@ mod tests {
                 }
                 other => prop_assert!(false, "Oversized, generic {:?}", other),
             },
-            (Ok(g), Ok(Decoded::NotBatch)) => prop_assert!(!matches!(g.body, Some(driver_message::Body::Batch(_)))),
+            (Ok(g), Ok(Decoded::NotBatch)) => {
+                prop_assert!(matches!(g.body, Some(driver_message::Body::Hello(_))), "NotBatch, generic {:?}", g)
+            }
+            (Ok(g), Ok(Decoded::Heartbeat { sequence })) => {
+                prop_assert_eq!(&g.body, &Some(driver_message::Body::Heartbeat(pb::Heartbeat { sequence })))
+            }
             (g, f) => prop_assert!(false, "disagree: {:?} vs {:?}", g, f),
         }
         prop_assert!(scratch.observations.capacity() <= retained_capacity_bound(limit));
@@ -486,6 +515,12 @@ mod tests {
                 .encode_to_vec()
             ),
             Just(vec![(9 << 3), 1]), // unknown varint field 9
+            // VS-004: heartbeat bodies, also empty ones (merging keeps the sequence).
+            any::<u64>().prop_map(|sequence| pb::DriverMessage {
+                body: Some(driver_message::Body::Heartbeat(pb::Heartbeat { sequence }))
+            }
+            .encode_to_vec()),
+            Just(vec![(3 << 3) | 2, 0]),
         ];
         prop::collection::vec(field, 1..5).prop_map(|v| v.concat())
     }

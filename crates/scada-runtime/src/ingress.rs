@@ -74,7 +74,7 @@ impl SourceSemaphores {
         let id = match req {
             Request::Connect { source_id, .. } | Request::Disconnect { source_id, .. } => *source_id,
             Request::Batch { batch, .. } => batch.source_id,
-            Request::Introspect { .. } => return None,
+            Request::Introspect { .. } | Request::Tick => return None,
         };
         self.cfg.core.source_index(id)
     }
@@ -106,7 +106,8 @@ pub fn channel(cfg: &Arc<RuntimeConfig>) -> (Ingress, Inbox) {
         }
         IngressPolicy::SourceFair { per_source } => {
             let n = cfg.core.sources().len() as u32;
-            let control = cfg.limits.max_driver_connections.saturating_add(INTROSPECTION_SESSIONS);
+            // + 1: the VS-004 watchdog wake-up (at most one queued at a time).
+            let control = cfg.limits.max_driver_connections.saturating_add(INTROSPECTION_SESSIONS).saturating_add(1);
             let queue = FairQueue::new(Params {
                 lanes: n + 1, // + introspection lane
                 lane_capacity: per_source,
@@ -161,7 +162,7 @@ struct State {
 }
 
 #[derive(Debug)]
-struct Shared {
+pub struct Shared {
     state: Mutex<State>,
     ready: Condvar,
     sources: SourceSemaphores,
@@ -188,7 +189,7 @@ impl FairSender {
     async fn submit(&self, mut req: Request, full: impl FnOnce()) -> Result<(), Closed> {
         let sh = &self.shared;
         let (lane, kind) = match &req {
-            Request::Introspect { .. } => (sh.introspection_lane, Kind::Control),
+            Request::Introspect { .. } | Request::Tick => (sh.introspection_lane, Kind::Control),
             Request::Connect { .. } | Request::Disconnect { .. } => {
                 (sh.sources.lane(&req).ok_or(Closed)? as u32, Kind::Control)
             }
@@ -280,6 +281,68 @@ impl Drop for FairReceiver {
         self.shared.sources.close();
         self.shared.global.close();
         drop(drained); // outside the lock: dropping replies wakes session tasks
+    }
+}
+
+/// VS-004: non-blocking wake-up handle of the watchdog thread. It does not keep the
+/// ingress open (a weak `mpsc` sender / no `FairSender`), so the sequencer still stops when
+/// the server drops its producer handle.
+#[derive(Debug)]
+pub enum TickWaker {
+    Fifo(mpsc::WeakSender<Request>),
+    Fair(std::sync::Weak<Shared>),
+}
+
+/// Result of [`TickWaker::try_wake`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    Queued,
+    /// No room right now (the sequencer is busy and will see the tick flag anyway).
+    Full,
+    /// The ingress is closed: the watchdog stops.
+    Closed,
+}
+
+impl Ingress {
+    /// VS-004: wake-up handle for the watchdog thread.
+    pub fn tick_waker(&self) -> TickWaker {
+        match self {
+            Ingress::Fifo(tx) => TickWaker::Fifo(tx.downgrade()),
+            Ingress::Fair(f) => TickWaker::Fair(Arc::downgrade(&f.shared)),
+        }
+    }
+}
+
+impl TickWaker {
+    /// Try to queue one `Request::Tick` without waiting.
+    pub fn try_wake(&self) -> Wake {
+        match self {
+            TickWaker::Fifo(w) => match w.upgrade() {
+                None => Wake::Closed,
+                Some(tx) => match tx.try_send(Request::Tick) {
+                    Ok(()) => Wake::Queued,
+                    Err(mpsc::error::TrySendError::Full(_)) => Wake::Full,
+                    Err(mpsc::error::TrySendError::Closed(_)) => Wake::Closed,
+                },
+            },
+            TickWaker::Fair(w) => {
+                let Some(sh) = w.upgrade() else { return Wake::Closed };
+                let mut st = sh.lock();
+                if st.receiver_gone || st.senders_gone {
+                    return Wake::Closed;
+                }
+                let was_empty = st.queue.is_empty();
+                // The control capacity reserves one entry for the (single) queued tick.
+                if st.queue.push(sh.introspection_lane, Kind::Control, 1, Request::Tick).is_err() {
+                    return Wake::Full;
+                }
+                drop(st);
+                if was_empty {
+                    sh.ready.notify_one();
+                }
+                Wake::Queued
+            }
+        }
     }
 }
 
