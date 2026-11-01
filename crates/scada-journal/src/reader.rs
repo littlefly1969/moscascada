@@ -102,17 +102,22 @@ pub fn history(c: &Connection, tl: i64, q: &HistoryQuery) -> Result<HistoryPageD
     } else {
         as_of_ev
     };
-    let mut sql = String::from(
+    let sql = String::from(
         "SELECT e.event_seq, e.operation_seq, e.ordinal, e.alarm_id, e.occurrence_id, e.activation_token, e.kind, e.status_after, \
          e.actor_uid, o.sequenced_at_utc_ns, o.logical_time_ns, o.clock_quality, o.clock_flags, \
          (SELECT jc.durable_at_utc_ns FROM journal_commits jc WHERE jc.timeline_no = e.timeline_no AND jc.first_op <= e.operation_seq \
           ORDER BY jc.first_op DESC LIMIT 1), \
          e.origin_utc_ns, e.origin_source, e.origin_clock, e.reconciliation, a.action_id, a.note \
-         FROM alarm_events e \
+         FROM alarm_events e {INDEX} \
          JOIN journal_operations o ON o.timeline_no = e.timeline_no AND o.operation_seq = e.operation_seq \
          LEFT JOIN operator_actions a ON e.kind = 4 AND a.timeline_no = e.timeline_no AND a.operation_seq = e.operation_seq \
          WHERE e.timeline_no = ?1 AND e.event_seq > ?2 AND e.event_seq <= ?3",
     );
+    // Per-alarm queries use the (timeline, alarm, event_seq) index: without the hint the
+    // planner may walk the primary key range and scan every other alarm's rows (measured:
+    // 100 ms p50 on 6 M rows with 20 000 alarms, docs/benchmarks/vs006.md).
+    let sql = sql.replace("{INDEX}", if q.alarm_id.is_some() { "INDEXED BY alarm_events_by_alarm" } else { "" });
+    let mut sql = sql;
     if q.alarm_id.is_some() {
         sql.push_str(" AND e.alarm_id = ?5");
     }

@@ -731,8 +731,12 @@ fn journal_releases_the_outbox_ring() {
         if a.status == AckStatus::Rejected as i32 {
             // Transient: the ring is full until the next commit publishes the watermark.
             assert_eq!(a.error_code, ErrorCode::OutboxCapacityExceeded as i32, "{a:?}");
-            std::thread::sleep(Duration::from_millis(2));
-            let a = s.request(&batch(BatchMode::Delta, seq, &[(3, Val::I(v))])).unwrap();
+            // Nothing was applied: resend the same batch until a commit has released slots.
+            let a = wait("ring released by a commit", || {
+                std::thread::sleep(Duration::from_millis(1));
+                let a = s.request(&batch(BatchMode::Delta, seq, &[(3, Val::I(v))])).unwrap();
+                (a.status != AckStatus::Rejected as i32).then_some(a)
+            });
             assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
             last_op = a.operation_sequence.unwrap();
         } else {

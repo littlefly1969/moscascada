@@ -785,7 +785,9 @@ name = "scada-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rusqlite",
  "scada-core",
+ "scada-journal",
  "scada-protocol",
  "scada-runtime",
  "scada-sim-driver",

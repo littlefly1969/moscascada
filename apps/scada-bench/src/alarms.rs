@@ -26,7 +26,7 @@ use scada_core::{
     TagId, TagSpec, TransitionOutcome, ValidatedConfig, Value, ValueType,
 };
 use scada_protocol::alarm_v1 as apb;
-use scada_protocol::driver_v1::{AckStatus, BatchMode as WireMode, ErrorCode};
+use scada_protocol::driver_v1::{BatchMode as WireMode, ErrorCode};
 use scada_sim_driver::{AlarmClient, Session, Val, batch};
 
 use crate::{CHANNELS, KernelProc, KernelSpec, alloc, arg, arg_str, measure_window, proc_status, stats, us};
@@ -510,11 +510,15 @@ fn storm_driver(
     warmup: Duration,
     interval: Option<Duration>,
 ) -> DriverOut {
-    let mut s = Session::connect(&socket, "storm", source, 1).expect("connect");
+    let mut s = if crate::DURABLE_RECEIPTS.load(Relaxed) {
+        Session::connect_with(&socket, &scada_sim_driver::hello_durable("storm", source, 1)).expect("connect")
+    } else {
+        Session::connect(&socket, "storm", source, 1).expect("connect")
+    };
     let obs0: Vec<(u32, Val)> = (1..=CHANNELS).map(|c| (c, Val::I(0))).collect();
     let mut seq = s.welcome.last_accepted_source_sequence.map_or(1, |l| l + 1);
     let a = s.request(&batch(WireMode::FullState, seq, &obs0)).expect("full");
-    assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
+    assert!(crate::applied_ok(a.status), "{a:?}");
     seq += 1;
     let mut out = DriverOut { lat: Vec::with_capacity(1 << 20), applied: 0, refused: 0, first_refusal_ns: None };
     let mut v = 1i64;
@@ -526,7 +530,7 @@ fn storm_driver(
         let a = s.request(&msg).expect("request");
         let dt = t0.elapsed().as_nanos() as u64;
         let measuring = start.elapsed() >= warmup;
-        if a.status == AckStatus::AppliedVolatile as i32 {
+        if crate::applied_ok(a.status) {
             seq += 1;
             v ^= 1;
             if measuring {
@@ -537,7 +541,15 @@ fn storm_driver(
                 std::thread::sleep(i);
             }
         } else {
-            assert_eq!(a.error_code(), ErrorCode::OutboxCapacityExceeded, "{a:?}");
+            // VS-005 outbox full, or VS-006 journal backpressure (queue / disk): typed
+            // refusals before apply, retried with the same sequence.
+            assert!(
+                matches!(
+                    a.error_code(),
+                    ErrorCode::OutboxCapacityExceeded | ErrorCode::JournalQueueFull | ErrorCode::DiskFull
+                ),
+                "{a:?}"
+            );
             if measuring {
                 out.refused += 1;
                 out.first_refusal_ns.get_or_insert(start.elapsed().as_nanos() as u64);
@@ -588,14 +600,30 @@ pub fn alarm_storm(spec: &KernelSpec) {
     let label = arg_str("--label").unwrap_or_default();
     let a = spec.alarms.expect("--alarms R:CAP:storm required");
     assert!(a.storm, "--alarms R:CAP:storm");
-    let k = KernelProc::start(spec, "storm", &["--test-simulated-durable-sink"]);
+    // VS-006: with --persistence the journal is the durable consumer (sink=journal); the
+    // TEST-ONLY simulated sink is refused by the kernel in that case.
+    let journal = spec.persistence.is_some();
+    let stall_file = std::env::temp_dir().join(format!("scada-bench-stall-{}", std::process::id()));
+    let _ = std::fs::remove_file(&stall_file);
+    let stall_s = stall_file.display().to_string();
+    let stall_at = arg("--stall-at", 0);
+    let stall_for = arg("--stall-for", 0);
+    let extra: Vec<&str> = if !journal {
+        vec!["--test-simulated-durable-sink"]
+    } else if stall_for > 0 {
+        vec!["--test-journal-stall-file", &stall_s]
+    } else {
+        vec![]
+    };
+    let sink_mode = if journal { "journal".to_owned() } else { sink_mode };
+    let k = KernelProc::start(spec, "storm", &extra);
     let alarm_sock = k.dir.join("alarm.sock");
     std::thread::sleep(Duration::from_millis(200));
     let rss_idle = proc_status(k.pid(), "VmRSS:");
     STOP.store(false, Relaxed);
     let start = Instant::now();
     let released = Arc::new(AtomicU64::new(0));
-    let sink_h = (sink_mode == "drain").then(|| {
+    let sink_h = (sink_mode == "drain" && !journal).then(|| {
         let (p, r) = (alarm_sock.clone(), released.clone());
         std::thread::spawn(move || sink(p, page, r))
     });
@@ -614,11 +642,37 @@ pub fn alarm_storm(spec: &KernelSpec) {
     let mut max_used = 0;
     let mut probe_lat = Vec::new();
     let mut time_to_full: Option<f64> = None;
+    let mut hist =
+        journal.then(|| scada_sim_driver::HistoryClient::connect(&k.dir.join("history.sock")).expect("history"));
+    let mut max_backlog = 0u64;
+    let mut drained_at: Option<f64> = None;
+    let mut stall_events: Vec<String> = Vec::new();
     let usage = {
         let pid = k.pid();
         let h = std::thread::spawn(move || measure_window(pid, Duration::from_secs(secs), rss_idle));
+        let mut stalled = false;
         while t0.elapsed() < Duration::from_secs(secs) {
             std::thread::sleep(Duration::from_millis(250));
+            // VS-006 stalled-disk scenario: the writer stops between stall_at and
+            // stall_at + stall_for (seconds into the window), then catches up.
+            let el = t0.elapsed().as_secs();
+            if journal && stall_for > 0 {
+                if !stalled && el >= stall_at && el < stall_at + stall_for {
+                    let _ = std::fs::write(&stall_file, b"");
+                    stalled = true;
+                    stall_events.push(format!("stall_on@{:.2}", t0.elapsed().as_secs_f64()));
+                } else if stalled && el >= stall_at + stall_for {
+                    let _ = std::fs::remove_file(&stall_file);
+                    stalled = false;
+                    stall_events.push(format!("stall_off@{:.2}", t0.elapsed().as_secs_f64()));
+                }
+            }
+            if journal && let Ok(j) = hist.as_mut().expect("history").journal() {
+                max_backlog = max_backlog.max(j.backlog_operations);
+                if !stalled && stall_events.len() == 2 && j.backlog_operations == 0 && drained_at.is_none() {
+                    drained_at = Some(t0.elapsed().as_secs_f64());
+                }
+            }
             let q0 = Instant::now();
             let c = probe.capacity().expect("capacity");
             probe_lat.push(q0.elapsed().as_nanos() as u64);
@@ -630,6 +684,7 @@ pub fn alarm_storm(spec: &KernelSpec) {
         h.join().expect("usage")
     };
     let c1 = probe.capacity().expect("capacity");
+    let _ = std::fs::remove_file(&stall_file);
     STOP.store(true, Relaxed);
     let outs: Vec<DriverOut> = hs.into_iter().map(|h| h.join().expect("driver")).collect();
     if let Some(h) = sink_h {
@@ -664,6 +719,19 @@ pub fn alarm_storm(spec: &KernelSpec) {
         "FAIL"
     };
     let verdict = format!("storm60={storm} safety={safety}");
+    // VS-006: released = durable watermark advance (journal commits), not a simulated sink.
+    let released_total =
+        if journal { c1.durable_watermark - c0.durable_watermark } else { released.load(Relaxed) - released0 };
+    let jkv = if journal {
+        format!(
+            " max_backlog_ops={max_backlog} stall={} drained_at_s={}{}",
+            if stall_events.is_empty() { "none".to_owned() } else { stall_events.join(",") },
+            drained_at.map_or("n/a".to_owned(), |t| format!("{t:.2}")),
+            crate::journal_kv(&k.dir)
+        )
+    } else {
+        String::new()
+    };
     println!(
         "kind=alarm-storm label={label} scheduler={} sink={sink_mode} clients={clients} size={size} rules_per_tag={} capacity={} secs={secs} interval_us={interval_us} batches_s={:.0} events_s={:.0} released_s={:.0} refused={refused} refused_s={:.0} rejected_batches_total={} p50_ns={p50} p95_ns={p95} p99_ns={p99} p999_ns={p999} max_used={max_used} used_end={} next_event_seq={} time_to_full_s={} ctl_probe_max_us={} cpu_pct={:.1} cpu_threads={} rss_idle_kib={} rss_steady_kib={} rss_peak_kib={} {verdict}",
         crate::scheduler_of(&k.ready),
@@ -671,7 +739,7 @@ pub fn alarm_storm(spec: &KernelSpec) {
         a.capacity,
         applied as f64 / wall,
         events as f64 / wall,
-        (released.load(Relaxed) - released0) as f64 / wall,
+        released_total as f64 / wall,
         refused as f64 / wall,
         c1.rejected_batches,
         c1.used,
@@ -684,4 +752,7 @@ pub fn alarm_storm(spec: &KernelSpec) {
         usage.rss_steady,
         usage.peak
     );
+    if !jkv.is_empty() {
+        println!("kind=alarm-storm-journal label={label}{jkv}");
+    }
 }
