@@ -7,7 +7,10 @@
 //!              [--diag [--diag-probe-source ID]] [--capture-inputs FILE] [--throttle-sequencer-us N] [--check-config]
 //! ```
 //! Prints `READY instance=<hex> socket=<path>` on stdout once it accepts connections.
-//! State lives only in RAM: nothing survives the process.
+//! State lives only in RAM: nothing survives the process. VS-005: alarm states and the
+//! event outbox are volatile too (durability arrives with the VS-006 journal);
+//! `--test-simulated-durable-sink` enables a TEST-ONLY watermark command on the alarm
+//! control socket.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -16,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use scada_core::Kernel;
+use scada_runtime::alarms::{self, AlarmRuntime};
 use scada_runtime::capture::CaptureWriter;
 use scada_runtime::diag::Diag;
 use scada_runtime::sequencer::{self, Counters, SequencerContext};
@@ -37,6 +41,7 @@ struct Args {
     coalesce: Option<u32>,
     capture: Option<PathBuf>,
     fail_after: Option<u64>,
+    simulated_sink: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -55,6 +60,7 @@ fn parse_args() -> Result<Args, String> {
         coalesce: None,
         capture: None,
         fail_after: None,
+        simulated_sink: false,
     };
     let mut have_config = false;
     while let Some(arg) = it.next() {
@@ -71,6 +77,7 @@ fn parse_args() -> Result<Args, String> {
                     val("--throttle-sequencer-us")?.parse().map_err(|e| format!("--throttle-sequencer-us: {e}"))?
             }
             "--check-config" => a.check_only = true,
+            "--test-simulated-durable-sink" => a.simulated_sink = true,
             "--diag" => a.diag = true,
             "--capture-inputs" => a.capture = Some(val("--capture-inputs")?.into()),
             "--test-fail-sequencer-after" => {
@@ -119,7 +126,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH] \
                  [--scheduler current_thread|multi_thread] [--worker-threads N] \
-                 [--read-buffer-bytes N] [--capture-inputs FILE] [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--check-config]"
+                 [--read-buffer-bytes N] [--capture-inputs FILE] [--diag [--diag-probe-source ID]] [--throttle-sequencer-us N] [--test-simulated-durable-sink] [--check-config]"
             );
             return ExitCode::from(2);
         }
@@ -177,14 +184,80 @@ fn main() -> ExitCode {
             bound.total
         );
         println!("memory bound: {bound}");
+        // VS-005 §10: MiB, and the share of this host's physical RAM (informational only: the
+        // physical RAM is never assumed to be free for the kernel).
+        let mib = |b: u128| b as f64 / f64::from(1u32 << 20);
+        let phys = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
+            m.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse::<u64>().ok()
+        });
+        println!(
+            "memory bound: {:.2} MiB application allocations (not RSS){}{}",
+            mib(bound.total),
+            cfg.runtime.memory_budget_bytes.map_or(String::new(), |l| format!(
+                ", budget {:.2} MiB ({:.1} % used)",
+                mib(u128::from(l)),
+                bound.total as f64 / l as f64 * 100.0
+            )),
+            phys.map_or(String::new(), |kib| format!(
+                ", {:.3} % of this host's physical RAM ({:.0} MiB)",
+                bound.total as f64 / (kib as f64 * 1024.0) * 100.0,
+                kib as f64 / 1024.0
+            ))
+        );
         // VS-004: supervision summary (diagnostic output only; nothing is started).
         match &cfg.supervision {
             Some(s) => println!("supervision: {s} memory_bound_bytes={}", bound.supervision),
             None => println!("supervision: disabled (no source sets liveness_timeout_ms / freshness_timeout_ms)"),
         }
+        // VS-005: alarm capacity summary (ADR 0012 §capacity).
+        match cfg.core.alarm_table() {
+            Some(t) => {
+                let l = scada_core::layout_sizes().map(|(n, b)| format!("{n}={b}")).join(" ");
+                let (fanout, worst) = t.worst_fanout();
+                println!(
+                    "alarms: rules={} max_rules={} worst_fanout={} (source {}) outbox_capacity_events={} \
+                     alarm_core_bytes={} ({:.2} MiB) control_plane_bytes={} ({:.2} MiB) sizes({}) durability=NONE (volatile until VS-006)",
+                    t.len(),
+                    t.max_rules(),
+                    fanout,
+                    worst.map_or(0, |s| s.0),
+                    t.outbox_capacity(),
+                    bound.alarm_core,
+                    mib(bound.alarm_core),
+                    bound.alarms,
+                    mib(bound.alarms),
+                    l
+                );
+                if let Some(a) = &cfg.alarms {
+                    println!(
+                        "alarms control: socket={} authorized_uids={:?} max_connections={} page_max={} high_percent={}",
+                        a.control_socket_path.as_ref().map_or("off".to_owned(), |p| p.display().to_string()),
+                        a.control_authorized_uids,
+                        a.max_control_connections,
+                        a.control_page_max,
+                        a.outbox_high_percent
+                    );
+                }
+            }
+            None => println!("alarms: disabled (no [alarms] section)"),
+        }
         return ExitCode::SUCCESS;
     }
     eprintln!("memory bound (application allocations, not RSS): {bound}");
+    if cfg.core.alarm_table().is_some() {
+        eprintln!(
+            "WARNING: alarms enabled; alarm states and events are VOLATILE (not durable before VS-006). \
+             Without a durable consumer the outbox slots are never released: NOT PRODUCTION-READY FOR LONG-RUN ALARM RETENTION."
+        );
+    }
+    if args.simulated_sink {
+        if cfg.alarms.as_ref().and_then(|a| a.control_socket_path.as_ref()).is_none() {
+            eprintln!("error: --test-simulated-durable-sink requires [alarms] control_socket_path");
+            return ExitCode::from(2);
+        }
+        eprintln!("WARNING: --test-simulated-durable-sink is a TEST-ONLY watermark: released events are NOT durable");
+    }
+    let memory_bound = u64::try_from(bound.total).unwrap_or(u64::MAX);
     let built = match cfg.runtime.scheduler {
         config::Scheduler::CurrentThread => tokio::runtime::Builder::new_current_thread(),
         config::Scheduler::MultiThread { worker_threads } => {
@@ -223,6 +296,8 @@ fn main() -> ExitCode {
         diag,
         capture,
         fail_after: args.fail_after,
+        simulated_sink: args.simulated_sink,
+        memory_bound,
     };
     match rt.block_on(run(cfg, opts)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -240,10 +315,12 @@ struct Options {
     diag: Option<Arc<Diag>>,
     capture: Option<CaptureWriter>,
     fail_after: Option<u64>,
+    simulated_sink: bool,
+    memory_bound: u64,
 }
 
 async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
-    let Options { introspection, throttle, diag, capture, fail_after } = opts;
+    let Options { introspection, throttle, diag, capture, fail_after, simulated_sink, memory_bound } = opts;
     let cfg = Arc::new(cfg);
     let kernel_instance_id = server::new_instance_id()?;
     let counters = Arc::new(Counters::default());
@@ -253,6 +330,11 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
     let supervisor = Supervisor::new(&cfg);
     let watchdog = supervisor.as_ref().map(|s| Arc::new(WatchdogShared::new(s.poll())));
     let waker = watchdog.as_ref().map(|_| tx.tick_waker());
+    // VS-005: alarm runtime only when [alarms] is configured (default off: nothing exists).
+    let alarm_rt = cfg.core.alarm_table().map(|_| {
+        let high = cfg.alarms.as_ref().map_or(80, |a| a.outbox_high_percent);
+        AlarmRuntime::new(cfg.core.sources().len(), simulated_sink, high, memory_bound)
+    });
     let (seq_thread, mut seq_stopped) = sequencer::spawn(
         kernel,
         rx,
@@ -265,9 +347,11 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
             scheduler: cfg.runtime.scheduler.to_string(),
             fail_after,
             watchdog: watchdog.clone(),
+            alarm_page_max: cfg.alarms.as_ref().map_or(0, |a| a.control_page_max),
         },
         capture,
         supervisor,
+        alarm_rt,
     )?;
     if let (Some(w), Some(waker)) = (watchdog, waker) {
         // Detached: it stops by itself once the ingress is closed.
@@ -279,13 +363,25 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         Some(p) => Some(server::bind_socket(p, 0o600, None)?),
         None => None,
     };
+    // VS-005: alarm control socket (peer-uid allowlist on top of the file mode).
+    let control = match cfg.alarms.as_ref().and_then(|a| a.control_socket_path.as_ref().map(|p| (a, p))) {
+        Some((a, p)) => Some((server::bind_socket(p, 0o660, cfg.socket_group_gid)?, a.clone())),
+        None => None,
+    };
     println!(
-        "READY instance={} socket={} scheduler={} ingress={} supervision={}",
+        "READY instance={} socket={} scheduler={} ingress={} supervision={}{}",
         hex(&kernel_instance_id),
         cfg.socket_path.display(),
         cfg.runtime.scheduler,
         cfg.limits.ingress,
-        cfg.supervision.as_ref().map_or("off".to_owned(), |s| format!("{}", s.sources.len()))
+        cfg.supervision.as_ref().map_or("off".to_owned(), |s| format!("{}", s.sources.len())),
+        // VS-005: appended only when alarms are configured (READY line unchanged otherwise).
+        cfg.core.alarm_table().map_or(String::new(), |t| format!(
+            " alarms={} outbox={} durability=none{}",
+            t.len(),
+            t.outbox_capacity(),
+            if simulated_sink { " simulated_sink=test_only" } else { "" }
+        ))
     );
     let _ = std::io::stdout().flush();
 
@@ -297,9 +393,19 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
             None => std::future::pending().await,
         }
     };
+    let control_task = async {
+        match control {
+            Some(((l, _g), settings)) => {
+                let refused = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                alarms::serve_control(srv.clone(), l, settings, refused).await
+            }
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         _ = server::serve(srv.clone(), listener) => {}
         _ = intro_task => {}
+        _ = control_task => {}
         _ = term.recv() => eprintln!("SIGTERM: shutting down (volatile state is discarded)"),
         _ = int.recv() => eprintln!("SIGINT: shutting down (volatile state is discarded)"),
         _ = &mut seq_stopped => {

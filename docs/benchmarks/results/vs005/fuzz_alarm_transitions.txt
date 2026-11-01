@@ -1,0 +1,2 @@
+alarm_transitions (cargo-fuzz, -O, nightly, x86_64): Done 129108 runs in 121 second(s), 0 crashes, corpus 703 entries (2026-11-01T14:22Z)
+alarm_transitions (cargo-fuzz, -O -a = debug assertions ON incl. assert_quiet_exact, nightly, x86_64): Done 131012 runs in 301 second(s), 0 crashes (2026-11-01T17:30Z, after the quiet-window optimization)

@@ -374,6 +374,8 @@ fn replay(capture: &std::path::Path, cfg_path: &std::path::Path) -> ([u8; 32], s
             x.last_batch_operation = 0;
             x.silent = false;
         });
+        // VS-005: the VS-001 reference has no alarm engine (`SCADA_TEST_ALARMS=1`).
+        s.alarms = None;
         s
     };
     assert_eq!(neutral(k.logical_snapshot()), neutral(r.logical_snapshot()));

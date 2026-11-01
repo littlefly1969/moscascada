@@ -1,0 +1,51 @@
+{
+  "catalog_schema_version": 1,
+  "catalog_version": "2026-11-01.1",
+  "config_fingerprint": "unbound",
+  "languages": ["it", "en"],
+  "assets": [
+    { "asset_id": "plant.enclosure-1", "title": { "it": "Armadio 1", "en": "Enclosure 1" } },
+    { "asset_id": "plant.enclosure-1.door", "title": { "it": "Porta armadio 1", "en": "Enclosure 1 door" }, "parent_asset_id": "plant.enclosure-1" }
+  ],
+  "graphics": [
+    { "graphic_id": "overview", "title": { "it": "Panoramica", "en": "Overview" } },
+    { "graphic_id": "enclosure-1", "title": { "it": "Armadio 1", "en": "Enclosure 1" } }
+  ],
+  "documents": [
+    { "document_id": "SOP-ENC-001", "title": { "it": "Apertura armadi", "en": "Opening enclosures" }, "uri": "docs://procedures/SOP-ENC-001", "kind": "procedure" },
+    { "document_id": "DS-TEMP-17", "title": { "en": "Temperature probe datasheet" }, "uri": "docs://datasheets/DS-TEMP-17", "kind": "datasheet" }
+  ],
+  "alarms": [
+    {
+      "alarm_id": 1,
+      "title": { "it": "Porta armadio aperta", "en": "Enclosure door open" },
+      "operator_instructions": { "it": "Verificare l'accesso autorizzato; chiudere la porta.", "en": "Check authorized access; close the door." },
+      "causes": [{ "it": "Manutenzione in corso", "en": "Maintenance in progress" }],
+      "related_tag_ids": [101],
+      "asset_ids": ["plant.enclosure-1.door"],
+      "document_ids": ["SOP-ENC-001"],
+      "graphics": [
+        { "graphic_id": "enclosure-1", "element_id": "door", "action": "OpenAndHighlight" },
+        { "graphic_id": "overview", "action": "Open" }
+      ]
+    },
+    {
+      "alarm_id": 2,
+      "title": { "it": "Manomissione", "en": "Tamper" },
+      "related_tag_ids": [102, 101],
+      "asset_ids": ["plant.enclosure-1"],
+      "graphics": [{ "graphic_id": "enclosure-1", "element_id": "tamper", "action": "OpenAndHighlight" }]
+    },
+    {
+      "alarm_id": 3,
+      "title": { "it": "Temperatura armadio alta", "en": "Enclosure temperature high" },
+      "suggestions": [{ "it": "Controllare la ventilazione", "en": "Check the ventilation" }],
+      "related_tag_ids": [103],
+      "asset_ids": ["plant.enclosure-1"],
+      "document_ids": ["DS-TEMP-17"],
+      "graphics": [{ "graphic_id": "enclosure-1", "element_id": "temp", "action": "OpenAndHighlight" }]
+    },
+    { "alarm_id": 4, "title": { "it": "Temperatura armadio bassa", "en": "Enclosure temperature low" }, "related_tag_ids": [103], "document_ids": ["DS-TEMP-17"] },
+    { "alarm_id": 5, "title": { "it": "Segnale armadio perso", "en": "Enclosure signal lost" }, "related_tag_ids": [103], "graphics": [{ "graphic_id": "overview", "action": "Open" }] }
+  ]
+}

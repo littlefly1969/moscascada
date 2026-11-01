@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 
 use crate::ingress::Inbox;
 
+use crate::alarms::{AlarmCall, AlarmReply, AlarmRuntime, CapacityReport, Origin};
 use crate::capture::CaptureWriter;
 use crate::convert;
 use crate::diag::{self, Diag, Stage};
@@ -53,6 +54,19 @@ pub struct Counters {
     pub watchdog_ticks_coalesced: AtomicU64,
     pub watchdog_ticks_late: AtomicU64,
     pub watchdog_max_late_ns: AtomicU64,
+    /// VS-005 (operational, never in the digest): transitions refused for lack of outbox
+    /// slots, by origin.
+    pub outbox_rejected_batches: AtomicU64,
+    pub outbox_rejected_link: AtomicU64,
+    pub outbox_rejected_supervision: AtomicU64,
+    pub outbox_rejected_acks: AtomicU64,
+    /// Gauge: disconnections waiting for outbox slots.
+    pub pending_link_transitions: AtomicU64,
+    /// Gauge: 1 normal, 2 high, 3 critical.
+    pub outbox_overload: AtomicU64,
+    pub alarm_acks_applied: AtomicU64,
+    /// Control connections refused (uid not allowed or connection limit).
+    pub alarm_control_refused: AtomicU64,
 }
 
 impl Counters {
@@ -114,6 +128,11 @@ pub enum Request {
     /// VS-004: wake-up of an idle sequencer by the watchdog (no payload; the tick itself is
     /// the flag in [`WatchdogShared`]).
     Tick,
+    /// VS-005: alarm control plane (snapshot, events, ACK, capacity, test sink).
+    Alarm {
+        call: AlarmCall,
+        reply: oneshot::Sender<AlarmReply>,
+    },
 }
 
 /// Static data the sequencer needs besides the kernel.
@@ -133,6 +152,8 @@ pub struct SequencerContext {
     pub fail_after: Option<u64>,
     /// VS-004: watchdog flags, `Some` only when a source is supervised.
     pub watchdog: Option<Arc<WatchdogShared>>,
+    /// VS-005: page maximum of the control plane (0 without alarms).
+    pub alarm_page_max: u32,
 }
 
 /// Start the sequencer thread. It ends when every sender of `rx` is dropped. `stopped`
@@ -144,11 +165,12 @@ pub fn spawn(
     ctx: SequencerContext,
     capture: Option<CaptureWriter>,
     supervisor: Option<Supervisor>,
+    alarms: Option<AlarmRuntime>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
     let (alive, stopped) = oneshot::channel::<()>();
     let handle = thread::Builder::new().name("scada-sequencer".into()).spawn(move || {
         let _alive = alive;
-        run(kernel, rx, ctx, capture, supervisor)
+        run(kernel, rx, ctx, capture, supervisor, alarms)
     })?;
     Ok((handle, stopped))
 }
@@ -163,6 +185,8 @@ struct Links {
     active: Vec<Option<(u64, oneshot::Sender<()>)>>,
     /// VS-004: `None` unless a source is supervised.
     supervisor: Option<Supervisor>,
+    /// VS-005: `None` unless alarms are configured.
+    alarms: Option<AlarmRuntime>,
 }
 
 fn run(
@@ -171,8 +195,9 @@ fn run(
     ctx: SequencerContext,
     capture: Option<CaptureWriter>,
     supervisor: Option<Supervisor>,
+    alarms: Option<AlarmRuntime>,
 ) -> Kernel {
-    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new(), supervisor };
+    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new(), supervisor, alarms };
     links.active.resize_with(kernel.config().sources().len(), || None);
     // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
     // N = 4/16/64) was measured in VS-002 and removed: no repeatable effect on throughput
@@ -186,8 +211,33 @@ fn run(
         {
             watchdog_tick(&mut kernel, &mut links, w, raised, &ctx);
         }
+        // VS-005: link transitions refused for lack of outbox slots are retried, in their
+        // original order, as soon as slots were released (never applied out of order with
+        // respect to inputs that were already applied: each retry is a new operation).
+        if let Some(a) = links.alarms.as_mut()
+            && a.released
+        {
+            a.released = false;
+            retry_pending_disconnects(&mut kernel, &mut links, &ctx);
+        }
     }
     kernel
+}
+
+fn retry_pending_disconnects(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext) {
+    let Some(a) = links.alarms.as_mut() else { return };
+    let mut i = 0;
+    while let Some(&(source_id, link_generation)) = a.pending_disconnects.get(i) {
+        let Some(operation_sequence) = kernel.next_operation_sequence() else { return };
+        let op = Operation::SourceDisconnected { source_id, link_generation };
+        let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
+        if matches!(r, Err(scada_core::ApplyError::OutboxCapacityExceeded { .. })) {
+            i += 1;
+        } else {
+            a.pending_disconnects.remove(i);
+        }
+        a.after_apply(kernel, &r, Origin::Link, &ctx.counters);
+    }
 }
 
 /// VS-004: one supervision tick on the sequencer thread. The only clock read of the
@@ -205,10 +255,20 @@ fn watchdog_tick(kernel: &mut Kernel, links: &mut Links, w: &WatchdogShared, rai
     }
     let Some(sup) = links.supervisor.as_mut() else { return };
     let capture = &mut links.capture;
+    let alarms = &mut links.alarms;
+    let counters = &ctx.counters;
     let mut apply_one = |k: &mut Kernel, operation: Operation| -> Option<TransitionOutcome> {
         let operation_sequence = k.next_operation_sequence()?;
-        match apply(k, capture, SequencedInput { operation_sequence, operation }) {
+        let r = apply(k, capture, None, SequencedInput { operation_sequence, operation });
+        if let Some(a) = alarms.as_mut() {
+            a.after_apply(k, &r, Origin::Supervision, counters);
+        }
+        match r {
             Ok(o) => Some(o),
+            // VS-005: refused for lack of outbox slots: nothing applied, the next tick
+            // decides again (the expiry stays pending; never invented). Counted, and the
+            // overload state is reported once on stderr.
+            Err(scada_core::ApplyError::OutboxCapacityExceeded { .. }) => None,
             Err(e) => {
                 eprintln!("sequencer: supervision operation rejected: {e}");
                 None
@@ -218,10 +278,12 @@ fn watchdog_tick(kernel: &mut Kernel, links: &mut Links, w: &WatchdogShared, rai
     sup.tick(now, kernel, &mut apply_one, &ctx.counters);
 }
 
-/// The only place where the sequencer calls `Kernel::apply`.
+/// The only place where the sequencer calls `Kernel::apply`. (`_origin` is only a
+/// readability hint at the call sites; the VS-005 bookkeeping is done by the callers.)
 fn apply(
     kernel: &mut Kernel,
     capture: &mut Option<CaptureWriter>,
+    _origin: Option<Origin>,
     input: SequencedInput,
 ) -> Result<TransitionOutcome, scada_core::ApplyError> {
     if let Some(c) = capture {
@@ -237,7 +299,15 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
     }
     match req {
         Request::Connect { source_id, source_epoch, reply, superseded, heartbeats } => {
-            let r = connect(kernel, &mut links.capture, &mut links.next_generation, source_id, source_epoch);
+            let r = connect(
+                kernel,
+                &mut links.capture,
+                &mut links.next_generation,
+                source_id,
+                source_epoch,
+                links.alarms.as_mut(),
+                &ctx.counters,
+            );
             if let ConnectReply::Welcome { link_generation, .. } = r
                 && let Some(i) = kernel.config().source_index(source_id)
             {
@@ -267,8 +337,24 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 return;
             };
             let op = Operation::SourceDisconnected { source_id, link_generation };
-            if let Err(e) = apply(kernel, &mut links.capture, SequencedInput { operation_sequence, operation: op }) {
-                eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}");
+            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
+            match &r {
+                Err(scada_core::ApplyError::OutboxCapacityExceeded { required, free }) => {
+                    // VS-005: not applied (atomicity); the link stays Connected in the kernel
+                    // and its tags keep their quality until slots are released. Retried
+                    // then; reported as CRITICAL meanwhile.
+                    eprintln!(
+                        "sequencer: disconnect of source {source_id} gen {link_generation} deferred: outbox full (required {required}, free {free})"
+                    );
+                    if let Some(a) = links.alarms.as_mut() {
+                        a.defer_disconnect(source_id, link_generation);
+                    }
+                }
+                Err(e) => eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}"),
+                Ok(_) => {}
+            }
+            if let Some(a) = links.alarms.as_mut() {
+                a.after_apply(kernel, &r, Origin::Link, &ctx.counters);
             }
         }
         Request::Batch { batch, reply, submitted, permits } => {
@@ -281,7 +367,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 }
             }
             let t0 = diag::now(d);
-            let mut r = apply_batch(kernel, &mut links.capture, batch, &ctx.counters);
+            let mut r = apply_batch(kernel, &mut links.capture, batch, &ctx.counters, links.alarms.as_mut());
             if let (Some(d), Some(t0)) = (d, t0) {
                 d.since(Stage::Apply, t0);
                 r.sent = Some(Instant::now());
@@ -295,7 +381,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             if let Some(c) = &mut links.capture {
                 c.flush();
             }
-            let _ = reply.send(introspect(kernel, include_tags, ctx));
+            let _ = reply.send(introspect(kernel, include_tags, ctx, links.alarms.as_ref()));
             if reset_diagnostics && let Some(d) = &ctx.diag {
                 d.reset();
             }
@@ -305,9 +391,98 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 w.woken();
             }
         }
+        Request::Alarm { call, reply } => {
+            let r = alarm_call(kernel, links, call, ctx);
+            let _ = reply.send(r);
+        }
     }
     if !ctx.throttle.is_zero() {
         thread::sleep(ctx.throttle);
+    }
+}
+
+/// VS-005: one control-plane request, at the current position of the sequence.
+fn alarm_call(kernel: &mut Kernel, links: &mut Links, call: AlarmCall, ctx: &SequencerContext) -> AlarmReply {
+    let Some(a) = links.alarms.as_mut() else { return AlarmReply::Unsupported("alarms are not configured") };
+    let page = |limit: u32| {
+        let max = ctx.alarm_page_max as usize;
+        if limit == 0 { max } else { (limit as usize).min(max) }
+    };
+    match call {
+        AlarmCall::Snapshot { after, limit, expected_change, mut buf } => {
+            let current = kernel.outbox_status().map_or(0, |s| s.last_alarm_change_operation);
+            let operation_sequence = kernel.last_operation_sequence();
+            if expected_change != 0 && expected_change != current {
+                buf.clear();
+                return AlarmReply::Snapshot { page: Err(current), buf, operation_sequence };
+            }
+            match kernel.alarm_snapshot_page(after, page(limit), &mut buf) {
+                Some(p) => AlarmReply::Snapshot { page: Ok(p), buf, operation_sequence },
+                None => AlarmReply::Unsupported("alarms are not configured"),
+            }
+        }
+        AlarmCall::Events { after, limit, mut buf } => match kernel.read_alarm_events(after, page(limit), &mut buf) {
+            Some(p) => AlarmReply::Events { page: p, buf },
+            None => AlarmReply::Unsupported("alarms are not configured"),
+        },
+        AlarmCall::Ack { alarm_id, token, actor_uid } => {
+            let Some(operation_sequence) = kernel.next_operation_sequence() else {
+                return AlarmReply::Ack(crate::alarms::AckOutcome::SequenceExhausted);
+            };
+            let op = Operation::AlarmAcknowledge { alarm_id, expected_activation_token: token, actor_uid };
+            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
+            a.after_apply(kernel, &r, Origin::Ack, &ctx.counters);
+            let o = crate::alarms::ack_outcome(&r);
+            if matches!(o, crate::alarms::AckOutcome::Applied { .. }) {
+                Counters::inc(&ctx.counters.alarm_acks_applied);
+            }
+            AlarmReply::Ack(o)
+        }
+        AlarmCall::Capacity => {
+            let Some(outbox) = kernel.outbox_status() else {
+                return AlarmReply::Unsupported("alarms are not configured");
+            };
+            let c = &ctx.counters;
+            let ld = |x: &AtomicU64| x.load(Ordering::Relaxed);
+            let t = kernel.config().alarm_table();
+            AlarmReply::Capacity(CapacityReport {
+                outbox,
+                overload: a.overload(&outbox),
+                simulated_sink: a.simulated_sink,
+                rejected_batches: ld(&c.outbox_rejected_batches),
+                rejected_link: ld(&c.outbox_rejected_link),
+                rejected_supervision: ld(&c.outbox_rejected_supervision),
+                rejected_acks: ld(&c.outbox_rejected_acks),
+                pending_link_transitions: a.pending_disconnects.len() as u32,
+                rules: t.map_or(0, |t| t.len() as u32),
+                worst_fanout: t.map_or(0, |t| t.worst_fanout().0),
+                memory_bound: a.memory_bound,
+                high_percent: a.high_percent,
+                operation_sequence: kernel.last_operation_sequence(),
+            })
+        }
+        AlarmCall::SimulatedDurableCommit { up_to } => {
+            if !a.simulated_sink {
+                return AlarmReply::Unsupported(
+                    "no durable sink in VS-005; the simulated sink exists only with --test-simulated-durable-sink",
+                );
+            }
+            let Some(operation_sequence) = kernel.next_operation_sequence() else {
+                return AlarmReply::Watermark(Err("operation sequence exhausted".into()));
+            };
+            let op = Operation::AdvanceDurableWatermark { up_to_event_seq: up_to };
+            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
+            a.after_apply(kernel, &r, Origin::Other, &ctx.counters);
+            let wm = kernel.outbox_status().map_or(0, |s| s.durable_watermark);
+            match r {
+                Ok(TransitionOutcome::Applied {
+                    operation_sequence,
+                    kind: AppliedKind::DurableWatermarkAdvanced { released, .. },
+                }) => AlarmReply::Watermark(Ok((wm, released, Some(operation_sequence)))),
+                Ok(_) => AlarmReply::Watermark(Ok((wm, 0, None))),
+                Err(e) => AlarmReply::Watermark(Err(e.to_string())),
+            }
+        }
     }
 }
 
@@ -317,6 +492,8 @@ fn connect(
     next_generation: &mut u64,
     source_id: SourceId,
     source_epoch: u64,
+    alarms: Option<&mut AlarmRuntime>,
+    counters: &Counters,
 ) -> ConnectReply {
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
         return ConnectReply::Rejected(ErrorCode::OperationSequenceExhausted);
@@ -325,7 +502,11 @@ fn connect(
         return ConnectReply::Rejected(ErrorCode::Internal);
     };
     let op = Operation::SourceConnected { source_id, link_generation, source_epoch };
-    match apply(kernel, capture, SequencedInput { operation_sequence, operation: op }) {
+    let r = apply(kernel, capture, None, SequencedInput { operation_sequence, operation: op });
+    if let Some(a) = alarms {
+        a.after_apply(kernel, &r, Origin::Link, counters);
+    }
+    match r {
         Ok(TransitionOutcome::Applied {
             kind: AppliedKind::Connected { full_state_required, last_accepted_source_sequence, .. },
             ..
@@ -346,6 +527,7 @@ fn apply_batch(
     capture: &mut Option<CaptureWriter>,
     batch: ObservationBatch,
     counters: &Counters,
+    alarms: Option<&mut AlarmRuntime>,
 ) -> BatchReply {
     let source_id = batch.source_id;
     let last = |k: &Kernel| k.source_status(source_id).and_then(|s| s.last_accepted_source_sequence);
@@ -360,8 +542,15 @@ fn apply_batch(
             sent: None,
         };
     };
-    let outcome =
-        apply(kernel, capture, SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) });
+    let outcome = apply(
+        kernel,
+        capture,
+        None,
+        SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) },
+    );
+    if let Some(a) = alarms {
+        a.after_apply(kernel, &outcome, Origin::Batch, counters);
+    }
     match outcome {
         Ok(TransitionOutcome::Applied { operation_sequence, kind }) => {
             Counters::inc(&counters.batches_applied);
@@ -414,7 +603,12 @@ fn apply_batch(
     }
 }
 
-fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ipb::IntrospectResponse {
+fn introspect(
+    kernel: &Kernel,
+    include_tags: bool,
+    ctx: &SequencerContext,
+    alarms: Option<&AlarmRuntime>,
+) -> ipb::IntrospectResponse {
     let snap = kernel.logical_snapshot();
     let c = &ctx.counters;
     let ld = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -520,5 +714,29 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             })
             .unwrap_or_default(),
         scheduler: ctx.scheduler.clone(),
+        alarms: match (kernel.outbox_status(), alarms) {
+            (Some(o), Some(a)) => Some(ipb::AlarmSummary {
+                rules: kernel.config().alarm_table().map_or(0, |t| t.len() as u32),
+                active_or_unacked: o.active_or_unacked,
+                outbox_capacity: o.capacity,
+                outbox_used: o.used,
+                next_event_seq: o.next_event_seq,
+                durable_watermark: o.durable_watermark,
+                outbox_high_water: o.high_water,
+                overload_state: a.overload(&o) as u32,
+                outbox_rejections: ld(&c.outbox_rejected_batches)
+                    + ld(&c.outbox_rejected_link)
+                    + ld(&c.outbox_rejected_supervision)
+                    + ld(&c.outbox_rejected_acks),
+                pending_link_transitions: a.pending_disconnects.len() as u32,
+                acknowledgements_applied: ld(&c.alarm_acks_applied),
+                events_digest: if include_tags {
+                    kernel.alarm_events_digest().map_or_else(Vec::new, |d| d.to_vec())
+                } else {
+                    Vec::new()
+                },
+            }),
+            _ => None,
+        },
     }
 }

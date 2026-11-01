@@ -10,7 +10,13 @@
 //! scada-bench mixed --hv N [--rare-interval-us U] [--secs S] [--warmup-secs W]
 //!       [--hv-size S] [--hv-pipeline P] [--rare-sources R] [--rare-mode stop|open]
 //!       [--rare-max-outstanding K] [--takeover-interval-ms T]
+//! scada-bench alarms-core [--ops N]                    VS-005 in-memory alarm engine suite
+//! scada-bench alarm-storm --alarms R:CAP:storm [--clients N] [--size S] [--secs S]
+//!       [--sink drain|stopped] [--sink-page P]   VS-005 process storm, PASS/FAIL line
 //! ```
+//! VS-005 `--alarms R:CAP[:storm]` (cell, mixed, alarm-storm): R `high` rules on every tag
+//! of the generated config, outbox CAP events, control socket for the current uid.
+//!
 //! VS-003 harness additions (all default to the VS-002 behaviour):
 //! * `--rare-mode open`: each rare source emits on a fixed schedule (`--rare-interval-us`)
 //!   independent of its ACKs, from a sender thread, while a receiver thread timestamps the
@@ -41,6 +47,7 @@
 //! (scripts/bench-vs002.sh); the others print Markdown. Numbers are whatever this machine
 //! measures; nothing is a target or threshold.
 
+mod alarms;
 mod alloc;
 
 use std::io::{BufRead, BufReader, Write};
@@ -108,6 +115,17 @@ struct KernelSpec {
     /// VS-004 `--heartbeat-ms H`: every `cell` client sends a heartbeat each H ms (only
     /// if the kernel negotiated protocol 1.1; nothing is sent to a VS-003 kernel).
     heartbeat_ms: u64,
+    /// VS-005 `--alarms R:CAP[:storm]`: R `high` rules on every tag of the generated config,
+    /// outbox of CAP events, control socket `<dir>/alarm.sock` for the current uid.
+    /// Thresholds never crossed by the `cell` values unless `storm` (trip 1, reset 0).
+    alarms: Option<AlarmGen>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AlarmGen {
+    rules_per_tag: u32,
+    capacity: u64,
+    storm: bool,
 }
 
 impl KernelSpec {
@@ -124,6 +142,15 @@ impl KernelSpec {
                 (p[0], p[1], p[2])
             }),
             heartbeat_ms: arg("--heartbeat-ms", 0),
+            alarms: arg_str("--alarms").map(|v| {
+                let p: Vec<&str> = v.split(':').collect();
+                assert!(p.len() >= 2, "--alarms RULES_PER_TAG:CAPACITY[:storm]");
+                AlarmGen {
+                    rules_per_tag: p[0].parse().expect("rules per tag"),
+                    capacity: p[1].parse().expect("capacity"),
+                    storm: p.get(2) == Some(&"storm"),
+                }
+            }),
         }
     }
 }
@@ -132,6 +159,14 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     match mode.as_str() {
         "core" => core_bench(arg("--ops", 1_000_000), std::env::args().any(|a| a == "--supervised")),
+        "alarms-core" => alarms::alarms_core(arg("--ops", 200_000)),
+        "alarms-hot" => alarms::alarms_hot(
+            arg("--sources", 16) as u32,
+            arg("--rules-per-tag", 1) as u32,
+            arg("--ops", 200_000),
+            arg("--reps", 7) as u32,
+        ),
+        "alarm-storm" => alarms::alarm_storm(&KernelSpec::from_args()),
         "e2e" => e2e_bench(&KernelSpec::from_args(), arg("--secs", 10), arg("--warmup-secs", 2)),
         "saturation" => saturation(&KernelSpec::from_args(), arg("--secs", 60), arg("--clients", 8) as u32),
         "cell" => {
@@ -172,7 +207,9 @@ fn main() {
             &arg_str("--label").unwrap_or_default(),
         ),
         _ => {
-            eprintln!("usage: scada-bench core|e2e|saturation|cell|mixed|stale [options] (see module docs)");
+            eprintln!(
+                "usage: scada-bench core|e2e|saturation|cell|mixed|stale|alarms-core|alarm-storm [options] (see module docs)"
+            );
             std::process::exit(2);
         }
     }
@@ -403,6 +440,7 @@ fn write_config(
     load: u32,
     ipc_lines: &[String],
     supervise: Option<(u64, u64, u64)>,
+    alarms: Option<AlarmGen>,
 ) -> PathBuf {
     let mut s = format!(
         "[ipc]\nsocket_path = \"{}\"\nmax_frame_bytes = 65536\nmax_driver_connections = {max_conn}\ninput_queue_capacity = {queue}\nmax_inflight_per_connection = 32\nhandshake_timeout_ms = 2000\nframe_timeout_ms = 2000\n",
@@ -444,6 +482,27 @@ fn write_config(
             r * 1000 + 1
         ));
     }
+    if let Some(a) = alarms {
+        let uid = proc_status(std::process::id(), "Uid:");
+        s.push_str(&format!(
+            "\n[alarms]\noutbox_capacity_events = {}\ncontrol_socket_path = \"{}\"\ncontrol_authorized_uids = [{uid}]\n",
+            a.capacity,
+            dir.join("alarm.sock").display()
+        ));
+        let (trip, reset) = if a.storm { (1, 0) } else { (1i64 << 60, (1i64 << 60) - 1) };
+        let tags = (1..=load)
+            .flat_map(|src| (1..=CHANNELS).map(move |c| src * 1000 + c))
+            .chain((RARE_SOURCE..=CTL_SOURCE).map(|r| r * 1000 + 1));
+        let mut id = 0u32;
+        for t in tags {
+            for _ in 0..a.rules_per_tag {
+                id += 1;
+                s.push_str(&format!(
+                    "\n[[alarms.rules]]\nid = {id}\nname = \"a{id}\"\ntag_id = {t}\nkind = \"high\"\ntrip = {trip}\nreset = {reset}\nseverity = \"warning\"\n"
+                ));
+            }
+        }
+    }
     let p = dir.join("bench.toml");
     std::fs::write(&p, s).expect("write config");
     p
@@ -484,6 +543,7 @@ impl KernelProc {
                 spec.load_sources,
                 &spec.ipc_lines,
                 spec.supervise,
+                spec.alarms,
             ),
         };
         let mut child = Command::new(&spec.bin)
@@ -831,6 +891,17 @@ impl CellResult {
     }
 }
 
+/// VS-005: alarm summary of the kernel (absent without `[alarms]`).
+fn alarm_kv(r: &IntrospectResponse) -> String {
+    match &r.alarms {
+        None => String::new(),
+        Some(a) => format!(
+            " alarm_rules={} outbox_used={} outbox_cap={} next_event_seq={} outbox_rej={} overload={}",
+            a.rules, a.outbox_used, a.outbox_capacity, a.next_event_seq, a.outbox_rejections, a.overload_state
+        ),
+    }
+}
+
 fn scheduler_of(ready: &str) -> String {
     ready.split_whitespace().find_map(|w| w.strip_prefix("scheduler=")).unwrap_or("current_thread").to_owned()
 }
@@ -866,7 +937,7 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
         lat: (!lat.is_empty()).then(|| stats(lat)),
         usage,
         scheduler: scheduler_of(&k.ready),
-        diag: stages_kv(&intro) + &supervision_kv(&intro),
+        diag: stages_kv(&intro) + &supervision_kv(&intro) + &alarm_kv(&intro),
     }
 }
 

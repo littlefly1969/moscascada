@@ -1,0 +1,48 @@
+{
+  "level_A_measured": {
+    "event_record_bytes": 48,
+    "alarm_state_bytes": 32,
+    "compiled_rule_bytes": 24,
+    "per_rule_bytes_measured": 217.2,
+    "kernel_events_s_process_drain_pass": 1291299.0,
+    "kernel_events_s_in_memory_max": 38140585.0,
+    "bench_results": "docs/benchmarks/results/vs005/storm.txt + alarms-core.raw"
+  },
+  "level_B_assumed": {
+    "event_rate_per_s": 200.0,
+    "durable_rate_per_s_projection": 5000.0,
+    "durable_rate_per_s_vs005": 0.0,
+    "storm_seconds": 600.0,
+    "reserve_slots": 2048,
+    "initial_backlog": 0,
+    "rules": 2000,
+    "ram_budget_mib": 256.0,
+    "outbox_slots": 1048576,
+    "burst_profile": null
+  },
+  "level_C_computed": {
+    "slots_from_ram_budget": 5583355,
+    "slots": 1048576,
+    "outbox_bytes": 50331648,
+    "rule_bytes_estimate": 434400,
+    "usable_slots": 1046528,
+    "vs005_mu_0": {
+      "net_growth_per_s": 200.0,
+      "time_to_full_s": 5232.64,
+      "required_slots_for_storm": 122048,
+      "storm_verdict": "PASS",
+      "backlog_drain_time_s": 0.0
+    },
+    "vs006_projection": {
+      "net_growth_per_s": -4800.0,
+      "time_to_full_s": null,
+      "required_slots_for_storm": 2048,
+      "storm_verdict": "PASS",
+      "backlog_drain_time_s": 0.0
+    }
+  },
+  "warnings": [
+    "durable_rate > 0 is a VS-006 PROJECTION: VS-005 has no durable consumer (mu = 0)"
+  ],
+  "limitation": "NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION: without the VS-006 journal no slot is ever released; time_to_full is the lifetime of the process at the assumed rate."
+}

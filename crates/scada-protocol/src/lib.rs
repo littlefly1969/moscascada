@@ -1,5 +1,6 @@
-//! IPC types and framing for the kernel <-> driver protocol (`scada.driver.v1`) and the
-//! read-only test introspection (`scada.introspect.v1`).
+//! IPC types and framing for the kernel <-> driver protocol (`scada.driver.v1`), the
+//! read-only test introspection (`scada.introspect.v1`) and, since VS-005, the local alarm
+//! control plane (`scada.alarm.v1`).
 //!
 //! Frame = `u32` big-endian payload length + protobuf payload. A length of zero or above
 //! the configured maximum is rejected *before* any buffer is reserved.
@@ -27,6 +28,12 @@ pub mod driver_v1 {
 #[allow(clippy::all, clippy::pedantic, missing_debug_implementations)]
 pub mod introspect_v1 {
     include!(concat!(env!("OUT_DIR"), "/scada.introspect.v1.rs"));
+}
+
+/// VS-005: generated code for `scada.alarm.v1` (alarm control plane).
+#[allow(clippy::all, clippy::pedantic, missing_debug_implementations)]
+pub mod alarm_v1 {
+    include!(concat!(env!("OUT_DIR"), "/scada.alarm.v1.rs"));
 }
 
 pub use prost::Message;

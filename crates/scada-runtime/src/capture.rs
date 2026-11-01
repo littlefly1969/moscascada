@@ -16,7 +16,13 @@
 //! S <op> <source> <generation>                       VS-004 SourceSilenceExpired
 //! R <op> <source> <generation>                       VS-004 SourceLivenessRestored
 //! X <op> <source> <generation> <observed_up_to>      VS-004 FreshnessExpired
+//! A <op> <alarm_id> <activation_token> <actor_uid>   VS-005 AlarmAcknowledge
+//! W <op> <up_to_event_seq>                           VS-005 AdvanceDurableWatermark (test sink)
 //! ```
+//!
+//! VS-005: acknowledgements (with the peer uid the runtime authenticated) and the
+//! test-only watermark advances are sequenced inputs and are captured like the others; the
+//! alarm events themselves are derived and never captured.
 //!
 //! VS-004: the supervision operations the runtime watchdog derives from monotonic time
 //! are recorded like any other input, so a replay reproduces them without reading a clock.
@@ -26,7 +32,9 @@ use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::Path;
 
-use scada_core::{BatchMode, ChannelId, Observation, ObservationBatch, Operation, SequencedInput, SourceId, Value};
+use scada_core::{
+    AlarmId, BatchMode, ChannelId, Observation, ObservationBatch, Operation, SequencedInput, SourceId, Value,
+};
 
 /// Records after which capturing stops (one warning on stderr).
 pub const MAX_RECORDS: u64 = 5_000_000;
@@ -97,6 +105,12 @@ fn format_input(s: &mut String, input: &SequencedInput) {
         Operation::FreshnessExpired { source_id, link_generation, observed_up_to } => {
             let _ = write!(s, "X {op} {} {link_generation} {observed_up_to}", source_id.0);
         }
+        Operation::AlarmAcknowledge { alarm_id, expected_activation_token, actor_uid } => {
+            let _ = write!(s, "A {op} {} {expected_activation_token} {actor_uid}", alarm_id.0);
+        }
+        Operation::AdvanceDurableWatermark { up_to_event_seq } => {
+            let _ = write!(s, "W {op} {up_to_event_seq}");
+        }
         Operation::ObservationBatch(b) => {
             let mode = match b.mode {
                 BatchMode::FullState => 'F',
@@ -124,6 +138,21 @@ pub fn parse_line(line: &str) -> Option<SequencedInput> {
     let mut f = line.split_ascii_whitespace();
     let kind = f.next()?;
     let op: u64 = f.next()?.parse().ok()?;
+    match kind {
+        "A" => {
+            let operation = Operation::AlarmAcknowledge {
+                alarm_id: AlarmId(f.next()?.parse().ok()?),
+                expected_activation_token: f.next()?.parse().ok()?,
+                actor_uid: f.next()?.parse().ok()?,
+            };
+            return f.next().is_none().then_some(SequencedInput { operation_sequence: op, operation });
+        }
+        "W" => {
+            let operation = Operation::AdvanceDurableWatermark { up_to_event_seq: f.next()?.parse().ok()? };
+            return f.next().is_none().then_some(SequencedInput { operation_sequence: op, operation });
+        }
+        _ => {}
+    }
     let source_id = SourceId(f.next()?.parse().ok()?);
     let link_generation: u64 = f.next()?.parse().ok()?;
     let operation = match kind {
@@ -238,6 +267,18 @@ mod tests {
                     observed_up_to: u64::MAX,
                 },
             },
+            SequencedInput {
+                operation_sequence: 7,
+                operation: Operation::AlarmAcknowledge {
+                    alarm_id: AlarmId(u32::MAX),
+                    expected_activation_token: u64::MAX,
+                    actor_uid: 1000,
+                },
+            },
+            SequencedInput {
+                operation_sequence: 8,
+                operation: Operation::AdvanceDurableWatermark { up_to_event_seq: 42 },
+            },
         ];
         for i in &inputs {
             let mut s = String::new();
@@ -245,6 +286,8 @@ mod tests {
             assert_eq!(parse_line(&s).as_ref(), Some(i), "{s}");
         }
         assert!(parse_line("X 1 2 3").is_none());
+        assert!(parse_line("A 1 2 3").is_none());
+        assert!(parse_line("W 1 2 3").is_none());
         assert!(parse_line("B 1 2 3 F 1 1:x:1").is_none());
     }
 }

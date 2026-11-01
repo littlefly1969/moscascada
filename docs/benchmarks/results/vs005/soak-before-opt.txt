@@ -1,0 +1,40 @@
+# vs005 soak 2026-11-01T15:04:37Z host=Linux 6.18.44-fc-v185 x86_64
+# target/release/scada-bench alarm-storm --label SOAK_ct_drain --alarms 1:1048576:storm --clients 2 --size 128 --interval-us 1000 --sink drain --secs 1800 --warmup-secs 5
+# rss_sample t_min=1 pid=3252 VmHWM: 59700 kB VmRSS: 59700 kB
+# rss_sample t_min=2 pid=3252 VmHWM: 59700 kB VmRSS: 59700 kB
+# rss_sample t_min=3 pid=3252 VmHWM: 59700 kB VmRSS: 59700 kB
+# rss_sample t_min=4 pid=9093 VmHWM: 4112 kB VmRSS: 4112 kB
+# rss_sample t_min=5 pid=11636 VmHWM: 4144 kB VmRSS: 4144 kB
+# rss_sample t_min=6 pid=15130 VmHWM: 4088 kB VmRSS: 4088 kB
+# rss_sample t_min=7 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=8 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=9 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=10 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=11 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=12 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=13 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=14 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=15 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=16 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=17 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=18 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=19 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=20 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=21 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=22 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=23 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=24 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=25 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=26 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=27 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=28 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=29 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+# rss_sample t_min=30 pid=17141 VmHWM: 4236 kB VmRSS: 4236 kB
+kind=alarm-storm label=SOAK_ct_drain scheduler=current_thread sink=drain clients=2 size=128 rules_per_tag=1 capacity=1048576 secs=1800 interval_us=1000 batches_s=1525 events_s=195238 released_s=195238 refused=0 refused_s=0 rejected_batches_total=0 p50_ns=148724 p95_ns=324212 p99_ns=957460 p999_ns=3838122 max_used=3456 used_end=0 next_event_seq=352419329 time_to_full_s=never ctl_probe_max_us=57673 cpu_pct=39.4 cpu_threads=main:29,seq:10 rss_idle_kib=59668 rss_steady_kib=59700 rss_peak_kib=59700 storm60=PASS safety=PASS
+# end 2026-11-01T15:34:43Z
+# NOTE: the external rss_sample loop used `pgrep -n scada-kernel` (newest process). From t_min=4 it
+# picked kernels started by a concurrent ./scripts/check.sh run and by a test kernel left behind by a
+# failed timing test (pid 17141): those samples (pid != 3252) do NOT belong to the soak kernel and are
+# invalid. The soak kernel RSS is the bench's own measurement on the kind= line above
+# (rss_idle_kib / rss_steady_kib / rss_peak_kib, read from /proc/<soak kernel pid>/status).
+# Concurrent load: ./scripts/check.sh and test reruns ran on the same 4 vCPU from ~15:05 to ~15:21 UTC.

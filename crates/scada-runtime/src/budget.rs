@@ -53,6 +53,12 @@ pub struct Budget {
     /// VS-004: supervisor (watch table, preallocated freshness sample rings) and the
     /// per-link heartbeat counters; 0 without supervision.
     pub supervision: u128,
+    /// VS-005: alarm runtime outside the kernel (control-plane sessions and pages, pending
+    /// disconnections); 0 without alarms. The core alarm storage (states, listed index,
+    /// outbox ring, preflight scratch) is inside `kernel` and itemized in `alarm_core`.
+    pub alarms: u128,
+    /// VS-005: part of `kernel` held by the alarm engine (informational, already in `kernel`).
+    pub alarm_core: u128,
     pub total: u128,
 }
 
@@ -60,7 +66,7 @@ impl fmt::Display for Budget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "total={} (connections={} [{} each], decode_workers={}, sequencer_queue={}, ingress={}, kernel={}, introspection={}, diagnostics={}, supervision={})",
+            "total={} (connections={} [{} each], decode_workers={}, sequencer_queue={}, ingress={}, kernel={}, introspection={}, diagnostics={}, supervision={}, alarms={} [+ alarm_core={} inside kernel])",
             self.total,
             self.connections,
             self.per_connection,
@@ -70,7 +76,9 @@ impl fmt::Display for Budget {
             self.kernel,
             self.introspection,
             self.diagnostics,
-            self.supervision
+            self.supervision,
+            self.alarms,
+            self.alarm_core
         )
     }
 }
@@ -134,8 +142,11 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     let diagnostics = if diag { DIAG_BYTES } else { 0 };
     let ingress = ingress_bytes(cfg);
     let supervision = supervision_bytes(cfg);
+    let alarms = alarm_runtime_bytes(cfg);
+    let alarm_core = Kernel::alarm_storage_bytes(&cfg.core);
     let total = connections
         .saturating_add(supervision)
+        .saturating_add(alarms)
         .saturating_add(ingress)
         .saturating_add(decode_workers)
         .saturating_add(sequencer_queue)
@@ -152,7 +163,20 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
         introspection,
         diagnostics,
         supervision,
+        alarms,
+        alarm_core,
         total,
+    }
+}
+
+/// VS-005 (ADR 0012): alarm runtime bytes outside the kernel: the control plane (bounded
+/// sessions × reusable pages) and the deferred-disconnection list (one entry per source).
+fn alarm_runtime_bytes(cfg: &RuntimeConfig) -> u128 {
+    match &cfg.alarms {
+        None => 0,
+        Some(a) => crate::alarms::control_bound_bytes(a)
+            .saturating_add(m(cfg.core.sources().len() as u128, 16))
+            .saturating_add(size_of::<crate::alarms::AlarmRuntime>() as u128),
     }
 }
 
@@ -271,7 +295,10 @@ channels = [{{ channel = 1, tag = 1, type = "i64" }}]
                 + big.introspection
                 + big.diagnostics
                 + big.supervision
+                + big.alarms
         );
+        assert_eq!(big.alarms, 0);
+        assert_eq!(big.alarm_core, 0);
     }
 
     #[test]

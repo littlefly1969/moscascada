@@ -1,10 +1,12 @@
-# Contratto semantico (VS-001, aggiornato in VS-002, VS-003 e VS-004)
+# Contratto semantico (VS-001, aggiornato in VS-002, VS-003, VS-004 e VS-005)
 
-Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009; VS-003 ADR 0010; VS-004 ADR 0011.
+Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009; VS-003 ADR 0010; VS-004 ADR 0011; VS-005 ADR 0012 (allarmi, schema `proto/scada/alarm/v1/alarm.proto`).
 
 **VS-002 non modifica lo schema `scada.driver.v1`** (nessun campo, messaggio o valore enum nuovo; `buf breaking` contro la baseline v1.0 è verde) né la semantica di `Kernel::apply`, di `APPLIED_VOLATILE`, della deduplicazione e della qualità. Cambiano solo due comportamenti del runtime, entrambi espressi con messaggi già esistenti (§2.1), e si aggiunge una procedura raccomandata per il driver (§5.1). Lo schema di sola diagnostica `scada.introspect.v1` riceve solo campi additivi.
 
 **VS-004 introduce il minor 1.1** di `scada.driver.v1` (tutto additivo, `buf breaking` verde): `Hello.protocol_minor`, messaggio `Heartbeat`, `ERROR_CODE_INVALID_HEARTBEAT` (§2.3), e la supervisione opzionale di liveness e freschezza (§6.1). **A supervisione disabilitata (default) il contratto è quello VS-003**: stessi esiti, stesse qualità, stessi ACK, digest v1.
+
+**VS-005 aggiunge il motore allarmi opzionale** (§9): sezione `[alarms]` assente (default) ⇒ **nessun cambiamento** (nessun outbox, nessun socket, digest/fingerprint v1/v2 byte-identici). Con allarmi configurati il wire driver resta **1.1**; l'unica novità visibile a un driver è il codice additivo `ERROR_CODE_OUTBOX_CAPACITY_EXCEEDED = 44` (§9.4). **Nulla in VS-005 è durevole**: stati allarme, eventi e ACK operatore si perdono al riavvio.
 
 ## 1. Identità
 
@@ -17,6 +19,11 @@ Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `
 | `source_sequence` | `u64` ≥ 1 | produttore | Progressivo dei batch nella `source_epoch` corrente. |
 | `operation_sequence` | `u64` | sequencer, verificato dal core | Progressivo globale delle transizioni **applicate**. |
 | `kernel_instance_id` | 16 byte casuali | runtime all'avvio | Nuovo a ogni avvio; un ACK di un'altra istanza non conferma nulla dell'istanza precedente. |
+| `alarm_id` | `u32` ≠ 0 | configurazione (`[[alarms.rules]] id`) | Identità stabile di una regola; chiave esterna del catalogo operatore (VS-005). |
+| `occurrence_id` | `u64` | core | Episodio di un allarme: +1 a ogni nuovo trip da `Normal`; un retrigger di un episodio non riconosciuto lo mantiene. |
+| `activation_token` | `u64` | core | `operation_sequence` dell'ultimo trip/retrigger; richiesto dall'ACK. |
+| `event_seq` | `u64` ≥ 1 | core | Ordine totale degli eventi d'allarme nell'istanza; mai wrap. |
+| `durable_watermark` | `u64` | operazione sequenziata | Ultimo evento di un prefisso continuo confermato durevole (VS-006); 0 in VS-005 salvo sink simulato di test. |
 
 Relazione `driver_id` ↔ `source_id`: una connessione = una sessione logica = una `source_id`. Un driver con più sorgenti apre più connessioni (fino a `max_driver_connections`). Il core non conosce `driver_id`.
 
@@ -172,3 +179,37 @@ Un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i
 - I9 (VS-004) Senza supervisione: digest/fingerprint v1 byte-identici, operazioni di supervisione rifiutate (`SupervisionNotConfigured`).
 - I10 (VS-004) Solo un batch applicato porta un tag a `Good`; heartbeat e `SourceLivenessRestored` non cambiano nessun tag; `FreshnessExpired` cambia solo tag `Good` con marker `<=` token.
 - I11 (VS-004) Le operazioni di supervisione obsolete o ripetute sono no-op (stato, digest, `operation_sequence` invariati); il replay di uno stream catturato con scadenze riproduce lo stesso digest senza clock.
+- I12 (VS-005) Con allarmi: `Err`/`Ignored`/`Duplicate` ⇒ RTDB, stati allarme, outbox, watermark e digest identici; `Applied` ⇒ RTDB + allarmi + tutti gli eventi insieme (anche 20 000 eventi in un'operazione).
+- I13 (VS-005) Nessun evento con `event_seq > durable_watermark` è mai sovrascritto o reso illeggibile; ogni rifiuto per capacità è tipizzato (`OutboxCapacityExceeded{required, free}`).
+- I14 (VS-005) Una regola di processo non rientra mai con input non `Good`; `BadQuality` si arma solo dopo il primo `Good`.
+- I15 (VS-005) Replay dello stream catturato (batch, link, scadenze, ACK, watermark) ⇒ stessi stati, stessi eventi (events digest), stesso digest v3.
+
+## 9. Allarmi (VS-005, ADR 0012) — opzionali, volatili
+
+### 9.1 Regole e stato
+
+Regole statiche per tag (`bool_equals`, `high`/`low` con isteresi, `bad_quality`), severità `info|warning|major|critical`, id stabili. Stato per regola: `Normal` / `ActiveUnacked` / `ActiveAcked` / `ReturnedUnacked` più `input_valid` (dimensione separata). Qualità non `Good` ⇒ regola di processo **Indeterminate**: `input_valid = false`, latch invariato, **mai ritorno automatico a `Normal`**, nessun evento. `bad_quality` si arma alla prima qualità `Good` dell'istanza ed è attiva finché la qualità non torna `Good`. Semantica completa e transizioni: ADR 0012 D3.
+
+| Evento | Effetto | Evento outbox |
+|---|---|---|
+| trip da `Normal` | `ActiveUnacked`, occurrence +1, token = op | `Raised` |
+| clear da `ActiveUnacked` / `ActiveAcked` | `ReturnedUnacked` / `Normal` | `Returned` |
+| trip da `ReturnedUnacked` | `ActiveUnacked`, **stessa** occurrence, nuovo token | `Retriggered` |
+| ACK valido | `ActiveAcked` oppure `Normal` | `Acknowledged` (con `actor_uid`) |
+| trip ripetuto, osservazione identica, input non `Good` | nessuno | nessuno |
+
+### 9.2 Eventi e outbox
+
+Ogni evento: `event_seq`, `operation_seq`, `ordinal_in_operation` (eventi di un'operazione contigui e ordinati per `alarm_id`), `alarm_id`, `occurrence_id`, `activation_token`, `kind`, stato dopo, `actor_uid`. L'outbox ha `outbox_capacity_events` slot preallocati; lo slot dell'evento `N` è riusato **solo** se `durable_watermark ≥ N`. Leggere eventi (HMI, `ReadEvents`) **non** li rende durevoli e non libera slot. In VS-005 nessun componente di produzione avanza il watermark: dopo `C` eventi l'outbox è pieno per il resto della vita del processo (**NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION**).
+
+### 9.3 ACK operatore (control socket `scada.alarm.v1`)
+
+Richiede `kernel_instance_id` dell'istanza corrente, `alarm_id`, `activation_token`; l'identità è l'uid del peer del socket (`SO_PEERCRED`, allowlist `control_authorized_uids`), mai un valore dichiarato dal client, ed è l'identità di un **processo**, non necessariamente di una persona. Esiti: `APPLIED_VOLATILE`, `ALREADY_ACKED`, `STALE_OCCURRENCE` (token di un trip precedente, anche se l'allarme è ancora attivo), `UNKNOWN_ALARM`, `NOT_ACKNOWLEDGEABLE`, `OUTBOX_CAPACITY_EXCEEDED`. L'ACK è sequenziato e catturato come ogni altra operazione; **volatile**.
+
+### 9.4 Backpressure verso i driver
+
+Un batch le cui transizioni d'allarme non entrano negli slot liberi riceve `REJECTED` + `ERROR_CODE_OUTBOX_CAPACITY_EXCEEDED` (44): **nulla è applicato** (né valori né allarmi), `source_sequence` non è consumata, la sessione resta aperta. Il driver deve ritentare **la stessa** `source_sequence` più tardi (come per `QueueFull`); se non conserva il dato, il dato è perso **fuori dal kernel**. Un `Hello` che produrrebbe eventi non ammessi riceve `HandshakeRejected` con lo stesso codice. Batch senza transizioni d'allarme sono applicati anche con l'outbox pieno. Disconnessioni e scadenze di supervisione non sono mai scartate: restano pendenti e sono applicate, nell'ordine, quando si liberano slot (stato `CRITICAL`, `pending_link_transitions`).
+
+### 9.5 Riavvio
+
+Un nuovo processo è una nuova istanza: tutti gli allarmi `Normal`, `next_event_seq = 1`, nessun evento. Richieste con il `kernel_instance_id` precedente ⇒ `INSTANCE_MISMATCH`; token e cursori dell'istanza precedente non valgono nulla.

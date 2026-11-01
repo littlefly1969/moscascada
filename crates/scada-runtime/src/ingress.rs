@@ -74,7 +74,7 @@ impl SourceSemaphores {
         let id = match req {
             Request::Connect { source_id, .. } | Request::Disconnect { source_id, .. } => *source_id,
             Request::Batch { batch, .. } => batch.source_id,
-            Request::Introspect { .. } | Request::Tick => return None,
+            Request::Introspect { .. } | Request::Tick | Request::Alarm { .. } => return None,
         };
         self.cfg.core.source_index(id)
     }
@@ -107,7 +107,12 @@ pub fn channel(cfg: &Arc<RuntimeConfig>) -> (Ingress, Inbox) {
         IngressPolicy::SourceFair { per_source } => {
             let n = cfg.core.sources().len() as u32;
             // + 1: the VS-004 watchdog wake-up (at most one queued at a time).
-            let control = cfg.limits.max_driver_connections.saturating_add(INTROSPECTION_SESSIONS).saturating_add(1);
+            let control = cfg
+                .limits
+                .max_driver_connections
+                .saturating_add(INTROSPECTION_SESSIONS)
+                .saturating_add(1)
+                .saturating_add(cfg.alarms.as_ref().map_or(0, |a| a.max_control_connections));
             let queue = FairQueue::new(Params {
                 lanes: n + 1, // + introspection lane
                 lane_capacity: per_source,
@@ -189,7 +194,11 @@ impl FairSender {
     async fn submit(&self, mut req: Request, full: impl FnOnce()) -> Result<(), Closed> {
         let sh = &self.shared;
         let (lane, kind) = match &req {
-            Request::Introspect { .. } | Request::Tick => (sh.introspection_lane, Kind::Control),
+            // VS-005: alarm control requests share the introspection control lane (one per
+            // control session at a time, stop-and-wait).
+            Request::Introspect { .. } | Request::Tick | Request::Alarm { .. } => {
+                (sh.introspection_lane, Kind::Control)
+            }
             Request::Connect { .. } | Request::Disconnect { .. } => {
                 (sh.sources.lane(&req).ok_or(Closed)? as u32, Kind::Control)
             }

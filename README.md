@@ -1,4 +1,4 @@
-# moscascada — SCADA Engine, vertical slices VS-001 + VS-002 + VS-003 + VS-004
+# moscascada — SCADA Engine, vertical slices VS-001 + VS-002 + VS-003 + VS-004 + VS-005
 
 Percorso `driver esterno → IPC → validazione → sequencer → state machine deterministica → RTDB in RAM`, in Rust stable, Linux-first.
 
@@ -8,10 +8,13 @@ Percorso `driver esterno → IPC → validazione → sequencer → state machine
 
 **VS-004** (ADR 0011, [vs004.md](docs/benchmarks/vs004.md)): supervisione **opzionale, disabilitata per default** delle sorgenti. Per sorgente `liveness_timeout_ms` (driver muto con socket aperto → sorgente `Silent`, tag `Uncertain(SourceSilent)`, link ancora `Connected`) e `freshness_timeout_ms` (ogni tag non osservato da `T` → `Uncertain(StaleData)`, valutato **per tag**); un solo thread watchdog (`[runtime] watchdog_poll_ms`). Le scadenze entrano nel core come **operazioni sequenziate** con guardie senza tempo (generazione del link, token in operation sequence), catturate e riprodotte senza clock; nessun clock in `Kernel::apply`. Protocollo **1.1** additivo: `Heartbeat` (nessun ACK, coalescente, mai in coda), negoziato col minor: un driver aggiornato non invia heartbeat a un kernel 1.0, un driver legacy funziona invariato. Un heartbeat ripristina la comunicazione, **mai la qualità**: solo un'osservazione applicata porta un tag a `Good`. A supervisione disattivata contratto, digest (v1) e prestazioni sono quelli di VS-003 (A/B in vs004.md). ARM64: **NOT TESTED ON HARDWARE**.
 
+**VS-005** (ADR 0012, [vs005.md](docs/benchmarks/vs005.md)): **motore allarmi deterministico, opzionale e disabilitato per default** (sezione `[alarms]` assente ⇒ comportamento, digest e prestazioni di VS-004). Regole statiche per tag (`bool_equals`, `high`/`low` con isteresi, `bad_quality`), severità, id stabili; stato compatto per regola, episodi `Normal → ActiveUnacked → ActiveAcked/ReturnedUnacked`, retrigger, ACK sequenziato con token anti-stale e uid del peer. Valutazione **dentro `Kernel::apply`**: preflight senza allocazioni (un solo passaggio con una finestra «quiet» esatta per tag: a riposo, regole attive non costano throughput misurabile, vs005.md §2.3), poi commit unico di RTDB + allarmi + eventi; una regola di processo con input non `Good` è *Indeterminate*, mai rientrata automaticamente. **Event Outbox** limitato con ordine totale e **nessuna sovrascrittura di eventi non durevoli**: quando gli slot non bastano l'intera operazione è rifiutata (`OUTBOX_CAPACITY_EXCEEDED`, stato CRITICAL), mai applicata a metà. Socket di controllo separato `scada.alarm.v1` (snapshot paginato, lettura eventi con cursori/gap, ACK, capacità). **Nulla è durevole** in VS-005 e senza il journal (VS-006) gli slot non tornano mai liberi: **NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION**. Dimensionamento: `scripts/alarm_capacity.py`; catalogo operatore esterno: [docs/alarm-catalog.md](docs/alarm-catalog.md). ARM64: **NOT TESTED ON HARDWARE**.
+
 Documenti:
 - [Contratto semantico](docs/contract.md) · [Architettura](docs/architecture.md)
-- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md) · [0010 ingresso fair (VS-003)](docs/adr/0010-fair-ingress.md) · [0011 liveness e freschezza (VS-004)](docs/adr/0011-source-liveness-and-data-freshness.md)
-- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md) · [VS-003 (politiche di ingresso)](docs/benchmarks/vs003.md) · [VS-004 (supervisione: default-off vs attiva)](docs/benchmarks/vs004.md)
+- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md) · [0010 ingresso fair (VS-003)](docs/adr/0010-fair-ingress.md) · [0011 liveness e freschezza (VS-004)](docs/adr/0011-source-liveness-and-data-freshness.md) · [0012 motore allarmi, outbox e capacità (VS-005)](docs/adr/0012-alarm-engine-event-outbox-and-capacity.md)
+- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md) · [VS-003 (politiche di ingresso)](docs/benchmarks/vs003.md) · [VS-004 (supervisione: default-off vs attiva)](docs/benchmarks/vs004.md) · [VS-005 (allarmi: A/B, storm, saturazione, capacità)](docs/benchmarks/vs005.md)
+- [Catalogo allarmi: schema ed esempio validato](docs/alarm-catalog.md)
 - [Matrice di tracciabilità dei requisiti, limiti noti e valutazione critica](docs/traceability.md)
 
 ## Struttura
@@ -20,7 +23,10 @@ Documenti:
 Cargo.toml / Cargo.lock / rust-toolchain.toml   workspace, lockfile, toolchain fissata (1.97.0)
 config/demo.toml                                configurazione statica della demo (sorgente 1001, tag 101-103)
 config/profiles/micro.toml | server.toml        profili VS-002: current_thread / multi_thread(2), budget di memoria esplicito
+config/profiles/micro-alarms.toml               VS-005: Micro (4 GiB fisici) con allarmi, budget di processo 64 MiB
+config/examples/alarms.toml                     VS-005: esempio commentato con [alarms] e regole
 proto/scada/driver/v1/driver.proto              protocollo kernel <-> driver (versionato)
+proto/scada/alarm/v1/alarm.proto                VS-005: socket di controllo allarmi (snapshot, eventi, ACK, capacità)
 proto/scada/introspect/v1/introspect.proto      introspezione read-only per test/benchmark
 proto/baseline/scada-v1.0.binpb                 immagine Buf di riferimento per `buf breaking`
 buf.yaml                                        regole buf lint (STANDARD) e breaking (FILE)
@@ -34,6 +40,9 @@ fuzz/                                           workspace cargo-fuzz separato (n
 scripts/check.sh | check-proto.sh | bench.sh    gate completo, verifica schemi, benchmark VS-001
 scripts/bench_campaign.py | bench_analyze.py    campagne A/B randomizzate (VS-002) e analisi (mediana, dispersione, permutazione)
 scripts/micro_ab.py | criterion_table.py        microbenchmark Criterion interlacciati
+scripts/alarm_capacity.py (+ test_)             VS-005: modello di capacità dell'outbox (misurato / ipotesi / calcolato)
+scripts/check_alarm_catalog.py                  VS-005: validazione del catalogo operatore contro la configurazione
+docs/catalog/                                   VS-005: schema JSON del catalogo allarmi + esempio
 deny.toml                                       politica cargo-deny (licenze, advisories, sorgenti)
 ```
 
@@ -62,11 +71,12 @@ cargo +nightly fuzz run -O frame_decode     corpus/frame_decode     -- -max_tota
 cargo +nightly fuzz run -O batch_validation corpus/batch_validation -- -max_total_time=300
 cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=300   # VS-002 C3 (+ heartbeat VS-004)
 cargo +nightly fuzz run -O supervision_transitions corpus/supervision_transitions -- -max_total_time=300   # VS-004
+cargo +nightly fuzz run -O alarm_transitions corpus/alarm_transitions -- -max_total_time=300   # VS-005
 ```
 
 Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `cargo build --release -p scada-sim-driver && SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
 
-Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4` e `source_fair:1`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Suite runtime con la supervisione VS-004 attiva sulla sorgente 1001 (la CI la esegue con timeout larghi): `SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime` (`LIVENESS_MS:FRESHNESS_MS`, `0` = disattivato). Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
+Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4` e `source_fair:1`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Suite runtime con la supervisione VS-004 attiva sulla sorgente 1001 (la CI la esegue con timeout larghi): `SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime` (`LIVENESS_MS:FRESHNESS_MS`, `0` = disattivato). Suite runtime con allarmi VS-005 su ogni tag (la CI la esegue con FIFO/`source_fair`, entrambi gli scheduler, con e senza supervisione): `SCADA_TEST_ALARMS=1 cargo test --release -p scada-runtime`. Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
 
 ## Esecuzione della demo
 
@@ -87,6 +97,7 @@ scada-kernel --config FILE [--socket PATH] [--introspection-socket PATH]
              [--diag [--diag-probe-source ID]]  # istogrammi per stadio, letti via introspezione
              [--capture-inputs FILE]       # diagnostica: registra gli input sequenziati (replay nei test)
              [--throttle-sequencer-us N]   # solo test di saturazione: ritardo artificiale nel sequencer
+             [--test-simulated-durable-sink]  # SOLO TEST (VS-005): watermark simulato via socket allarmi, NON durevole
              [--check-config]              # valida la configurazione, stampa il bound di memoria ed esce
 ```
 
@@ -112,6 +123,13 @@ Supervisione VS-004 (opzionale): aggiungere `[runtime] watchdog_poll_ms = 250` e
 ./target/release/scada-sim-driver --socket S --legacy-hello demo            # Hello 1.0 byte-identico a VS-003
 ```
 
+Allarmi VS-005 (opzionali): vedere `config/examples/alarms.toml`; `--check-config` stampa regole, worst fan-out, memoria del core e del control plane e `durability=NONE`. Client di prova del socket di controllo: `scada_sim_driver::AlarmClient` (usato da test e benchmark). Dimensionamento:
+
+```bash
+python3 scripts/alarm_capacity.py --bench-results docs/benchmarks/results/vs005/storm.txt \
+    --outbox-slots 1048576 --event-rate 200 --storm-seconds 600 --reserve 4096
+```
+
 ## Benchmark
 
 ```bash
@@ -126,7 +144,7 @@ Metodologia e risultati misurati: [docs/benchmarks/vs001.md](docs/benchmarks/vs0
 |---|---|
 | rustc / cargo | 1.97.0 (2d8144b78 2026-07-07) / 1.97.0 |
 | rustc nightly (solo fuzz) | cargo 1.101.0-nightly (31d3246e0 2026-10-27) |
-| cargo-fuzz | 0.13.2 (VS-004: stesso nightly `cargo 1.101.0-nightly (31d3246e0 2026-10-27)`) |
+| cargo-fuzz | 0.13.2 (VS-004/VS-005: stesso nightly `cargo 1.101.0-nightly (31d3246e0 2026-10-27)`) |
 | protoc | non usato (compilatore `protox` 0.10.0, `prost-build` 0.14.4) |
 | Buf | 1.75.0 |
 | Benchmark | harness proprio `scada-bench` (nessun Criterion: servono percentili p99.9 esatti e conteggio allocazioni) |

@@ -1,0 +1,106 @@
+# Profilo Micro con allarmi (VS-005, ADR 0012): macchina Micro da 4 GiB FISICI complessivi.
+# Il processo kernel NON prende tutta la RAM: budget applicativo 64 MiB (lascia spazio a OS,
+# HMI, driver, logiche e al futuro journal VS-006). Stesso codice del profilo Micro VS-002;
+# cambiano budget e sezione [alarms]. Verifica:
+#   scada-kernel --config config/profiles/micro-alarms.toml --check-config
+# WARNING: allarmi ed eventi VOLATILI (nessun journal prima di VS-006): dopo
+# outbox_capacity_events eventi ogni nuova transizione è rifiutata fino al riavvio.
+# NOT PRODUCTION-READY FOR LONG-RUN ALARM RETENTION. Dimensionamento: scripts/alarm_capacity.py
+
+[runtime]
+scheduler = "current_thread"     # 2 thread: runtime I/O + sequencer
+memory_budget_bytes = 67108864  # 64 MiB; bound calcolato ~26 MiB (outbox 24 MiB); avvio rifiutato se superato
+# VS-004 (ADR 0011): supervisione sorgenti, DISABILITATA per default. Il watchdog unico esiste solo se
+#   almeno una sorgente imposta liveness_timeout_ms o freshness_timeout_ms (>= 3 x watchdog_poll_ms).
+# watchdog_poll_ms = 250
+
+[ipc]
+socket_path = "/run/moscascada/driver.sock"   # directory privata (0750, non scrivibile da altri)
+max_frame_bytes = 8192                 # 128 obs × 19 B + 32 = 2464 B al massimo: 3,3× di margine; limita anche il picco transitorio del decode (review P1)
+max_driver_connections = 8
+input_queue_capacity = 16           # coda corta: meno attesa per la sorgente rara, meno throughput (vs002.md §5)
+max_inflight_per_connection = 16
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+ack_write_timeout_ms = 5000
+read_buffer_bytes = 8192
+ack_coalesce_max = 32
+# VS-003 (ADR 0010): politica di ingresso. Default "fifo" (VS-002). Opzione sperimentale
+#   "source_fair" (lane per sorgente servite round-robin) con per_source_pending_limit
+#   (1..=max_inflight_per_connection): misurata utile solo in saturazione con current_thread
+#   e coda 16 (p99 rara -75 %, throughput -21 %); su multi_thread nessun beneficio. vs003.md.
+#   NON qualificata per produzione: condizioni di promozione in ADR 0010 §11.6.
+# ingress_policy = "fifo"
+# per_source_pending_limit = 4
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "door_contact"
+type = "bool"
+
+[[tags]]
+id = 102
+name = "tamper_switch"
+type = "bool"
+
+[[tags]]
+id = 103
+name = "case_temperature_centi_c"   # hundredths of °C, scaled integer
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "sim-enclosure-1"
+# authorized_uids = [1000]   # optional: peer effective UIDs allowed for this source
+# VS-004: opzionali; assenti = nessuna supervisione (comportamento VS-003).
+# liveness_timeout_ms = 5000     # Silent se nessun heartbeat / batch applicato entro 5 s (link resta Connected)
+# freshness_timeout_ms = 12000   # StaleData per ogni tag non osservato da 12 s (timeout per tag, stesso valore)
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "i64" },
+]
+
+[alarms]
+max_rules = 1024                     # tetto del rule table: le regole oltre sono rifiutate all'avvio
+outbox_capacity_events = 524288      # 524 288 × 48 B = 24 MiB; a 10 eventi/s ≈ 14,5 h senza journal
+outbox_high_percent = 80
+control_socket_path = "/run/moscascada/alarm.sock"
+control_authorized_uids = [1000]     # servizio HMI locale; l'ACK porta questo uid, non un nome utente
+max_control_connections = 4
+control_page_max = 1024
+
+[[alarms.rules]]
+id = 1
+name = "door_open"
+tag_id = 101
+kind = "bool_equals"
+expected = true
+severity = "major"
+
+[[alarms.rules]]
+id = 2
+name = "tamper"
+tag_id = 102
+kind = "bool_equals"
+expected = true
+severity = "critical"
+
+[[alarms.rules]]
+id = 3
+name = "case_temperature_high"
+tag_id = 103
+kind = "high"
+trip = 4500
+reset = 4300
+severity = "warning"
+
+[[alarms.rules]]
+id = 4
+name = "enclosure_signal_lost"
+tag_id = 103
+kind = "bad_quality"
+severity = "info"
