@@ -238,7 +238,15 @@ struct TagCell {
     /// never). Maintained only when the owning source has freshness supervision: the
     /// anti-stale token of `FreshnessExpired`.
     observed: u64,
+    /// VS-004 freshness order (ADR 0011 D5): links of the intrusive per-source list of the
+    /// source's `Good` tags in increasing `observed` order. Meaningful only while the cell
+    /// is a member (freshness-supervised source and `quality == Good`); [`NIL`] otherwise.
+    prev: u32,
+    next: u32,
 }
+
+/// End of a freshness list.
+const NIL: u32 = u32::MAX;
 
 /// Canonical copy of the last accepted batch of a source, for exact deduplication.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +269,41 @@ struct SourceRuntime {
     silent: bool,
     /// VS-004: supervised sources only (0 = none).
     last_batch_op: u64,
+    /// VS-004, freshness-supervised sources only: head (oldest marker) and tail of the list
+    /// of this source's `Good` tags ordered by `observed`. Invariant: the list holds
+    /// exactly the source's `Good` tags, so an expiry visits only the tags it changes and
+    /// costs O(1) when nothing is eligible (no scan of the source's channels). Derived
+    /// state: a function of the qualities and markers already in the snapshot and digest.
+    fresh_head: u32,
+    fresh_tail: u32,
+}
+
+/// Remove member `t` from its source's freshness list.
+fn fresh_unlink(cells: &mut [TagCell], rt: &mut SourceRuntime, t: u32) {
+    let Some(c) = cells.get(t as usize) else { return };
+    let (prev, next) = (c.prev, c.next);
+    match cells.get_mut(prev as usize) {
+        Some(p) => p.next = next,
+        None => rt.fresh_head = next,
+    }
+    match cells.get_mut(next as usize) {
+        Some(n) => n.prev = prev,
+        None => rt.fresh_tail = prev,
+    }
+}
+
+/// Append `t` (not a member) at the tail: its marker is the largest of the list.
+fn fresh_push_back(cells: &mut [TagCell], rt: &mut SourceRuntime, t: u32) {
+    let tail = rt.fresh_tail;
+    if let Some(c) = cells.get_mut(t as usize) {
+        c.prev = tail;
+        c.next = NIL;
+    }
+    match cells.get_mut(tail as usize) {
+        Some(p) => p.next = t,
+        None => rt.fresh_head = t,
+    }
+    rt.fresh_tail = t;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -333,7 +376,10 @@ impl Kernel {
     /// `last_operation_sequence = 0`. All storage is allocated here, once.
     pub fn new(config: Arc<ValidatedConfig>) -> Kernel {
         let cells =
-            vec![TagCell { value: None, quality: Quality::Unknown, revision: 0, observed: 0 }; config.tags().len()];
+            vec![
+                TagCell { value: None, quality: Quality::Unknown, revision: 0, observed: 0, prev: NIL, next: NIL };
+                config.tags().len()
+            ];
         let sources = config
             .sources()
             .iter()
@@ -350,6 +396,8 @@ impl Kernel {
                 },
                 silent: false,
                 last_batch_op: 0,
+                fresh_head: NIL,
+                fresh_tail: NIL,
             })
             .collect();
         let staging = Vec::with_capacity(config.limits().max_observations_per_batch as usize);
@@ -462,6 +510,14 @@ impl Kernel {
                 cell.quality = Quality::Uncertain(reason);
                 cell.revision = cell.revision.saturating_add(1);
             }
+        }
+        // Every degradation reason outranks `Good` and a `Good` tag always has a value:
+        // the source has no `Good` tag left, so its freshness list is empty.
+        if meta.supervision.freshness
+            && let Some(rt) = self.sources.get_mut(src)
+        {
+            rt.fresh_head = NIL;
+            rt.fresh_tail = NIL;
         }
     }
 
@@ -644,17 +700,25 @@ impl Kernel {
         let mut changed: u32 = 0;
         if meta.supervision.freshness {
             // VS-004: every observed tag gets the new marker, also when its value and
-            // quality are unchanged (same revision): this is what refreshes it.
-            for s in &self.staging {
-                if let Some(cell) = self.cells.get_mut(s.tag_index as usize) {
-                    if cell.value != Some(s.value) || cell.quality != Quality::Good {
-                        cell.value = Some(s.value);
-                        cell.quality = Quality::Good;
-                        cell.revision = cell.revision.saturating_add(1);
-                        changed = changed.saturating_add(1);
-                    }
-                    cell.observed = op;
+            // quality are unchanged (same revision): this is what refreshes it. It moves
+            // to the tail of the source's freshness list (largest marker), O(1) per tag.
+            let (cells, staging) = (&mut self.cells, &self.staging);
+            let Some(rt) = self.sources.get_mut(src) else { return Err(ApplyError::UnknownSource(b.source_id)) };
+            for s in staging {
+                let t = s.tag_index;
+                let Some(cell) = cells.get_mut(t as usize) else { continue };
+                let member = cell.quality == Quality::Good;
+                if cell.value != Some(s.value) || cell.quality != Quality::Good {
+                    cell.value = Some(s.value);
+                    cell.quality = Quality::Good;
+                    cell.revision = cell.revision.saturating_add(1);
+                    changed = changed.saturating_add(1);
                 }
+                cell.observed = op;
+                if member {
+                    fresh_unlink(cells, rt, t);
+                }
+                fresh_push_back(cells, rt, t);
             }
         } else {
             // VS-003 path, unchanged.
@@ -762,30 +826,40 @@ impl Kernel {
         if up_to == 0 || up_to >= op {
             return Err(ApplyError::InvalidFreshnessToken { observed_up_to: up_to });
         }
-        let config = Arc::clone(&self.config);
-        let meta = config.sources().get(src).ok_or(ApplyError::UnknownSource(source_id))?;
+        // The eligible tags are exactly a prefix of the freshness list (ordered by
+        // marker): visit only them, never the whole source.
+        let rt = self.sources.get_mut(src).ok_or(ApplyError::UnknownSource(source_id))?;
         let mut n: u32 = 0;
-        for &(_, t) in meta.channels() {
-            if let Some(cell) = self.cells.get(t as usize)
-                && expires(cell, up_to)
-            {
-                if cell.revision == u64::MAX {
-                    let tag_id = config.tags().get(t as usize).map_or(TagId(0), |m| m.tag_id);
-                    return Err(ApplyError::RevisionOverflow(tag_id));
-                }
-                n = n.saturating_add(1);
+        let mut t = rt.fresh_head;
+        while let Some(cell) = self.cells.get(t as usize) {
+            if !expires(cell, up_to) {
+                break;
             }
+            if cell.revision == u64::MAX {
+                let tag_id = self.config.tags().get(t as usize).map_or(TagId(0), |m| m.tag_id);
+                return Err(ApplyError::RevisionOverflow(tag_id));
+            }
+            n = n.saturating_add(1);
+            t = cell.next;
         }
         if n == 0 {
             return Ok(TransitionOutcome::Ignored(IgnoredReason::NothingExpired));
         }
-        for &(_, t) in meta.channels() {
-            if let Some(cell) = self.cells.get_mut(t as usize)
-                && expires(cell, up_to)
-            {
-                cell.quality = Quality::Uncertain(UncertainReason::StaleData);
-                cell.revision = cell.revision.saturating_add(1);
+        // Pop the prefix: those tags leave `Good`, hence the list.
+        let mut t = rt.fresh_head;
+        while t != NIL {
+            let Some(cell) = self.cells.get_mut(t as usize) else { break };
+            if !expires(cell, up_to) {
+                break;
             }
+            cell.quality = Quality::Uncertain(UncertainReason::StaleData);
+            cell.revision = cell.revision.saturating_add(1);
+            t = cell.next;
+        }
+        rt.fresh_head = t;
+        match self.cells.get_mut(t as usize) {
+            Some(c) => c.prev = NIL,
+            None => rt.fresh_tail = NIL,
         }
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
@@ -798,15 +872,19 @@ impl Kernel {
     /// source is unknown or has no freshness supervision). Lets the runtime avoid emitting
     /// operations that would be no-ops.
     pub fn freshness_candidates(&self, source_id: SourceId, observed_up_to: u64) -> u32 {
-        let Some(meta) = self.config.source(source_id) else { return 0 };
-        if !meta.supervision.freshness {
+        let Some(src) = self.config.source_index(source_id) else { return 0 };
+        if !self.config.sources().get(src).is_some_and(|m| m.supervision.freshness) {
             return 0;
         }
+        // O(eligible tags): O(1) when nothing would expire, however many tags are stale.
         let mut n: u32 = 0;
-        for &(_, t) in meta.channels() {
-            if self.cells.get(t as usize).is_some_and(|c| expires(c, observed_up_to)) {
-                n = n.saturating_add(1);
+        let mut t = self.sources.get(src).map_or(NIL, |rt| rt.fresh_head);
+        while let Some(cell) = self.cells.get(t as usize) {
+            if !expires(cell, observed_up_to) {
+                break;
             }
+            n = n.saturating_add(1);
+            t = cell.next;
         }
         n
     }

@@ -43,7 +43,10 @@ pub struct Counters {
     pub heartbeats_invalid: AtomicU64,
     pub heartbeats_coalesced: AtomicU64,
     pub liveness_expiries: AtomicU64,
+    /// Every Silent -> Alive of the same link (heartbeat or batch).
     pub liveness_recoveries: AtomicU64,
+    /// The part of `liveness_recoveries` caused by an applied batch.
+    pub liveness_recoveries_by_batch: AtomicU64,
     pub freshness_expiries: AtomicU64,
     pub freshness_tags_expired: AtomicU64,
     pub watchdog_ticks: AtomicU64,
@@ -497,6 +500,7 @@ fn introspect(kernel: &Kernel, include_tags: bool, ctx: &SequencerContext) -> ip
             watchdog_ticks_coalesced: ld(&c.watchdog_ticks_coalesced),
             watchdog_ticks_late: ld(&c.watchdog_ticks_late),
             watchdog_max_late_ns: ld(&c.watchdog_max_late_ns),
+            liveness_recoveries_by_batch: ld(&c.liveness_recoveries_by_batch),
         }),
         stages: ctx
             .diag

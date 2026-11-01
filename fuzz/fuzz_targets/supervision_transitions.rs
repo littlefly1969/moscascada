@@ -8,6 +8,7 @@
 //! - only an applied batch makes a tag `Good`; a restoration changes no tag; a freshness
 //!   expiry only moves `Good` tags with a marker `<=` its token to `StaleData`;
 //! - a silent source has an active link;
+//! - the freshness list (review P1) agrees with a full scan of every source, for any token;
 //! - replaying the same input stream gives the same digest (no hidden time input).
 #![no_main]
 
@@ -133,6 +134,24 @@ fuzz_target!(|data: &[u8]| {
                     assert!(x.last_observed_operation != 0 && x.last_observed_operation <= *observed_up_to);
                 }
                 _ => {}
+            }
+        }
+        // Review P1: the O(eligible) freshness list agrees with a full scan.
+        let last = after.last_operation_sequence;
+        for meta in cfg.sources() {
+            for up_to in [1, last / 2, last] {
+                let oracle = if meta.supervision.freshness {
+                    meta.channels()
+                        .iter()
+                        .filter(|&&(_, t)| {
+                            let x = &after.tags[t as usize];
+                            x.quality == Quality::Good && x.last_observed_operation != 0 && x.last_observed_operation <= up_to
+                        })
+                        .count() as u32
+                } else {
+                    0
+                };
+                assert_eq!(k.freshness_candidates(meta.source_id, up_to), oracle);
             }
         }
         for s in &after.sources {

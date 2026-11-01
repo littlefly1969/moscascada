@@ -482,6 +482,24 @@ proptest! {
                     _ => {}
                 }
             }
+            // Review P1: the O(eligible) freshness list agrees with a full scan, for every
+            // source and for every token, and an applied expiry leaves no eligible tag.
+            let cfg = k.config().clone();
+            let last = after.last_operation_sequence;
+            for meta in cfg.sources() {
+                for up_to in [0, 1, last / 3, last / 2, last.saturating_sub(1), last] {
+                    let oracle = if meta.supervision.freshness {
+                        meta.channels().iter().filter(|&&(_, t)| {
+                            let tag = &after.tags[t as usize];
+                            tag.quality == Quality::Good && tag.last_observed_operation != 0 && tag.last_observed_operation <= up_to
+                        }).count() as u32
+                    } else { 0 };
+                    prop_assert_eq!(k.freshness_candidates(meta.source_id, up_to), oracle, "source {:?} token {}", meta.source_id, up_to);
+                }
+            }
+            if let (Operation::FreshnessExpired { source_id, observed_up_to, .. }, Ok(TransitionOutcome::Applied { .. })) = (&op, &r) {
+                prop_assert_eq!(k.freshness_candidates(*source_id, *observed_up_to), 0);
+            }
             for s in &after.sources {
                 // Silent implies an active link, and only for liveness-supervised sources.
                 if s.silent {

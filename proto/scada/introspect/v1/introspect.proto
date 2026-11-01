@@ -94,6 +94,10 @@ message RuntimeCounters {
   // (they carry no extra evidence; the coalescing is the rate limit).
   uint64 heartbeats_coalesced = 15;
   uint64 liveness_expiries = 16;
+  // Silent -> Alive transitions of the same link, whatever caused them: a heartbeat
+  // (SourceLivenessRestored) or an applied batch (which clears Silent inside its own
+  // apply; counted by the next watchdog tick that sees it). A disconnection or takeover
+  // is not a recovery.
   uint64 liveness_recoveries = 17;
   // FreshnessExpired operations applied, and tags they moved to StaleData.
   uint64 freshness_expiries = 18;
@@ -105,6 +109,8 @@ message RuntimeCounters {
   uint64 watchdog_ticks_late = 22;
   // Largest tick lateness observed, nanoseconds.
   uint64 watchdog_max_late_ns = 23;
+  // The part of liveness_recoveries caused by an applied batch (the rest: heartbeats).
+  uint64 liveness_recoveries_by_batch = 24;
 }
 
 message IntrospectResponse {

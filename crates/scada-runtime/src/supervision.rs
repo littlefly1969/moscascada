@@ -143,6 +143,9 @@ struct LinkWatch {
     seen_batch_operation: u64,
     /// Time of the last evidence (`None` until the first tick after the Welcome).
     evidence_at: Option<Duration>,
+    /// The kernel had this link `Silent` at the previous tick (or this tick made it so):
+    /// a later tick that finds it `Alive` on the same link counts a recovery.
+    silent: bool,
 }
 
 #[derive(Debug)]
@@ -217,7 +220,14 @@ impl Supervisor {
         let Some(Some(w)) = self.watches.get_mut(index) else { return };
         let seen_batch_operation = k.source_status(w.source_id).map_or(0, |s| s.last_batch_operation);
         let seen_heartbeats = heartbeats.as_ref().map_or(0, |c| c.load(Ordering::Relaxed));
-        w.link = Some(LinkWatch { generation, heartbeats, seen_heartbeats, seen_batch_operation, evidence_at: None });
+        w.link = Some(LinkWatch {
+            generation,
+            heartbeats,
+            seen_heartbeats,
+            seen_batch_operation,
+            evidence_at: None,
+            silent: false,
+        });
     }
 
     /// One watchdog tick at monotonic time `now`. `apply` sequences, captures and applies
@@ -257,6 +267,7 @@ impl Supervisor {
                     seen_heartbeats: 0,
                     seen_batch_operation: st.last_batch_operation,
                     evidence_at: None,
+                    silent: st.silent,
                 });
             }
             let Some(link) = w.link.as_mut() else { continue };
@@ -273,6 +284,7 @@ impl Supervisor {
             }
             if let Some(t) = w.liveness {
                 if st.silent {
+                    link.silent = true;
                     // A batch would already have cleared `silent` in the kernel.
                     if new_heartbeats > 0
                         && let Some(TransitionOutcome::Applied { .. }) = apply(
@@ -281,14 +293,25 @@ impl Supervisor {
                         )
                     {
                         Counters::inc(&counters.liveness_recoveries);
+                        link.silent = false;
                     }
-                } else if link.evidence_at.is_some_and(|e| now.saturating_sub(e) >= t)
-                    && let Some(TransitionOutcome::Applied { .. }) = apply(
-                        k,
-                        Operation::SourceSilenceExpired { source_id: w.source_id, link_generation: generation },
-                    )
-                {
-                    Counters::inc(&counters.liveness_expiries);
+                } else {
+                    if link.silent {
+                        // Silent at the previous tick, Alive now on the same link: an
+                        // applied batch cleared it (review P2: counted as a recovery).
+                        Counters::inc(&counters.liveness_recoveries);
+                        Counters::inc(&counters.liveness_recoveries_by_batch);
+                        link.silent = false;
+                    }
+                    if link.evidence_at.is_some_and(|e| now.saturating_sub(e) >= t)
+                        && let Some(TransitionOutcome::Applied { .. }) = apply(
+                            k,
+                            Operation::SourceSilenceExpired { source_id: w.source_id, link_generation: generation },
+                        )
+                    {
+                        Counters::inc(&counters.liveness_expiries);
+                        link.silent = true;
+                    }
                 }
             }
             if let Some(t) = w.freshness {
@@ -568,6 +591,50 @@ mod tests {
         r.connect();
         assert!(r.tick(10_100).is_empty());
         assert!(is_silence(&r.tick(10_400)));
+    }
+
+    /// Review P2: `liveness_recoveries` counts every Silent -> Alive of the same link, by
+    /// heartbeat or by an applied batch (`liveness_recoveries_by_batch`); a disconnection
+    /// or a takeover of a silent link is not a recovery.
+    #[test]
+    fn recoveries_count_heartbeats_and_batches_not_disconnections() {
+        let rec = |r: &Rig| {
+            (
+                r.counters.liveness_recoveries.load(Ordering::Relaxed),
+                r.counters.liveness_recoveries_by_batch.load(Ordering::Relaxed),
+            )
+        };
+        let mut r = Rig::new(Some(300), None);
+        r.connect();
+        r.batch(BatchMode::FullState, &[(1, 1), (2, 2)]);
+        r.tick(0);
+        assert!(is_silence(&r.tick(300)));
+        // Recovery by a batch (it clears Silent inside its own apply, no operation).
+        r.batch(BatchMode::Delta, &[(1, 5)]);
+        assert!(!r.silent());
+        assert!(r.tick(400).is_empty());
+        assert_eq!(rec(&r), (1, 1));
+        assert!(r.tick(500).is_empty(), "counted once");
+        assert_eq!(rec(&r), (1, 1));
+        // Recovery by a heartbeat.
+        assert!(is_silence(&r.tick(800)));
+        r.heartbeat(1);
+        assert!(matches!(r.tick(900).as_slice(), [Operation::SourceLivenessRestored { .. }]));
+        assert!(r.tick(1_000).is_empty());
+        assert_eq!(rec(&r), (2, 1));
+        // Silent, then disconnected: not a recovery.
+        assert!(is_silence(&r.tick(1_300)));
+        r.op(Operation::SourceDisconnected { source_id: S, link_generation: r.generation });
+        assert!(r.tick(1_400).is_empty());
+        // Silent, then taken over by a new link: not a recovery either.
+        r.connect();
+        r.batch(BatchMode::FullState, &[(1, 1), (2, 2)]);
+        r.tick(1_500);
+        assert!(is_silence(&r.tick(1_800)));
+        r.connect();
+        assert!(r.tick(1_900).is_empty());
+        assert_eq!(rec(&r), (2, 1));
+        assert_eq!(r.counters.liveness_expiries.load(Ordering::Relaxed), 4);
     }
 
     /// Bounded state: the sample ring never grows past its preallocated capacity whatever
