@@ -43,12 +43,7 @@ fn tags_and_sources(sources: u32, supervision: Supervision) -> (Vec<TagSpec>, Ve
             tags.push(TagSpec { tag_id, name: format!("s{s}_c{c}"), value_type: ValueType::I64 });
             channels.push(ChannelSpec { channel_id: ChannelId(c + 1), tag_id, value_type: ValueType::I64 });
         }
-        srcs.push(SourceSpec {
-            source_id: SourceId(s + 1),
-            name: format!("load-{s}"),
-            channels,
-            supervision,
-        });
+        srcs.push(SourceSpec { source_id: SourceId(s + 1), name: format!("load-{s}"), channels, supervision });
     }
     (tags, srcs)
 }
@@ -405,7 +400,8 @@ pub fn alarms_core(ops: u64) {
         let (cfg, _) = config_sup(1, k_rules, AlarmCondition::BadQuality, u64::from(k_rules) * 4, sup);
         let mut r = Run::new(cfg);
         let n = (ops / u64::from(k_rules)).clamp(200, 5_000);
-        let (mut silence, mut fresh, mut idle) = (Timed::new(n as usize), Timed::new(n as usize), Timed::new(n as usize));
+        let (mut silence, mut fresh, mut idle) =
+            (Timed::new(n as usize), Timed::new(n as usize), Timed::new(n as usize));
         for _ in 0..n {
             let op = Operation::SourceSilenceExpired { source_id: SourceId(1), link_generation: r.gens[0] };
             let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
@@ -414,12 +410,20 @@ pub fn alarms_core(ops: u64) {
             r.full(1, 7); // returns them all, refreshes every tag
             r.release_all();
             let up_to = r.k.last_operation_sequence();
-            let op = Operation::FreshnessExpired { source_id: SourceId(1), link_generation: r.gens[0], observed_up_to: up_to };
+            let op = Operation::FreshnessExpired {
+                source_id: SourceId(1),
+                link_generation: r.gens[0],
+                observed_up_to: up_to,
+            };
             let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
             assert!(fresh.time(&mut r.k, input).is_ok());
             r.release_all();
             // Entirely stale: nothing left to expire (Ignored, no candidate).
-            let op = Operation::FreshnessExpired { source_id: SourceId(1), link_generation: r.gens[0], observed_up_to: up_to };
+            let op = Operation::FreshnessExpired {
+                source_id: SourceId(1),
+                link_generation: r.gens[0],
+                observed_up_to: up_to,
+            };
             let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
             assert!(matches!(idle.time(&mut r.k, input), Ok(TransitionOutcome::Ignored(_))));
             r.full(1, 7);
