@@ -156,7 +156,44 @@ Pagine limitate da `control_page_max`, buffer per sessione riciclati; costo O(pa
 
 ### D10 — Memoria e budget
 
-`Kernel::alarm_storage_bytes` (stati + indice + ring + staging) è dentro il termine `kernel` di `budget.rs`; il runtime aggiunge `alarms` (control plane: sessioni × pagine riusabili + richieste + stima per task; lista delle disconnessioni pendenti). `memory_budget_bytes` rifiuta l'avvio se superato. Il profilo Micro rappresenta **4 GiB fisici di macchina**, non del processo: il kernel resta nell'ordine dei MiB senza allarmi; con allarmi il ring domina (48 B/slot: 1 Mi slot = 48 MiB). Gli esempi di dimensionamento sono in `docs/benchmarks/vs005.md` §capacità.
+`Kernel::alarm_storage_bytes` (stati + indice + ring + staging + finestre quiet per tag + `staged_tags`) è dentro il termine `kernel` di `budget.rs`; il runtime aggiunge `alarms` (control plane: sessioni × pagine riusabili + richieste + stima per task; lista delle disconnessioni pendenti). `memory_budget_bytes` rifiuta l'avvio se superato. Il profilo Micro rappresenta **4 GiB fisici di macchina**, non del processo: il kernel resta nell'ordine dei MiB senza allarmi; con allarmi il ring domina (48 B/slot: 1 Mi slot = 48 MiB). Gli esempi di dimensionamento sono in `docs/benchmarks/vs005.md` §capacità.
+
+### D11 — Finestra «quiet» per tag (ottimizzazione del preflight, review PR #5 P1)
+
+**Problema misurato.** Con allarmi attivi, la versione iniziale di questa PR spendeva circa 10 ns per regola e circa 1,3 µs per un batch da 128 tag anche quando nessuna regola cambiava, con un secondo passaggio sui tag staged. Con `multi_thread(2)` il sequencer è il collo di bottiglia e il throughput calava del 16…26 %.
+
+**Decisione.** L'`AlarmEngine` mantiene per ogni tag una finestra `[lo, hi]` di valori (bool come 0/1). Un input `Good` con valore nella finestra non cambia **nessuna** regola del tag. È l'intersezione delle finestre delle sue regole:
+
+| tipo di regola | condizione | finestra |
+|---|---|---|
+| `high` | non attiva | `[MIN, trip−1]` |
+| `high` | attiva | `[reset+1, MAX]` |
+| `low` | non attiva | `[trip+1, MAX]` |
+| `low` | attiva | `[MIN, reset−1]` |
+| `bool_equals` | — | il solo valore che mantiene lo stato |
+| `bad_quality` | armata e non attiva | tutto |
+| `bad_quality` | non armata o attiva | vuota |
+| qualsiasi | input non ancora valido | vuota |
+| tag senza regole | — | tutto |
+
+- **Uso nel preflight.** Il preflight dei batch, ora un solo passaggio fuso con il controllo di overflow delle revisioni, legge la finestra del tag e salta CSR, regole e stati se il valore vi cade. Altrimenti valuta le regole come prima.
+- **Aggiornamento.** Il commit ricalcola la finestra solo dei tag con regole staged, una volta per tag (`staged_tags`, capacità pari al fan-out peggiore, nessuna crescita). Le transizioni di qualità (disconnessione, silenzio, freschezza) non usano la finestra.
+- **Esattezza, non euristica.** Il test `quiet_window_is_exact` confronta la finestra con `evaluate` su ogni tipo di regola, ogni combinazione di flag e i valori estremi e di soglia. Nelle build di debug, quindi nei test e nel fuzz, ogni salto è verificato con `assert_quiet_exact`. La finestra è stato derivato: non entra in digest, fingerprint o capture, e il replay la ricostruisce.
+- **Costo.** 16 B per tag più 4 B × fan-out peggiore, inclusi in `alarm_storage_bytes` e nel budget. Le operazioni con transizioni pagano il ricalcolo, circa il +3…12 % p50 in-process. Misure in `docs/benchmarks/vs005.md` §2.3.
+- **Invariato:** preflight atomico prima di qualsiasi mutazione, zero allocazioni, determinismo, bound e precedenza degli errori. Un overflow di revisione vince su un errore di staging allarmi; l'ammissione nell'outbox viene per ultima.
+
+### D12 — Semantica temporale degli eventi (vincolante per VS-006; nessun codice in VS-005)
+
+In VS-005 né eventi né capture portano tempo. Prima del journal fissiamo cosa significherà, perché con un backlog la scrittura durevole può avvenire molto dopo il trip.
+
+1. **L'ordine non dipende mai dal tempo.** Ordine totale = `operation_seq`, poi `event_seq`, come oggi. Un orologio che salta non riordina nulla.
+2. **Tre istanti distinti, mai confusi:**
+   - **`sequenced_at`, tempo dell'evento.** Il thread del sequencer lo cattura (CLOCK_REALTIME e CLOCK_MONOTONIC) subito prima di `Kernel::apply` dell'operazione a cui assegna `operation_seq`: è l'istante in cui il sistema riconosce la transizione. Ce n'è uno per operazione e tutti gli eventi dell'operazione lo condividono. È il tempo mostrato all'operatore.
+   - **`received_at`, tempo di ingresso.** Facoltativo: ricezione del frame dal driver. Misura la coda d'ingresso e non è il tempo dell'evento.
+   - **`durable_at`, tempo di persistenza.** Il journal lo registra quando l'fsync che copre l'evento si conclude. `durable_at − sequenced_at` è il ritardo di persistenza, esposto come metrica. Non sostituisce mai il tempo dell'evento.
+3. **Il core resta senza orologi.** `sequenced_at` è un'annotazione del runtime indicizzata per `operation_seq`. Viene scritta nel record di operazione del journal e nella capture come dato d'ingresso, ignorata da `apply`. Il record caldo `AlarmEvent` resta di 48 B. Il replay legge i tempi registrati e non li ricalcola: il replay resta byte-identico.
+4. **Salti dell'orologio.** Il realtime può tornare indietro (NTP, RTC). Il runtime registra anche il monotonic e segnala `clock_regressed` quando il realtime di un'operazione è minore di quello della precedente. Non corregge e non riordina.
+5. **Tempo di sorgente.** Il timestamp di campo del driver non è nel protocollo 1.1. Se verrà aggiunto, sarà per osservazione, dichiarato non fidato e distinto da `sequenced_at`.
 
 ## 5. Casi limite
 
@@ -174,8 +211,19 @@ Vedi `docs/benchmarks/vs005.md` per i valori assoluti e la varianza: A/B VS-004 
 Sintesi (VM 4 vCPU, client co-residenti; valori assoluti solo relativi):
 
 - **Default-off:** nessuna regressione ripetibile di throughput in 25 celle (ct, mt2, `source_fair`, supervisione); RSS +2,5…+3,7 % (codice in più nel binario).
-- **Allarmi on, nessun trip (2 057 regole):** `current_thread` throughput invariato, CPU +10 %, RSS + ring preallocato (48 B/slot); `multi_thread(2)` pipelined **−16…−26 %** di batches/s e p99 +16…+20 %: il sequencer è il collo di bottiglia e paga ≈ 10 ns per regola valutata (+1,3 µs per batch da 128). Accettato e documentato per VS-005; candidati di ottimizzazione in `vs005.md` §2.2.
-- **In-process:** zero allocazioni in `apply` in ogni caso; 100 000 regole a riposo p50 4,1 µs (3,0 µs senza); storm 1 000 eventi/op 27 M eventi/s; fan-out 8 192 ≈ 0,33 ms p50; rifiuto C+1 p50 3,0 µs; ACK 0,08 µs; 1 000 000 regole costruite in ≈ 0,6 s, 142 B/regola.
+- **Allarmi on, nessun trip (2 057 regole), codice finale (D11):**
+  - `multi_thread(2)` pipelined: −1,2 % / −0,2 % di batches/s contro main, non significativo (conferma n = 10).
+  - `current_thread`: throughput invariato, CPU +0,8…+2,8 %.
+  - RSS: ring preallocato (48 B/slot) più 16 B per tag.
+  - La versione iniziale della PR, senza finestra quiet, perdeva il −16…−26 % con mt2 pipelined: il sequencer pagava circa 10 ns per regola valutata, circa +1,3 µs per un batch da 128. La review (PR #5, P1) l'ha respinta come compromesso e il costo è stato rimosso (`vs005.md` §2.2–§2.3).
+- **Transizioni:** il ricalcolo della finestra costa circa +3…+12 % p50 in-process.
+- **In-process, codice finale:**
+  - zero allocazioni in `apply` in ogni caso;
+  - 100 000 regole a riposo: p50 3,25 µs, pari a «0 regole»;
+  - storm da 1 000 eventi/op: 25 M eventi/s;
+  - fan-out 8 192: ≈ 0,34 ms p50;
+  - ACK: 0,1 µs;
+  - 1 000 000 di regole costruite in ≈ 0,5 s, 151 B/regola.
 - **Profilo Micro:** `config/profiles/micro-alarms.toml` (budget 64 MiB, 524 288 slot = 24 MiB): ≈ 14,5 h di ritenzione a 10 eventi/s senza journal.
 
 ## 7. Compatibilità
@@ -196,5 +244,7 @@ Additivo: nuovo namespace protobuf, un codice d'errore driver nuovo (44, solo co
 
 - **Rischio principale:** in produzione senza journal l'outbox si riempie e gli allarmi successivi sono rifiutati. Mitigazione: dimensionamento esplicito, stato CRITICAL osservabile, VS-006 subito dopo.
 - Disconnessione differita: il link appare `Connected` più a lungo del reale mentre l'outbox è pieno (dichiarato in `pending_link_transitions`). Estensione possibile: riserva di slot per transizioni di link (`--reserve` del modello).
-- Costo per tag toccato anche senza regole (lookup CSR): misurato in `alarms-core` A.
+- **Costo per tag toccato.** Ora è un solo confronto con la finestra quiet del tag (D11), anche per i tag senza regole. Il CSR si percorre solo quando una regola può cambiare. Misurato in `alarms-core` A e in `alarms-hot`.
+- **Stato derivato da tenere coerente.** La finestra quiet deve essere ricalcolata a ogni commit che cambia uno stato di regola. Qualsiasi futuro percorso che modifichi `states` fuori da `commit`, per esempio un ripristino da journal in VS-006, deve ricostruirla. È verificata in debug (`assert_quiet_exact`) e dal fuzz.
+- **Timestamp:** semantica fissata in D12 prima del journal.
 - Catalogo operatore fuori dal core: schema in `docs/alarm-catalog.md`.

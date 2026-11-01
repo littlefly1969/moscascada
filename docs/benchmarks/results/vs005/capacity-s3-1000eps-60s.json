@@ -3,9 +3,9 @@
     "event_record_bytes": 48,
     "alarm_state_bytes": 32,
     "compiled_rule_bytes": 24,
-    "per_rule_bytes_measured": 192.7,
-    "kernel_events_s_process_drain_pass": 1299864.0,
-    "kernel_events_s_in_memory_max": 44486275.0,
+    "per_rule_bytes_measured": 217.2,
+    "kernel_events_s_process_drain_pass": 1291299.0,
+    "kernel_events_s_in_memory_max": 38140585.0,
     "bench_results": "docs/benchmarks/results/vs005/storm.txt + alarms-core.raw"
   },
   "level_B_assumed": {

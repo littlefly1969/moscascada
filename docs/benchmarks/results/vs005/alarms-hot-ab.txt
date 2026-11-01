@@ -1,0 +1,57 @@
++ for i in 1 2 3
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3396.5 min_ns_per_op=3090.4 all=[3090.4, 3197.8, 3204.6, 3314.9, 3396.5, 3399.7, 3406.0, 3604.5, 4155.3]
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=4585.2 min_ns_per_op=4069.6 all=[4069.6, 4383.4, 4454.8, 4583.3, 4585.2, 4747.5, 5156.8, 5215.4, 5704.3]
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3317.8 min_ns_per_op=2811.0 all=[2811.0, 2920.6, 3123.9, 3258.1, 3317.8, 3327.3, 3380.5, 3427.9, 3489.3]
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=3365.5 min_ns_per_op=3178.5 all=[3178.5, 3230.1, 3234.6, 3299.5, 3365.5, 3409.1, 3600.9, 4143.5, 4172.9]
++ for i in 1 2 3
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3277.5 min_ns_per_op=3080.5 all=[3080.5, 3150.3, 3243.8, 3245.6, 3277.5, 3352.8, 3447.6, 3515.1, 3677.5]
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=4498.7 min_ns_per_op=4178.7 all=[4178.7, 4333.9, 4369.1, 4385.6, 4498.7, 4905.9, 4971.7, 5065.9, 5141.5]
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3230.6 min_ns_per_op=2966.5 all=[2966.5, 3004.8, 3055.7, 3114.3, 3230.6, 3255.3, 3269.8, 3283.9, 3675.2]
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=3268.0 min_ns_per_op=3051.3 all=[3051.3, 3128.7, 3185.0, 3206.7, 3268.0, 3290.3, 3332.4, 3349.9, 3385.8]
++ for i in 1 2 3
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3406.1 min_ns_per_op=3198.5 all=[3198.5, 3209.1, 3211.7, 3343.9, 3406.1, 3407.1, 3409.7, 3542.9, 3628.6]
++ for rpt in 0 1
++ echo -n 'variant=base '
+variant=base + taskset -c 2 /tmp/claude-0/var/base/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=4820.2 min_ns_per_op=4529.3 all=[4529.3, 4736.2, 4789.9, 4799.6, 4820.2, 4844.3, 5109.0, 5114.9, 6092.2]
++ for v in base v4_quiet_once
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 0 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=0 rules=0 ops=200000 reps=9 median_ns_per_op=3055.2 min_ns_per_op=2810.5 all=[2810.5, 2967.8, 3010.3, 3037.5, 3055.2, 3101.2, 3131.5, 3168.5, 3359.7]
++ for rpt in 0 1
++ echo -n 'variant=v4_quiet_once '
+variant=v4_quiet_once + taskset -c 2 /tmp/claude-0/var/v4_quiet_once/scada-bench alarms-hot --rules-per-tag 1 --ops 200000 --reps 9
+kind=alarms-hot sources=16 rules_per_tag=1 rules=2048 ops=200000 reps=9 median_ns_per_op=3314.1 min_ns_per_op=3102.1 all=[3102.1, 3132.0, 3197.0, 3205.0, 3314.1, 3359.6, 3399.7, 3720.4, 3853.9]

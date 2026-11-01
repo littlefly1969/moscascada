@@ -1,0 +1,10 @@
+# isolated sequential repetitions of the timing-sensitive tests (review PR #5 P2), host otherwise idle, 2026-11-01T17:36Z
+vs003::takeover_with_a_full_lane_under_fair_policy [release mt2 supervision] runs=30 pass=30 fail=0
+vs003::takeover_with_a_full_lane_under_fair_policy [debug] runs=30 pass=30 fail=0
+vs003::cancelled_and_superseded_waiters_leak_no_permit [debug] runs=30 pass=30 fail=0
+vs003::cancelled_and_superseded_waiters_leak_no_permit [release alarms] runs=30 pass=30 fail=0
+vs004::heartbeat_flood_is_bounded_and_does_not_starve [release mt2 supervision] runs=30 pass=30 fail=0
+vs004::heartbeat_flood_is_bounded_and_does_not_starve [debug] runs=30 pass=30 fail=0
+vs005::control_plane_security [release mt2] runs=30 pass=30 fail=0
+vs005::control_plane_security [debug] runs=30 pass=30 fail=0
+# end 2026-11-01T17:39Z
