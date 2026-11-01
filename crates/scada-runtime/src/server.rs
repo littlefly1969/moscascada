@@ -178,6 +178,17 @@ impl ReadError {
     }
 }
 
+/// VS-005: [`read_frame`] for other endpoints (no diagnostics); the error is the
+/// protocol error code to report, `None` when the peer is simply gone.
+pub async fn read_frame_pub<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: u32,
+    buf: &mut Vec<u8>,
+    frame_timeout: Duration,
+) -> Result<bool, Option<ErrorCode>> {
+    read_frame(r, max, buf, frame_timeout, None).await.map_err(|e| e.code())
+}
+
 /// Read one frame: waits indefinitely for the first header byte, then requires the rest of
 /// the frame within `frame_timeout`. The length is validated before `buf` is resized.
 async fn read_frame<R: AsyncRead + Unpin>(

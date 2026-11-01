@@ -355,6 +355,18 @@ pub fn error_code(e: &ApplyError) -> ErrorCode {
         ApplyError::RevisionOverflow(_) => ErrorCode::RevisionOverflow,
         // VS-004: produced only by the runtime watchdog, never by a driver message.
         ApplyError::SupervisionNotConfigured(_) | ApplyError::InvalidFreshnessToken { .. } => ErrorCode::Internal,
+        // VS-005: the only alarm refusal a driver can see (batch or Hello): retry later.
+        ApplyError::OutboxCapacityExceeded { .. } => ErrorCode::OutboxCapacityExceeded,
+        // VS-005: never caused by a driver message (control plane / startup invariants).
+        ApplyError::AlarmsNotConfigured
+        | ApplyError::UnknownAlarm(_)
+        | ApplyError::NotAcknowledgeable(_)
+        | ApplyError::StaleActivationToken { .. }
+        | ApplyError::EventSequenceExhausted
+        | ApplyError::AlarmCounterOverflow(_)
+        | ApplyError::AlarmFanoutExceeded { .. }
+        | ApplyError::WatermarkBeyondCommitted { .. }
+        | ApplyError::WatermarkRegression { .. } => ErrorCode::Internal,
     }
 }
 

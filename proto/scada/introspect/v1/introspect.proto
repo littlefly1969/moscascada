@@ -125,8 +125,33 @@ message IntrospectResponse {
   repeated StageStats stages = 8;
   // VS-002: scheduler of the I/O edge, e.g. "current_thread" or "multi_thread(2)".
   string scheduler = 9;
-  // VS-004: encoding version of state_digest (1 unsupervised, 2 supervised).
+  // VS-004: encoding version of state_digest (1 unsupervised, 2 supervised; VS-005: 3
+  // with alarms).
   uint32 state_digest_version = 10;
+  // VS-005: alarm engine and outbox summary; absent without [alarms].
+  AlarmSummary alarms = 11;
+}
+
+// VS-005 (ADR 0012): operational summary of the alarm engine. Sequences and occupancy are
+// logical state read at this introspection's position in the sequence; the rejection
+// counters are runtime metrics. The full read API is scada.alarm.v1.
+message AlarmSummary {
+  uint32 rules = 1;
+  uint64 active_or_unacked = 2;
+  uint64 outbox_capacity = 3;
+  uint64 outbox_used = 4;
+  uint64 next_event_seq = 5;
+  uint64 durable_watermark = 6;
+  uint64 outbox_high_water = 7;
+  // 1 normal, 2 high, 3 critical (scada.alarm.v1.OverloadState values).
+  uint32 overload_state = 8;
+  // Transitions refused for lack of outbox slots (all origins).
+  uint64 outbox_rejections = 9;
+  uint32 pending_link_transitions = 10;
+  uint64 acknowledgements_applied = 11;
+  // Digest of the events still in the outbox (tests only: O(capacity), computed only when
+  // include_tags is set).
+  bytes events_digest = 12;
 }
 
 // VS-002: summary of one diagnostic histogram. Values are nanoseconds,

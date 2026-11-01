@@ -4,8 +4,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use scada_core::{
-    ChannelId, ChannelSpec, ConfigError, ConfigSpec, CoreLimits, SourceId, SourceSpec, Supervision, TagId, TagSpec,
-    ValidatedConfig, ValueType,
+    AlarmCondition, AlarmId, AlarmRuleSpec, AlarmSpec, ChannelId, ChannelSpec, ConfigError, ConfigSpec, CoreLimits,
+    Severity, SourceId, SourceSpec, Supervision, TagId, TagSpec, ValidatedConfig, ValueType,
 };
 use scada_protocol::frame::MAX_FRAME_BYTES_CEILING;
 use serde::Deserialize;
@@ -20,6 +20,151 @@ struct FileConfig {
     runtime: FileRuntime,
     tags: Vec<FileTag>,
     sources: Vec<FileSource>,
+    /// VS-005: absent = alarms disabled, VS-004 behaviour unchanged.
+    alarms: Option<FileAlarms>,
+}
+
+/// VS-005 `[alarms]` (ADR 0012).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAlarms {
+    /// Configured ceiling of the rule count (default: the number of rules).
+    max_rules: Option<u32>,
+    /// Outbox capacity in events (slots), required: no default size is imposed.
+    outbox_capacity_events: u64,
+    /// Occupancy percentage reported as `HIGH` (default 80).
+    outbox_high_percent: Option<u32>,
+    /// Local control socket (snapshot, events, ACK, capacity). Absent = no control plane.
+    control_socket_path: Option<PathBuf>,
+    /// Peer uids allowed on the control socket; required with `control_socket_path`.
+    control_authorized_uids: Option<Vec<u32>>,
+    #[serde(default = "d_alarm_conn")]
+    max_control_connections: u32,
+    /// Largest page of events / alarms per request (default 1024).
+    #[serde(default = "d_alarm_page")]
+    control_page_max: u32,
+    #[serde(default)]
+    rules: Vec<FileRule>,
+}
+
+fn d_alarm_conn() -> u32 {
+    4
+}
+fn d_alarm_page() -> u32 {
+    1024
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRule {
+    id: u32,
+    name: String,
+    tag_id: u32,
+    kind: String,
+    trip: Option<i64>,
+    reset: Option<i64>,
+    expected: Option<bool>,
+    severity: String,
+}
+
+/// VS-005: runtime side of `[alarms]` (the rules themselves live in the core config).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlarmSettings {
+    pub control_socket_path: Option<PathBuf>,
+    /// Sorted, non-empty when the socket is configured.
+    pub control_authorized_uids: Vec<u32>,
+    pub max_control_connections: u32,
+    pub control_page_max: u32,
+    pub outbox_high_percent: u32,
+}
+
+/// VS-005: accepted ranges.
+pub const MAX_CONTROL_CONNECTIONS: u32 = 64;
+pub const MAX_CONTROL_PAGE: u32 = 65_536;
+
+fn parse_rule(r: &FileRule) -> Result<AlarmRuleSpec, LoadError> {
+    let e = |m: String| LoadError::Alarms(format!("rule {}: {m}", r.id));
+    let severity = match r.severity.as_str() {
+        "info" => Severity::Info,
+        "warning" => Severity::Warning,
+        "major" => Severity::Major,
+        "critical" => Severity::Critical,
+        other => return Err(e(format!("unknown severity {other:?} (info | warning | major | critical)"))),
+    };
+    let none = |name: &str, present: bool| {
+        if present { Err(e(format!("{name} is not valid for kind {:?}", r.kind))) } else { Ok(()) }
+    };
+    let condition = match r.kind.as_str() {
+        "bool_equals" => {
+            none("trip", r.trip.is_some())?;
+            none("reset", r.reset.is_some())?;
+            AlarmCondition::BoolEquals {
+                expected: r.expected.ok_or_else(|| e("bool_equals requires expected".into()))?,
+            }
+        }
+        "high" | "low" => {
+            none("expected", r.expected.is_some())?;
+            let trip = r.trip.ok_or_else(|| e(format!("{} requires trip", r.kind)))?;
+            let reset = r.reset.ok_or_else(|| e(format!("{} requires reset", r.kind)))?;
+            if r.kind == "high" { AlarmCondition::High { trip, reset } } else { AlarmCondition::Low { trip, reset } }
+        }
+        "bad_quality" => {
+            none("trip", r.trip.is_some())?;
+            none("reset", r.reset.is_some())?;
+            none("expected", r.expected.is_some())?;
+            AlarmCondition::BadQuality
+        }
+        other => return Err(e(format!("unknown kind {other:?} (bool_equals | high | low | bad_quality)"))),
+    };
+    Ok(AlarmRuleSpec { alarm_id: AlarmId(r.id), name: r.name.clone(), tag_id: TagId(r.tag_id), condition, severity })
+}
+
+fn parse_alarms(a: Option<FileAlarms>) -> Result<(Option<AlarmSpec>, Option<AlarmSettings>), LoadError> {
+    let Some(a) = a else { return Ok((None, None)) };
+    let rules = a.rules.iter().map(parse_rule).collect::<Result<Vec<_>, _>>()?;
+    let max_rules = match a.max_rules {
+        Some(m) => m,
+        None => u32::try_from(rules.len()).map_err(|_| LoadError::Alarms("too many rules".into()))?,
+    };
+    if !(1..=MAX_CONTROL_CONNECTIONS).contains(&a.max_control_connections) {
+        return Err(LoadError::Alarms(format!(
+            "max_control_connections={} outside 1..={MAX_CONTROL_CONNECTIONS}",
+            a.max_control_connections
+        )));
+    }
+    if !(1..=MAX_CONTROL_PAGE).contains(&a.control_page_max) {
+        return Err(LoadError::Alarms(format!(
+            "control_page_max={} outside 1..={MAX_CONTROL_PAGE}",
+            a.control_page_max
+        )));
+    }
+    let high = a.outbox_high_percent.unwrap_or(80);
+    if !(1..=100).contains(&high) {
+        return Err(LoadError::Alarms(format!("outbox_high_percent={high} outside 1..=100")));
+    }
+    let mut uids = match (&a.control_socket_path, a.control_authorized_uids) {
+        (Some(_), Some(u)) if !u.is_empty() => u,
+        (Some(_), _) => {
+            return Err(LoadError::Alarms(
+                "control_socket_path requires a non-empty control_authorized_uids (acknowledgements are authenticated)"
+                    .into(),
+            ));
+        }
+        (None, Some(_)) => return Err(LoadError::Alarms("control_authorized_uids without control_socket_path".into())),
+        (None, None) => Vec::new(),
+    };
+    uids.sort_unstable();
+    uids.dedup();
+    Ok((
+        Some(AlarmSpec { max_rules, outbox_capacity_events: a.outbox_capacity_events, rules }),
+        Some(AlarmSettings {
+            control_socket_path: a.control_socket_path,
+            control_authorized_uids: uids,
+            max_control_connections: a.max_control_connections,
+            control_page_max: a.control_page_max,
+            outbox_high_percent: high,
+        }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,6 +549,8 @@ pub struct RuntimeConfig {
     pub authorization: Vec<(SourceId, Option<Vec<u32>>)>,
     /// VS-004: `None` unless at least one source is supervised (default: none).
     pub supervision: Option<SupervisionConfig>,
+    /// VS-005: `None` unless `[alarms]` is present (the rules are in `core`).
+    pub alarms: Option<AlarmSettings>,
 }
 
 impl RuntimeConfig {
@@ -424,6 +571,8 @@ pub enum LoadError {
     Parse(String),
     Ipc(String),
     Runtime(String),
+    /// VS-005: `[alarms]` (runtime part; rule semantics are `Core` errors).
+    Alarms(String),
     Core(ConfigError),
 }
 
@@ -434,6 +583,7 @@ impl fmt::Display for LoadError {
             LoadError::Parse(e) => write!(f, "invalid TOML: {e}"),
             LoadError::Ipc(e) => write!(f, "invalid [ipc] section: {e}"),
             LoadError::Runtime(e) => write!(f, "invalid [runtime] section: {e}"),
+            LoadError::Alarms(e) => write!(f, "invalid [alarms] section: {e}"),
             LoadError::Core(e) => write!(f, "invalid configuration: {e}"),
         }
     }
@@ -531,7 +681,8 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
             })
             .collect(),
     };
-    let core = ValidatedConfig::validate(spec).map_err(LoadError::Core)?;
+    let (alarm_spec, alarms) = parse_alarms(f.alarms)?;
+    let core = ValidatedConfig::validate_with_alarms(spec, alarm_spec).map_err(LoadError::Core)?;
     let mut authorization: Vec<(SourceId, Option<Vec<u32>>)> =
         f.sources.into_iter().map(|s| (SourceId(s.id), s.authorized_uids)).collect();
     authorization.sort_by_key(|(s, _)| *s);
@@ -546,5 +697,6 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         core,
         authorization,
         supervision,
+        alarms,
     })
 }

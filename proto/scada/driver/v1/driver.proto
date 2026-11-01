@@ -211,4 +211,10 @@ enum ErrorCode {
   ERROR_CODE_OPERATION_SEQUENCE_EXHAUSTED = 41;
   ERROR_CODE_KERNEL_SHUTTING_DOWN = 42;
   ERROR_CODE_INTERNAL = 43;
+  // VS-005 (ADR 0012): the batch would produce more alarm events than the kernel's outbox
+  // has free slots. The batch had NO effect (status REJECTED, source_sequence not
+  // consumed, no operation_sequence): resend the same batch later (after
+  // last_accepted_source_sequence). Kernels without [alarms] never send it; a legacy
+  // driver treats it as any other unknown rejection code.
+  ERROR_CODE_OUTBOX_CAPACITY_EXCEEDED = 44;
 }

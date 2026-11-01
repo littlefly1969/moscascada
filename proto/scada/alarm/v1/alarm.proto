@@ -1,0 +1,268 @@
+// VS-005 (ADR 0012): local alarm control plane, `scada.alarm.v1`.
+//
+// Transport: its own Unix domain stream socket ([alarms] control_socket_path), separate
+// from the driver socket and from the test introspection. Same framing as
+// scada.driver.v1: u32 big-endian payload length + one protobuf message. The client sends
+// AlarmRequest frames, one at a time (stop-and-wait); the kernel answers each with one
+// AlarmResponse.
+//
+// Authentication: the peer's Unix credentials (SO_PEERCRED) must be in
+// [alarms] control_authorized_uids, otherwise the kernel answers
+// ErrorResponse{UNAUTHORIZED} and closes. The uid is the identity of the *process* that
+// connected (an HMI service, a gateway), NOT necessarily of a human operator. The actor of
+// an acknowledgement is always that peer uid; a client cannot declare it.
+//
+// Durability: nothing here is durable in VS-005. An acknowledgement answered
+// ACK_STATUS_APPLIED_VOLATILE is lost with the process. Reading events never frees outbox
+// slots and never makes anything durable.
+//
+// Evolution rules: never reuse or renumber a field or enum value; reserve removed numbers.
+syntax = "proto3";
+
+package scada.alarm.v1;
+
+message AlarmRequest {
+  // Must be 1. Also guarantees a non-empty encoding.
+  uint32 alarm_api_version = 1;
+  // Kernel instance the client believes it talks to. Empty = any (the response always
+  // carries the current one). Required for AcknowledgeAlarm. A different value answers
+  // ErrorResponse{INSTANCE_MISMATCH}: the kernel restarted and every cursor, token and
+  // unacknowledged episode of the old instance is gone (VS-005 keeps nothing).
+  bytes kernel_instance_id = 2;
+  oneof body {
+    GetAlarmSnapshot snapshot = 3;
+    ReadEvents read_events = 4;
+    AcknowledgeAlarm acknowledge = 5;
+    GetCapacityStatus capacity = 6;
+    // TEST ONLY: refused with UNSUPPORTED unless the kernel was started with
+    // --test-simulated-durable-sink. Simulates the future durable journal confirming
+    // events <= up_to_event_seq (the only way slots are reused). NOT durability.
+    SimulatedDurableCommit simulated_durable_commit = 7;
+  }
+}
+
+// Alarms that are active OR unacknowledged, ascending alarm_id, one page per request.
+// Consistency: every page is read at one precise operation sequence. A paginated read is
+// a consistent snapshot only if every page reports the same change_operation; pass the
+// first page's change_operation as expected_change_operation to the next pages and the
+// kernel answers SNAPSHOT_CHANGED (restart from the first page) when any alarm changed
+// in between. No catalog metadata (titles, procedures, graphics) is returned here.
+message GetAlarmSnapshot {
+  // Exclusive cursor: 0 = from the start.
+  uint32 after_alarm_id = 1;
+  // 0 = the configured page maximum; larger values are clamped to it.
+  uint32 limit = 2;
+  // 0 = first page (no check).
+  uint64 expected_change_operation = 3;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARNING = 2;
+  SEVERITY_MAJOR = 3;
+  SEVERITY_CRITICAL = 4;
+}
+
+enum EpisodeState {
+  EPISODE_STATE_UNSPECIFIED = 0;
+  EPISODE_STATE_NORMAL = 1;
+  EPISODE_STATE_ACTIVE_UNACKED = 2;
+  EPISODE_STATE_ACTIVE_ACKED = 3;
+  EPISODE_STATE_RETURNED_UNACKED = 4;
+}
+
+message AlarmEntry {
+  uint32 alarm_id = 1;
+  Severity severity = 2;
+  EpisodeState state = 3;
+  // The rule's input is a Good measurement now (orthogonal to the episode state: an
+  // alarm with an invalid input keeps its latch, it never returns by itself).
+  bool input_valid = 4;
+  uint64 occurrence_id = 5;
+  // Quote it in AcknowledgeAlarm. Changes on every Raised/Retriggered.
+  uint64 activation_token = 6;
+  uint64 last_event_seq = 7;
+}
+
+message AlarmSnapshotPage {
+  repeated AlarmEntry alarms = 1;
+  uint32 next_after_alarm_id = 2;
+  bool has_more = 3;
+  uint64 total_listed = 4;
+  // Operation sequence of the last change of any alarm state (consistency token).
+  uint64 change_operation = 5;
+  // Last applied operation sequence when this page was read.
+  uint64 operation_sequence = 6;
+}
+
+message ReadEvents {
+  // Exclusive cursor: 0 = from the oldest event still in the outbox.
+  uint64 after_event_seq = 1;
+  // 0 = the configured page maximum; larger values are clamped to it.
+  uint32 limit = 2;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_RAISED = 1;
+  EVENT_KIND_RETURNED = 2;
+  EVENT_KIND_RETRIGGERED = 3;
+  EVENT_KIND_ACKNOWLEDGED = 4;
+}
+
+message AlarmEventRecord {
+  uint64 event_seq = 1;
+  uint64 operation_seq = 2;
+  uint32 ordinal_in_operation = 3;
+  uint32 alarm_id = 4;
+  uint64 occurrence_id = 5;
+  uint64 activation_token = 6;
+  EventKind kind = 7;
+  EpisodeState state_after = 8;
+  bool input_valid_after = 9;
+  // Peer uid of an acknowledgement (process identity), 0 otherwise.
+  uint32 actor_uid = 10;
+}
+
+message EventPage {
+  repeated AlarmEventRecord events = 1;
+  // Pass as after_event_seq for the next page.
+  uint64 next_cursor = 2;
+  uint64 oldest_visible = 3;
+  uint64 newest = 4;
+  bool has_more = 5;
+  // Events after the cursor were reclaimed (only possible after they became durable):
+  // the page starts at oldest_visible.
+  bool gap_detected = 6;
+  // The cursor is beyond the newest event (another instance's cursor).
+  bool cursor_ahead = 7;
+  uint64 durable_watermark = 8;
+}
+
+message AcknowledgeAlarm {
+  uint32 alarm_id = 1;
+  uint64 activation_token = 2;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  // Applied in volatile memory, Acknowledged event committed. NOT durable.
+  ACK_STATUS_APPLIED_VOLATILE = 1;
+  // The current episode is already acknowledged; nothing changed.
+  ACK_STATUS_ALREADY_ACKED = 2;
+  // The token is not the alarm's current activation token (retriggered since, or another
+  // occurrence); see current_activation_token.
+  ACK_STATUS_STALE_OCCURRENCE = 3;
+  // Not used in a response: an unauthorized peer gets ErrorResponse{UNAUTHORIZED}.
+  ACK_STATUS_UNAUTHORIZED = 4;
+  // No free outbox slot for the Acknowledged event; nothing changed. Retry later.
+  ACK_STATUS_OUTBOX_CAPACITY_EXCEEDED = 5;
+  ACK_STATUS_UNKNOWN_ALARM = 6;
+  // The alarm never had an episode.
+  ACK_STATUS_NOT_ACKNOWLEDGEABLE = 7;
+  ACK_STATUS_OPERATION_SEQUENCE_EXHAUSTED = 8;
+  ACK_STATUS_INTERNAL = 9;
+}
+
+message AckResult {
+  AckStatus status = 1;
+  optional uint64 operation_sequence = 2;
+  optional uint64 event_seq = 3;
+  uint64 current_activation_token = 4;
+  // OUTBOX_CAPACITY_EXCEEDED: slots the operation needed and the free ones.
+  uint64 required = 5;
+  uint64 free = 6;
+}
+
+message GetCapacityStatus {}
+
+enum Durability {
+  DURABILITY_UNSPECIFIED = 0;
+  // VS-005: no durable sink exists. Nothing is durable; slots are never reclaimed.
+  DURABILITY_NONE_VOLATILE = 1;
+  // --test-simulated-durable-sink: a TEST harness moves the watermark. Not durability.
+  DURABILITY_SIMULATED_TEST_ONLY = 2;
+}
+
+enum OverloadState {
+  OVERLOAD_STATE_UNSPECIFIED = 0;
+  OVERLOAD_STATE_NORMAL = 1;
+  // Occupancy >= the configured high-water percentage.
+  OVERLOAD_STATE_HIGH = 2;
+  // An admission was refused for lack of slots since the last slot release, or no slot is
+  // free: new transitions that produce events are NOT applied.
+  OVERLOAD_STATE_CRITICAL = 3;
+}
+
+message CapacityStatus {
+  uint64 capacity_events = 1;
+  uint64 used = 2;
+  uint64 free = 3;
+  uint64 high_water = 4;
+  uint64 next_event_seq = 5;
+  uint64 durable_watermark = 6;
+  uint64 oldest_visible = 7;
+  uint64 active_or_unacked = 8;
+  Durability durability = 9;
+  OverloadState overload = 10;
+  // Refusals for lack of outbox slots, by origin (runtime counters, since start).
+  uint64 rejected_batches = 11;
+  uint64 rejected_link_operations = 12;
+  uint64 rejected_supervision_operations = 13;
+  uint64 rejected_acknowledgements = 14;
+  // Link transitions (disconnections) waiting for free slots.
+  uint32 pending_link_transitions = 15;
+  uint32 rules = 16;
+  uint32 worst_fanout_per_operation = 17;
+  uint32 event_record_bytes = 18;
+  uint32 alarm_state_bytes = 19;
+  // Configured worst-case bound of the alarm allocations (core + control plane).
+  uint64 alarm_memory_bound_bytes = 20;
+  uint64 operation_sequence = 21;
+  uint64 last_alarm_change_operation = 22;
+  uint32 high_percent = 23;
+}
+
+message SimulatedDurableCommit {
+  uint64 up_to_event_seq = 1;
+}
+
+message WatermarkResult {
+  // true: applied (or unchanged); false: refused (see detail in ErrorResponse instead).
+  bool applied = 1;
+  uint64 durable_watermark = 2;
+  uint64 released = 3;
+  optional uint64 operation_sequence = 4;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNAUTHORIZED = 1;
+  ERROR_CODE_INSTANCE_MISMATCH = 2;
+  ERROR_CODE_SNAPSHOT_CHANGED = 3;
+  ERROR_CODE_INVALID_REQUEST = 4;
+  ERROR_CODE_UNSUPPORTED = 5;
+  ERROR_CODE_TOO_MANY_CONNECTIONS = 6;
+  ERROR_CODE_SHUTTING_DOWN = 7;
+  ERROR_CODE_FRAME_TOO_LARGE = 8;
+  ERROR_CODE_WATERMARK_REFUSED = 9;
+}
+
+message ErrorResponse {
+  ErrorCode code = 1;
+  // Diagnostic text, not for programmatic use.
+  string detail = 2;
+}
+
+message AlarmResponse {
+  bytes kernel_instance_id = 1;
+  oneof body {
+    ErrorResponse error = 2;
+    AlarmSnapshotPage snapshot = 3;
+    EventPage events = 4;
+    AckResult ack = 5;
+    CapacityStatus capacity = 6;
+    WatermarkResult watermark = 7;
+  }
+}
