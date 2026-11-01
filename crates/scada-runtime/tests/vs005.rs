@@ -280,8 +280,17 @@ fn control_plane_security() {
     let e = events(c.events(0, 100).unwrap());
     assert_eq!((e.events.len(), e.has_more), (1, true));
     // 8. Connection limit (2: `c` + one more; the third is refused).
-    let _c2 = AlarmClient::connect(&k.alarm).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    // The sessions dropped above release their permit asynchronously (when the server sees
+    // EOF): retry until `c2` is really served, so it provably holds the second permit.
+    let t0 = std::time::Instant::now();
+    let _c2 = loop {
+        let mut c2 = AlarmClient::connect(&k.alarm).unwrap();
+        if c2.capacity().is_ok() {
+            break c2;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "dropped control sessions never released");
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let mut c3 = AlarmClient::connect(&k.alarm).unwrap();
     assert_eq!(err_code(&c3.read().unwrap()), apb::ErrorCode::TooManyConnections);
     // The driver socket is unaffected by any of this.
