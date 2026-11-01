@@ -44,20 +44,63 @@ pub const CONTROL_SESSION_ESTIMATE_BYTES: u128 = 16 * 1024;
 /// A control-plane request handed to the sequencer.
 #[derive(Debug)]
 pub enum AlarmCall {
-    Snapshot { after: AlarmId, limit: u32, expected_change: u64, buf: Vec<AlarmView> },
-    Events { after: u64, limit: u32, buf: Vec<AlarmEvent> },
-    Ack { alarm_id: AlarmId, token: u64, actor_uid: u32 },
+    Snapshot {
+        after: AlarmId,
+        limit: u32,
+        expected_change: u64,
+        buf: Vec<AlarmView>,
+    },
+    Events {
+        after: u64,
+        limit: u32,
+        buf: Vec<AlarmEvent>,
+    },
+    /// VS-006: `action_id` (idempotency key), `note` (<= 256 B) and `require_durable` are
+    /// optional; without them the VS-005 semantics are unchanged.
+    Ack {
+        alarm_id: AlarmId,
+        token: u64,
+        actor_uid: u32,
+        action_id: Option<[u8; 16]>,
+        note: String,
+        require_durable: bool,
+    },
     Capacity,
-    SimulatedDurableCommit { up_to: u64 },
+    SimulatedDurableCommit {
+        up_to: u64,
+    },
 }
 
 /// Outcome of an acknowledgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckOutcome {
-    Applied { operation_sequence: u64, event_seq: u64 },
+    /// `durable`: the operation is in a committed journal transaction (VS-006);
+    /// `deduplicated`: a retry of a known `action_id` (no new event).
+    Applied {
+        operation_sequence: u64,
+        event_seq: u64,
+        durable: bool,
+        deduplicated: bool,
+    },
+    /// VS-006: applied in RAM, the journal failed: not durable.
+    NotDurable {
+        operation_sequence: u64,
+        event_seq: u64,
+    },
+    /// VS-006: refused before `apply` (journal queue, disk, fault).
+    JournalUnavailable(crate::persist::Refusal),
+    /// VS-006: the `action_id` is known for another alarm or token.
+    ActionIdConflict,
+    /// VS-006: `require_durable` without a durable journal.
+    DurabilityUnavailable,
     AlreadyAcked,
-    Stale { current: u64 },
-    OutboxFull { required: u64, free: u64 },
+    Stale {
+        current: u64,
+    },
+    OutboxFull {
+        required: u64,
+        free: u64,
+    },
     UnknownAlarm,
     NotAcknowledgeable,
     SequenceExhausted,
@@ -70,6 +113,8 @@ pub struct CapacityReport {
     pub outbox: OutboxStatus,
     pub overload: Overload,
     pub simulated_sink: bool,
+    /// VS-006: `Some(durable)` when the journal is active.
+    pub journal: Option<bool>,
     pub rejected_batches: u64,
     pub rejected_link: u64,
     pub rejected_supervision: u64,
@@ -218,7 +263,12 @@ pub fn ack_outcome(r: &Result<TransitionOutcome, ApplyError>) -> AckOutcome {
         Ok(TransitionOutcome::Applied {
             operation_sequence,
             kind: AppliedKind::AlarmAcknowledged { event_seq, .. },
-        }) => AckOutcome::Applied { operation_sequence: *operation_sequence, event_seq: *event_seq },
+        }) => AckOutcome::Applied {
+            operation_sequence: *operation_sequence,
+            event_seq: *event_seq,
+            durable: false,
+            deduplicated: false,
+        },
         Ok(TransitionOutcome::Ignored(IgnoredReason::AlreadyAcknowledged)) => AckOutcome::AlreadyAcked,
         Err(ApplyError::StaleActivationToken { current, .. }) => AckOutcome::Stale { current: *current },
         Err(ApplyError::OutboxCapacityExceeded { required, free }) => {
@@ -296,8 +346,12 @@ pub fn capacity_status(r: &CapacityReport) -> apb::CapacityStatus {
         durable_watermark: o.durable_watermark,
         oldest_visible: o.oldest_visible,
         active_or_unacked: o.active_or_unacked,
-        durability: if r.simulated_sink { apb::Durability::SimulatedTestOnly } else { apb::Durability::NoneVolatile }
-            as i32,
+        durability: match (r.journal, r.simulated_sink) {
+            (Some(true), _) => apb::Durability::JournalPowerLossDurable,
+            (Some(false), _) => apb::Durability::JournalNotDurableBenchmarkOnly,
+            (None, true) => apb::Durability::SimulatedTestOnly,
+            (None, false) => apb::Durability::NoneVolatile,
+        } as i32,
         overload: match r.overload {
             Overload::Normal => apb::OverloadState::Normal,
             Overload::High => apb::OverloadState::High,
@@ -319,14 +373,23 @@ pub fn capacity_status(r: &CapacityReport) -> apb::CapacityStatus {
     }
 }
 
-fn ack_result(a: AckOutcome) -> apb::AckResult {
-    let mut r = apb::AckResult::default();
+fn ack_result(a: AckOutcome, action_id: Option<[u8; 16]>) -> apb::AckResult {
+    let mut r = apb::AckResult { action_id: action_id.map_or_else(Vec::new, |a| a.to_vec()), ..Default::default() };
     let st = match a {
-        AckOutcome::Applied { operation_sequence, event_seq } => {
+        AckOutcome::Applied { operation_sequence, event_seq, durable, deduplicated } => {
             r.operation_sequence = Some(operation_sequence);
             r.event_seq = Some(event_seq);
-            apb::AckStatus::AppliedVolatile
+            r.deduplicated = deduplicated;
+            if durable { apb::AckStatus::AppliedDurable } else { apb::AckStatus::AppliedVolatile }
         }
+        AckOutcome::NotDurable { operation_sequence, event_seq } => {
+            r.operation_sequence = Some(operation_sequence);
+            r.event_seq = Some(event_seq);
+            apb::AckStatus::AppliedNotDurable
+        }
+        AckOutcome::JournalUnavailable(_) => apb::AckStatus::JournalUnavailable,
+        AckOutcome::ActionIdConflict => apb::AckStatus::ActionIdConflict,
+        AckOutcome::DurabilityUnavailable => apb::AckStatus::DurabilityUnavailable,
         AckOutcome::AlreadyAcked => apb::AckStatus::AlreadyAcked,
         AckOutcome::Stale { current } => {
             r.current_activation_token = current;
@@ -446,6 +509,7 @@ async fn control_session(server: &Server, settings: &AlarmSettings, stream: Unix
     let mut events = Vec::with_capacity(page);
     let mut views = Vec::with_capacity(page);
     let mut buf = Vec::new();
+    let mut last_action: Option<[u8; 16]> = None;
     loop {
         let r = timeout(
             CONTROL_IDLE_TIMEOUT,
@@ -527,8 +591,47 @@ async fn control_session(server: &Server, settings: &AlarmSettings, stream: Unix
                     }
                     continue;
                 }
+                // VS-006: optional idempotency key (exactly 16 bytes) and note (<= 256 B).
+                let action_id = match a.action_id.len() {
+                    0 => None,
+                    16 => <[u8; 16]>::try_from(a.action_id.as_slice()).ok(),
+                    _ => {
+                        if !write(
+                            &mut wr,
+                            &error(&id, apb::ErrorCode::InvalidRequest, "action_id must be 16 bytes"),
+                            &mut scratch,
+                            wt,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                if a.note.len() > scada_journal::MAX_NOTE_BYTES {
+                    if !write(
+                        &mut wr,
+                        &error(&id, apb::ErrorCode::InvalidRequest, "note longer than 256 bytes"),
+                        &mut scratch,
+                        wt,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                last_action = action_id;
                 // The actor is the authenticated peer, never a client-declared value.
-                AlarmCall::Ack { alarm_id: AlarmId(a.alarm_id), token: a.activation_token, actor_uid: uid }
+                AlarmCall::Ack {
+                    alarm_id: AlarmId(a.alarm_id),
+                    token: a.activation_token,
+                    actor_uid: uid,
+                    action_id,
+                    note: a.note,
+                    require_durable: a.require_durable,
+                }
             }
             Some(Body::Capacity(_)) => AlarmCall::Capacity,
             Some(Body::SimulatedDurableCommit(c)) => AlarmCall::SimulatedDurableCommit { up_to: c.up_to_event_seq },
@@ -587,7 +690,7 @@ async fn control_session(server: &Server, settings: &AlarmSettings, stream: Unix
                 events = buf;
                 m
             }
-            AlarmReply::Ack(a) => response(&id, R::Ack(ack_result(a))),
+            AlarmReply::Ack(a) => response(&id, R::Ack(ack_result(a, last_action.take()))),
             AlarmReply::Capacity(c) => response(&id, R::Capacity(capacity_status(&c))),
             AlarmReply::Watermark(Ok((wm, released, op))) => response(
                 &id,

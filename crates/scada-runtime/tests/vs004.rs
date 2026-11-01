@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use scada_core::Kernel;
 use scada_protocol::driver_v1::{AckStatus, BatchMode, ErrorCode, KernelMessage, kernel_message};
 use scada_protocol::introspect_v1::{IntrospectResponse, LinkState, Liveness, Quality};
-use scada_sim_driver::{Session, Val, batch, heartbeat, hello, hello_v10};
+use scada_sim_driver::{Session, Val, batch, heartbeat, hello, hello_minor, hello_v10};
 use support::*;
 
 const SRC: u32 = 1001;
@@ -89,7 +89,8 @@ fn default_off_is_the_vs003_contract() {
     legacy.send(&heartbeat(1)).unwrap();
     assert_eq!(protocol_error(legacy.recv().unwrap()), ErrorCode::UnexpectedMessage);
     // Updated driver: 1.1 negotiated, heartbeats accepted and harmless without supervision.
-    let mut new = Session::connect_with(&k.socket, &hello("new", SRC, 7)).unwrap();
+    // A 1.1 driver (VS-004): 1.1 negotiated (a VS-006 driver would get 1.2).
+    let mut new = Session::connect_with(&k.socket, &hello_minor("new", SRC, 7, 1)).unwrap();
     assert_eq!(new.welcome.negotiated_protocol_minor, 1);
     for _ in 0..10 {
         assert!(new.heartbeat().unwrap());

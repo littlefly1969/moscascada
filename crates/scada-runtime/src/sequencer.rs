@@ -17,11 +17,30 @@ use tokio::sync::oneshot;
 
 use crate::ingress::Inbox;
 
-use crate::alarms::{AlarmCall, AlarmReply, AlarmRuntime, CapacityReport, Origin};
+use crate::alarms::{AckOutcome, AlarmCall, AlarmReply, AlarmRuntime, CapacityReport, Origin};
 use crate::capture::CaptureWriter;
 use crate::convert;
 use crate::diag::{self, Diag, Stage};
+use crate::persist::{Extras, Persist, Refusal};
 use crate::supervision::{HeartbeatCounter, Supervisor, WatchdogShared};
+use scada_journal::{CommitResult, OperatorAction, SourceTimes, fault};
+
+/// VS-006: why an input was not applied: the core refused it, or the journal had no room
+/// (J4: decided before `apply`, nothing changed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    Core(scada_core::ApplyError),
+    Journal(Refusal),
+}
+
+/// The core part of a result (VS-005 bookkeeping ignores journal refusals).
+fn core_result(r: &Result<TransitionOutcome, Refused>) -> Option<Result<TransitionOutcome, scada_core::ApplyError>> {
+    match r {
+        Ok(o) => Some(Ok(*o)),
+        Err(Refused::Core(e)) => Some(Err(*e)),
+        Err(Refused::Journal(_)) => None,
+    }
+}
 
 /// Runtime counters. Metrics only: never part of the logical state or the digest.
 #[derive(Debug, Default)]
@@ -94,6 +113,17 @@ pub struct BatchReply {
     pub sent: Option<Instant>,
 }
 
+/// VS-006: per-batch data for the journal (only with `[persistence]`).
+#[derive(Debug)]
+pub struct BatchExt {
+    /// Wire 1.2 source time sidecar (journal only, never the core).
+    pub times: Option<Box<SourceTimes>>,
+    /// `runtime_received_at`, UTC ns.
+    pub received_at: i64,
+    /// The link negotiated durable receipts: the ACK waits for the commit.
+    pub durable: bool,
+}
+
 /// Requests admitted into the bounded input queue.
 #[derive(Debug)]
 pub enum Request {
@@ -119,6 +149,9 @@ pub enum Request {
         reply: oneshot::Sender<BatchReply>,
         submitted: Option<Instant>,
         permits: crate::ingress::Permits,
+        /// VS-006: journal side data, `None` without `[persistence]` (one pointer: the
+        /// queued request keeps its VS-005 size, J10).
+        ext: Option<Box<BatchExt>>,
     },
     Introspect {
         include_tags: bool,
@@ -133,6 +166,9 @@ pub enum Request {
         call: AlarmCall,
         reply: oneshot::Sender<AlarmReply>,
     },
+    /// VS-006: the journal writer committed something (durable progress to turn into a
+    /// watermark, deferred operations to retry). No payload.
+    JournalWake,
 }
 
 /// Static data the sequencer needs besides the kernel.
@@ -166,11 +202,12 @@ pub fn spawn(
     capture: Option<CaptureWriter>,
     supervisor: Option<Supervisor>,
     alarms: Option<AlarmRuntime>,
+    persist: Option<Persist>,
 ) -> std::io::Result<(thread::JoinHandle<Kernel>, oneshot::Receiver<()>)> {
     let (alive, stopped) = oneshot::channel::<()>();
     let handle = thread::Builder::new().name("scada-sequencer".into()).spawn(move || {
         let _alive = alive;
-        run(kernel, rx, ctx, capture, supervisor, alarms)
+        run(kernel, rx, ctx, capture, supervisor, alarms, persist)
     })?;
     Ok((handle, stopped))
 }
@@ -187,6 +224,8 @@ struct Links {
     supervisor: Option<Supervisor>,
     /// VS-005: `None` unless alarms are configured.
     alarms: Option<AlarmRuntime>,
+    /// VS-006: `None` unless `[persistence]` is configured (J10).
+    persist: Option<Persist>,
 }
 
 fn run(
@@ -196,9 +235,47 @@ fn run(
     capture: Option<CaptureWriter>,
     supervisor: Option<Supervisor>,
     alarms: Option<AlarmRuntime>,
+    persist: Option<Persist>,
 ) -> Kernel {
-    let mut links = Links { next_generation: 0, capture, handled: 0, active: Vec::new(), supervisor, alarms };
+    // VS-006: link generations continue after a restore (never reuse one of an earlier boot).
+    let next_generation = kernel
+        .logical_snapshot()
+        .sources
+        .iter()
+        .map(|s| match s.link {
+            LinkState::NeverConnected => 0,
+            LinkState::Connected { generation } | LinkState::Disconnected { generation } => generation,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut links = Links { next_generation, capture, handled: 0, active: Vec::new(), supervisor, alarms, persist };
     links.active.resize_with(kernel.config().sources().len(), || None);
+    // VS-006 (ADR 0013 D8 step 6): after a restore, the watermark up to the durable prefix
+    // and the recovery fence are the first operations of this boot, journaled like any
+    // other, before any input is served.
+    if links.persist.is_some() {
+        journal_tick(&mut kernel, &mut links, &ctx);
+        if let Some(p) = links.persist.as_ref()
+            && kernel.last_operation_sequence() > 0
+        {
+            let boot_generation = p.boot_generation;
+            if let Some(operation_sequence) = kernel.next_operation_sequence() {
+                let op = Operation::RecoveryFence { boot_generation };
+                let r = apply(
+                    &mut kernel,
+                    &mut links,
+                    SequencedInput { operation_sequence, operation: op },
+                    Extras::default(),
+                );
+                if let Err(e) = r {
+                    eprintln!("sequencer: recovery fence not applied: {e:?}");
+                }
+            }
+        }
+        if let Some(p) = links.persist.as_ref() {
+            p.public.recovering.store(false, Ordering::Relaxed);
+        }
+    }
     // One request per wake-up, in queue order. A bounded drain (`blocking_recv_many`,
     // N = 4/16/64) was measured in VS-002 and removed: no repeatable effect on throughput
     // or on the rare source's latency (ADR 0005).
@@ -220,23 +297,74 @@ fn run(
             a.released = false;
             retry_pending_disconnects(&mut kernel, &mut links, &ctx);
         }
+        // VS-006: durable progress → watermark (J3); journal-deferred disconnections.
+        if links.persist.is_some() {
+            journal_tick(&mut kernel, &mut links, &ctx);
+        }
     }
     kernel
 }
 
-fn retry_pending_disconnects(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext) {
-    let Some(a) = links.alarms.as_mut() else { return };
-    let mut i = 0;
-    while let Some(&(source_id, link_generation)) = a.pending_disconnects.get(i) {
+/// VS-006: advance the outbox watermark to the durable prefix published by the writer
+/// (never beyond, J3) and retry disconnections the journal refused. Cheap when nothing
+/// changed (two relaxed loads).
+fn journal_tick(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext) {
+    let Some(p) = links.persist.as_ref() else { return };
+    if let Some(up_to) = p.watermark_due(kernel)
+        && let Some(operation_sequence) = kernel.next_operation_sequence()
+    {
+        let op = Operation::AdvanceDurableWatermark { up_to_event_seq: up_to };
+        let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
+        if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+            a.after_apply(kernel, &rc, Origin::Other, &ctx.counters);
+        }
+    }
+    let Some(p) = links.persist.as_mut() else { return };
+    if p.deferred_disconnects.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut p.deferred_disconnects);
+    for (source_id, link_generation) in pending {
         let Some(operation_sequence) = kernel.next_operation_sequence() else { return };
         let op = Operation::SourceDisconnected { source_id, link_generation };
-        let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
-        if matches!(r, Err(scada_core::ApplyError::OutboxCapacityExceeded { .. })) {
+        let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
+        match r {
+            Err(Refused::Journal(_)) => {
+                if let Some(p) = links.persist.as_mut() {
+                    p.deferred_disconnects.push((source_id, link_generation));
+                }
+            }
+            Err(Refused::Core(scada_core::ApplyError::OutboxCapacityExceeded { .. })) => {
+                if let Some(a) = links.alarms.as_mut() {
+                    a.defer_disconnect(source_id, link_generation);
+                }
+            }
+            _ => {}
+        }
+        if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+            a.after_apply(kernel, &rc, Origin::Link, &ctx.counters);
+        }
+    }
+}
+
+fn retry_pending_disconnects(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext) {
+    let mut i = 0;
+    while let Some(&(source_id, link_generation)) = links.alarms.as_ref().and_then(|a| a.pending_disconnects.get(i)) {
+        let Some(operation_sequence) = kernel.next_operation_sequence() else { return };
+        let op = Operation::SourceDisconnected { source_id, link_generation };
+        let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
+        let Some(a) = links.alarms.as_mut() else { return };
+        if matches!(
+            r,
+            Err(Refused::Core(scada_core::ApplyError::OutboxCapacityExceeded { .. })) | Err(Refused::Journal(_))
+        ) {
             i += 1;
         } else {
             a.pending_disconnects.remove(i);
         }
-        a.after_apply(kernel, &r, Origin::Link, &ctx.counters);
+        if let Some(rc) = core_result(&r) {
+            a.after_apply(kernel, &rc, Origin::Link, &ctx.counters);
+        }
     }
 }
 
@@ -253,43 +381,69 @@ fn watchdog_tick(kernel: &mut Kernel, links: &mut Links, w: &WatchdogShared, rai
     if let Some(d) = &ctx.diag {
         d.record_ns(Stage::WatchdogLateness, late_ns);
     }
-    let Some(sup) = links.supervisor.as_mut() else { return };
-    let capture = &mut links.capture;
-    let alarms = &mut links.alarms;
+    let Some(mut sup) = links.supervisor.take() else { return };
     let counters = &ctx.counters;
     let mut apply_one = |k: &mut Kernel, operation: Operation| -> Option<TransitionOutcome> {
         let operation_sequence = k.next_operation_sequence()?;
-        let r = apply(k, capture, None, SequencedInput { operation_sequence, operation });
-        if let Some(a) = alarms.as_mut() {
-            a.after_apply(k, &r, Origin::Supervision, counters);
+        let r = apply(k, links, SequencedInput { operation_sequence, operation }, Extras::default());
+        if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+            a.after_apply(k, &rc, Origin::Supervision, counters);
         }
         match r {
             Ok(o) => Some(o),
             // VS-005: refused for lack of outbox slots: nothing applied, the next tick
             // decides again (the expiry stays pending; never invented). Counted, and the
-            // overload state is reported once on stderr.
-            Err(scada_core::ApplyError::OutboxCapacityExceeded { .. }) => None,
-            Err(e) => {
+            // overload state is reported once on stderr. VS-006: same for a journal
+            // refusal (J4).
+            Err(Refused::Core(scada_core::ApplyError::OutboxCapacityExceeded { .. })) | Err(Refused::Journal(_)) => {
+                None
+            }
+            Err(Refused::Core(e)) => {
                 eprintln!("sequencer: supervision operation rejected: {e}");
                 None
             }
         }
     };
     sup.tick(now, kernel, &mut apply_one, &ctx.counters);
+    links.supervisor = Some(sup);
 }
 
-/// The only place where the sequencer calls `Kernel::apply`. (`_origin` is only a
-/// readability hint at the call sites; the VS-005 bookkeeping is done by the callers.)
+/// The only place where the sequencer calls `Kernel::apply` (the VS-005 bookkeeping is
+/// done by the callers). VS-006: with persistence, journal room is reserved **before**
+/// `apply` (J4), the time envelope is sampled once, and every applied operation (zero
+/// events included) is handed to the writer; a refusal changes nothing.
 fn apply(
     kernel: &mut Kernel,
-    capture: &mut Option<CaptureWriter>,
-    _origin: Option<Origin>,
+    links: &mut Links,
     input: SequencedInput,
-) -> Result<TransitionOutcome, scada_core::ApplyError> {
-    if let Some(c) = capture {
+    x: Extras,
+) -> Result<TransitionOutcome, Refused> {
+    let Some(p) = links.persist.as_mut() else {
+        if let Some(c) = &mut links.capture {
+            c.record(&input);
+        }
+        return kernel.apply(input).map_err(Refused::Core);
+    };
+    fault::hit("before_apply");
+    let internal = matches!(input.operation, Operation::AdvanceDurableWatermark { .. });
+    let est = p.estimate(kernel, &input.operation, &x);
+    let res = p.admit(est, internal).map_err(Refused::Journal)?;
+    if let Some(c) = &mut links.capture {
         c.record(&input);
     }
-    kernel.apply(input)
+    let (env, anomaly) = p.time.sample();
+    let ev_before = kernel.outbox_status().map_or(1, |s| s.next_event_seq);
+    match kernel.apply_ref(&input) {
+        Ok(o @ TransitionOutcome::Applied { kind, .. }) => {
+            p.time.accept(&env, anomaly.as_ref());
+            p.record(kernel, input, &kind, env, anomaly, ev_before, res, x);
+            Ok(o)
+        }
+        other => {
+            p.cancel(res);
+            other.map_err(Refused::Core)
+        }
+    }
 }
 
 fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerContext) {
@@ -299,15 +453,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
     }
     match req {
         Request::Connect { source_id, source_epoch, reply, superseded, heartbeats } => {
-            let r = connect(
-                kernel,
-                &mut links.capture,
-                &mut links.next_generation,
-                source_id,
-                source_epoch,
-                links.alarms.as_mut(),
-                &ctx.counters,
-            );
+            let r = connect(kernel, links, source_id, source_epoch, &ctx.counters);
             if let ConnectReply::Welcome { link_generation, .. } = r
                 && let Some(i) = kernel.config().source_index(source_id)
             {
@@ -337,9 +483,20 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 return;
             };
             let op = Operation::SourceDisconnected { source_id, link_generation };
-            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
+            let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
             match &r {
-                Err(scada_core::ApplyError::OutboxCapacityExceeded { required, free }) => {
+                Err(Refused::Journal(why)) => {
+                    // VS-006: deferred like an outbox refusal; retried after durable progress.
+                    eprintln!(
+                        "sequencer: disconnect of source {source_id} gen {link_generation} deferred: {}",
+                        why.name()
+                    );
+                    if let Some(p) = links.persist.as_mut() {
+                        p.deferred_disconnects.retain(|&(s, g)| s != source_id || g > link_generation);
+                        p.deferred_disconnects.push((source_id, link_generation));
+                    }
+                }
+                Err(Refused::Core(scada_core::ApplyError::OutboxCapacityExceeded { required, free })) => {
                     // VS-005: not applied (atomicity); the link stays Connected in the kernel
                     // and its tags keep their quality until slots are released. Retried
                     // then; reported as CRITICAL meanwhile.
@@ -350,14 +507,28 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                         a.defer_disconnect(source_id, link_generation);
                     }
                 }
-                Err(e) => eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}"),
+                Err(Refused::Core(e)) => {
+                    eprintln!("sequencer: disconnect of source {source_id} gen {link_generation} rejected: {e}")
+                }
                 Ok(_) => {}
             }
-            if let Some(a) = links.alarms.as_mut() {
-                a.after_apply(kernel, &r, Origin::Link, &ctx.counters);
+            if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+                a.after_apply(kernel, &rc, Origin::Link, &ctx.counters);
             }
         }
-        Request::Batch { batch, reply, submitted, permits } => {
+        Request::JournalWake => {
+            if let Some(p) = links.persist.as_ref() {
+                p.wake_queued.store(false, Ordering::Relaxed);
+            }
+        }
+        Request::Batch { batch, reply, submitted, permits, ext } => {
+            let (times, received_at, durable) = match ext {
+                Some(e) => {
+                    let BatchExt { times, received_at, durable } = *e;
+                    (times, Some(received_at), durable)
+                }
+                None => (None, None, false),
+            };
             let d = ctx.diag.as_deref();
             let probe = d.is_some_and(|d| d.is_probe(batch.source_id.0));
             if let (Some(d), Some(t)) = (d, submitted) {
@@ -367,13 +538,19 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 }
             }
             let t0 = diag::now(d);
-            let mut r = apply_batch(kernel, &mut links.capture, batch, &ctx.counters, links.alarms.as_mut());
+            let x = Extras { source_times: times, received_at, action: None, hold: durable };
+            let source_id = batch.source_id;
+            let mut r = apply_batch(kernel, links, batch, &ctx.counters, x);
             if let (Some(d), Some(t0)) = (d, t0) {
                 d.since(Stage::Apply, t0);
                 r.sent = Some(Instant::now());
             }
-            // ACK only after `apply` returned; if the session is gone the ACK is moot.
-            let _ = reply.send(r);
+            if durable {
+                durable_batch_reply(kernel, links, source_id, r, reply);
+            } else {
+                // ACK only after `apply` returned; if the session is gone the ACK is moot.
+                let _ = reply.send(r);
+            }
             drop(permits); // VS-003: the batch is applied, its admission slots are free
         }
         Request::Introspect { include_tags, reset_diagnostics, reply } => {
@@ -381,7 +558,7 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             if let Some(c) = &mut links.capture {
                 c.flush();
             }
-            let _ = reply.send(introspect(kernel, include_tags, ctx, links.alarms.as_ref()));
+            let _ = reply.send(introspect(kernel, include_tags, ctx, links.alarms.as_ref(), links.persist.as_ref()));
             if reset_diagnostics && let Some(d) = &ctx.diag {
                 d.reset();
             }
@@ -391,64 +568,67 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
                 w.woken();
             }
         }
-        Request::Alarm { call, reply } => {
-            let r = alarm_call(kernel, links, call, ctx);
-            let _ = reply.send(r);
-        }
+        Request::Alarm { call, reply } => alarm_call(kernel, links, call, ctx, reply),
     }
     if !ctx.throttle.is_zero() {
         thread::sleep(ctx.throttle);
     }
 }
 
-/// VS-005: one control-plane request, at the current position of the sequence.
-fn alarm_call(kernel: &mut Kernel, links: &mut Links, call: AlarmCall, ctx: &SequencerContext) -> AlarmReply {
-    let Some(a) = links.alarms.as_mut() else { return AlarmReply::Unsupported("alarms are not configured") };
+/// VS-005: one control-plane request, at the current position of the sequence. The reply
+/// is sent here, or later by the journal writer for a durable acknowledgement (VS-006).
+fn alarm_call(
+    kernel: &mut Kernel,
+    links: &mut Links,
+    call: AlarmCall,
+    ctx: &SequencerContext,
+    reply: oneshot::Sender<AlarmReply>,
+) {
+    if links.alarms.is_none() {
+        let _ = reply.send(AlarmReply::Unsupported("alarms are not configured"));
+        return;
+    }
     let page = |limit: u32| {
         let max = ctx.alarm_page_max as usize;
         if limit == 0 { max } else { (limit as usize).min(max) }
     };
-    match call {
+    let r = match call {
         AlarmCall::Snapshot { after, limit, expected_change, mut buf } => {
             let current = kernel.outbox_status().map_or(0, |s| s.last_alarm_change_operation);
             let operation_sequence = kernel.last_operation_sequence();
             if expected_change != 0 && expected_change != current {
                 buf.clear();
-                return AlarmReply::Snapshot { page: Err(current), buf, operation_sequence };
-            }
-            match kernel.alarm_snapshot_page(after, page(limit), &mut buf) {
-                Some(p) => AlarmReply::Snapshot { page: Ok(p), buf, operation_sequence },
-                None => AlarmReply::Unsupported("alarms are not configured"),
+                AlarmReply::Snapshot { page: Err(current), buf, operation_sequence }
+            } else {
+                match kernel.alarm_snapshot_page(after, page(limit), &mut buf) {
+                    Some(p) => AlarmReply::Snapshot { page: Ok(p), buf, operation_sequence },
+                    None => AlarmReply::Unsupported("alarms are not configured"),
+                }
             }
         }
         AlarmCall::Events { after, limit, mut buf } => match kernel.read_alarm_events(after, page(limit), &mut buf) {
             Some(p) => AlarmReply::Events { page: p, buf },
             None => AlarmReply::Unsupported("alarms are not configured"),
         },
-        AlarmCall::Ack { alarm_id, token, actor_uid } => {
-            let Some(operation_sequence) = kernel.next_operation_sequence() else {
-                return AlarmReply::Ack(crate::alarms::AckOutcome::SequenceExhausted);
-            };
-            let op = Operation::AlarmAcknowledge { alarm_id, expected_activation_token: token, actor_uid };
-            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
-            a.after_apply(kernel, &r, Origin::Ack, &ctx.counters);
-            let o = crate::alarms::ack_outcome(&r);
-            if matches!(o, crate::alarms::AckOutcome::Applied { .. }) {
-                Counters::inc(&ctx.counters.alarm_acks_applied);
-            }
-            AlarmReply::Ack(o)
+        AlarmCall::Ack { alarm_id, token, actor_uid, action_id, note, require_durable } => {
+            let a = AckArgs { alarm_id, token, actor_uid, action_id, note, require_durable };
+            ack(kernel, links, ctx, a, reply);
+            return;
         }
         AlarmCall::Capacity => {
             let Some(outbox) = kernel.outbox_status() else {
-                return AlarmReply::Unsupported("alarms are not configured");
+                let _ = reply.send(AlarmReply::Unsupported("alarms are not configured"));
+                return;
             };
             let c = &ctx.counters;
             let ld = |x: &AtomicU64| x.load(Ordering::Relaxed);
             let t = kernel.config().alarm_table();
+            let Some(a) = links.alarms.as_ref() else { return };
             AlarmReply::Capacity(CapacityReport {
                 outbox,
                 overload: a.overload(&outbox),
                 simulated_sink: a.simulated_sink,
+                journal: links.persist.as_ref().map(|p| p.durable),
                 rejected_batches: ld(&c.outbox_rejected_batches),
                 rejected_link: ld(&c.outbox_rejected_link),
                 rejected_supervision: ld(&c.outbox_rejected_supervision),
@@ -462,17 +642,21 @@ fn alarm_call(kernel: &mut Kernel, links: &mut Links, call: AlarmCall, ctx: &Seq
             })
         }
         AlarmCall::SimulatedDurableCommit { up_to } => {
-            if !a.simulated_sink {
-                return AlarmReply::Unsupported(
-                    "no durable sink in VS-005; the simulated sink exists only with --test-simulated-durable-sink",
-                );
+            if !links.alarms.as_ref().is_some_and(|a| a.simulated_sink) {
+                let _ = reply.send(AlarmReply::Unsupported(
+                    "no simulated sink; it exists only with --test-simulated-durable-sink (never with [persistence])",
+                ));
+                return;
             }
             let Some(operation_sequence) = kernel.next_operation_sequence() else {
-                return AlarmReply::Watermark(Err("operation sequence exhausted".into()));
+                let _ = reply.send(AlarmReply::Watermark(Err("operation sequence exhausted".into())));
+                return;
             };
             let op = Operation::AdvanceDurableWatermark { up_to_event_seq: up_to };
-            let r = apply(kernel, &mut links.capture, None, SequencedInput { operation_sequence, operation: op });
-            a.after_apply(kernel, &r, Origin::Other, &ctx.counters);
+            let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
+            if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+                a.after_apply(kernel, &rc, Origin::Other, &ctx.counters);
+            }
             let wm = kernel.outbox_status().map_or(0, |s| s.durable_watermark);
             match r {
                 Ok(TransitionOutcome::Applied {
@@ -480,54 +664,202 @@ fn alarm_call(kernel: &mut Kernel, links: &mut Links, call: AlarmCall, ctx: &Seq
                     kind: AppliedKind::DurableWatermarkAdvanced { released, .. },
                 }) => AlarmReply::Watermark(Ok((wm, released, Some(operation_sequence)))),
                 Ok(_) => AlarmReply::Watermark(Ok((wm, 0, None))),
-                Err(e) => AlarmReply::Watermark(Err(e.to_string())),
+                Err(Refused::Core(e)) => AlarmReply::Watermark(Err(e.to_string())),
+                Err(Refused::Journal(j)) => AlarmReply::Watermark(Err(j.name().into())),
             }
+        }
+    };
+    let _ = reply.send(r);
+}
+
+/// Arguments of an acknowledgement.
+struct AckArgs {
+    alarm_id: scada_core::AlarmId,
+    token: u64,
+    actor_uid: u32,
+    action_id: Option<[u8; 16]>,
+    note: String,
+    require_durable: bool,
+}
+
+/// A receipt that answers the control session once the commit is known.
+fn ack_receipt(
+    reply: oneshot::Sender<AlarmReply>,
+    operation_sequence: u64,
+    event_seq: u64,
+    deduplicated: bool,
+) -> scada_journal::Receipt {
+    Box::new(move |c| {
+        let _ = reply.send(AlarmReply::Ack(match c {
+            CommitResult::Durable => AckOutcome::Applied { operation_sequence, event_seq, durable: true, deduplicated },
+            CommitResult::NotDurable => AckOutcome::NotDurable { operation_sequence, event_seq },
+        }));
+    })
+}
+
+/// VS-005 acknowledgement, VS-006 idempotency key and durable outcome (ADR 0013 D11).
+/// Answers `reply` now, or from the journal writer once the operation is durable.
+fn ack(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext, a: AckArgs, reply: oneshot::Sender<AlarmReply>) {
+    let AckArgs { alarm_id, token, actor_uid, action_id, note, require_durable } = a;
+    let now = |reply: oneshot::Sender<AlarmReply>, o: AckOutcome| {
+        let _ = reply.send(AlarmReply::Ack(o));
+    };
+    let durable_store = links.persist.as_ref().is_some_and(|p| p.durable);
+    if require_durable && !durable_store {
+        return now(reply, AckOutcome::DurabilityUnavailable);
+    }
+    // Retry of a known action id: same outcome, no new event.
+    if let (Some(id), Some(p)) = (action_id, links.persist.as_ref())
+        && let Some((conflict, c)) = p.conflict(&id, alarm_id, token)
+    {
+        if conflict {
+            return now(reply, AckOutcome::ActionIdConflict);
+        }
+        let (op, ev) = (c.operation_seq, c.event_seq.unwrap_or(0));
+        let durable_now = durable_store && p.shared.durable_op.load(Ordering::Acquire) >= op;
+        if durable_now || !require_durable {
+            return now(
+                reply,
+                AckOutcome::Applied { operation_sequence: op, event_seq: ev, durable: durable_now, deduplicated: true },
+            );
+        }
+        if let Err((j, _)) = p.notify(op, ack_receipt(reply, op, ev, true)) {
+            // The receipt (and its reply sender) was dropped: the session sees the
+            // channel closed. Count it; the client retries with the same action id.
+            eprintln!("sequencer: durable ACK retry not queued: {}", j.name());
+        }
+        return;
+    }
+    let Some(operation_sequence) = kernel.next_operation_sequence() else {
+        return now(reply, AckOutcome::SequenceExhausted);
+    };
+    let op = Operation::AlarmAcknowledge { alarm_id, expected_activation_token: token, actor_uid };
+    let x = Extras {
+        action: action_id.map(|id| OperatorAction {
+            action_id: id,
+            alarm_id: alarm_id.0,
+            requested_token: token,
+            actor_uid,
+            note,
+            outcome: 0,
+            event_seq: None,
+            occurrence_id: 0,
+        }),
+        hold: require_durable,
+        ..Extras::default()
+    };
+    let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, x);
+    if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+        a.after_apply(kernel, &rc, Origin::Ack, &ctx.counters);
+    }
+    let o = match &r {
+        Err(Refused::Journal(j)) => AckOutcome::JournalUnavailable(*j),
+        Ok(o) => crate::alarms::ack_outcome(&Ok(*o)),
+        Err(Refused::Core(e)) => crate::alarms::ack_outcome(&Err(*e)),
+    };
+    if let AckOutcome::Applied { operation_sequence, event_seq, .. } = o {
+        Counters::inc(&ctx.counters.alarm_acks_applied);
+        if require_durable && let Some(p) = links.persist.as_mut() {
+            p.release_held(Some(ack_receipt(reply, operation_sequence, event_seq, false)));
+            return;
+        }
+    } else if let Some(p) = links.persist.as_mut() {
+        p.release_held(None);
+    }
+    now(reply, o)
+}
+
+/// VS-006: reply to a batch of a link that negotiated durable receipts.
+fn durable_batch_reply(
+    kernel: &Kernel,
+    links: &mut Links,
+    source_id: SourceId,
+    r: BatchReply,
+    reply: oneshot::Sender<BatchReply>,
+) {
+    let Some(p) = links.persist.as_mut() else {
+        let _ = reply.send(r);
+        return;
+    };
+    match r.status {
+        AckStatus::AppliedVolatile => {
+            let mut r = r;
+            p.release_held(Some(Box::new(move |c| {
+                r.status = match c {
+                    CommitResult::Durable => AckStatus::AppliedDurable,
+                    CommitResult::NotDurable => AckStatus::AppliedNotDurable,
+                };
+                let _ = reply.send(r);
+            })));
+        }
+        AckStatus::Duplicate => {
+            p.release_held(None);
+            // The original may still be in flight: confirm the duplicate once the operation
+            // that accepted it is durable.
+            let target = kernel.source_status(source_id).map_or(0, |s| s.last_batch_operation);
+            let mut d = r;
+            let res = p.notify(
+                target,
+                Box::new(move |c| {
+                    if c == CommitResult::NotDurable {
+                        d.status = AckStatus::Rejected;
+                        d.error_code = ErrorCode::JournalFault;
+                    }
+                    let _ = reply.send(d);
+                }),
+            );
+            if let Err((_, receipt)) = res {
+                receipt(CommitResult::NotDurable);
+            }
+        }
+        _ => {
+            p.release_held(None);
+            let _ = reply.send(r);
         }
     }
 }
 
 fn connect(
     kernel: &mut Kernel,
-    capture: &mut Option<CaptureWriter>,
-    next_generation: &mut u64,
+    links: &mut Links,
     source_id: SourceId,
     source_epoch: u64,
-    alarms: Option<&mut AlarmRuntime>,
     counters: &Counters,
 ) -> ConnectReply {
     let Some(operation_sequence) = kernel.next_operation_sequence() else {
         return ConnectReply::Rejected(ErrorCode::OperationSequenceExhausted);
     };
-    let Some(link_generation) = next_generation.checked_add(1) else {
+    let Some(link_generation) = links.next_generation.checked_add(1) else {
         return ConnectReply::Rejected(ErrorCode::Internal);
     };
     let op = Operation::SourceConnected { source_id, link_generation, source_epoch };
-    let r = apply(kernel, capture, None, SequencedInput { operation_sequence, operation: op });
-    if let Some(a) = alarms {
-        a.after_apply(kernel, &r, Origin::Link, counters);
+    let r = apply(kernel, links, SequencedInput { operation_sequence, operation: op }, Extras::default());
+    if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&r)) {
+        a.after_apply(kernel, &rc, Origin::Link, counters);
     }
     match r {
         Ok(TransitionOutcome::Applied {
             kind: AppliedKind::Connected { full_state_required, last_accepted_source_sequence, .. },
             ..
         }) => {
-            *next_generation = link_generation;
+            links.next_generation = link_generation;
             ConnectReply::Welcome { link_generation, full_state_required, last_accepted: last_accepted_source_sequence }
         }
         Ok(other) => {
             eprintln!("sequencer: unexpected connect outcome {other:?}");
             ConnectReply::Rejected(ErrorCode::Internal)
         }
-        Err(e) => ConnectReply::Rejected(convert::error_code(&e)),
+        Err(Refused::Core(e)) => ConnectReply::Rejected(convert::error_code(&e)),
+        Err(Refused::Journal(j)) => ConnectReply::Rejected(j.driver_code()),
     }
 }
 
 fn apply_batch(
     kernel: &mut Kernel,
-    capture: &mut Option<CaptureWriter>,
+    links: &mut Links,
     batch: ObservationBatch,
     counters: &Counters,
-    alarms: Option<&mut AlarmRuntime>,
+    x: Extras,
 ) -> BatchReply {
     let source_id = batch.source_id;
     let last = |k: &Kernel| k.source_status(source_id).and_then(|s| s.last_accepted_source_sequence);
@@ -542,14 +874,10 @@ fn apply_batch(
             sent: None,
         };
     };
-    let outcome = apply(
-        kernel,
-        capture,
-        None,
-        SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) },
-    );
-    if let Some(a) = alarms {
-        a.after_apply(kernel, &outcome, Origin::Batch, counters);
+    let outcome =
+        apply(kernel, links, SequencedInput { operation_sequence, operation: Operation::ObservationBatch(batch) }, x);
+    if let (Some(a), Some(rc)) = (links.alarms.as_mut(), core_result(&outcome)) {
+        a.after_apply(kernel, &rc, Origin::Batch, counters);
     }
     match outcome {
         Ok(TransitionOutcome::Applied { operation_sequence, kind }) => {
@@ -594,7 +922,10 @@ fn apply_batch(
             BatchReply {
                 status: AckStatus::Rejected,
                 operation_sequence: None,
-                error_code: convert::error_code(&e),
+                error_code: match e {
+                    Refused::Core(e) => convert::error_code(&e),
+                    Refused::Journal(j) => j.driver_code(),
+                },
                 continuity: None,
                 last_accepted: last(kernel),
                 sent: None,
@@ -608,6 +939,7 @@ fn introspect(
     include_tags: bool,
     ctx: &SequencerContext,
     alarms: Option<&AlarmRuntime>,
+    persist: Option<&Persist>,
 ) -> ipb::IntrospectResponse {
     let snap = kernel.logical_snapshot();
     let c = &ctx.counters;
@@ -635,6 +967,9 @@ fn introspect(
                         }
                         Quality::Uncertain(UncertainReason::SourceSilent) => ipb::Quality::UncertainSourceSilent,
                         Quality::Uncertain(UncertainReason::StaleData) => ipb::Quality::UncertainStaleData,
+                        Quality::Uncertain(UncertainReason::RecoveredUnverified) => {
+                            ipb::Quality::UncertainRecoveredUnverified
+                        }
                     } as i32,
                     revision: t.revision,
                     last_observed_operation: t.last_observed_operation,
@@ -667,6 +1002,7 @@ fn introspect(
                     liveness: liveness as i32,
                     last_batch_operation: s.last_batch_operation,
                     freshness_supervised: s.supervision.freshness,
+                    unverified: s.unverified,
                 }
             })
             .collect(),
@@ -738,5 +1074,21 @@ fn introspect(
             }),
             _ => None,
         },
+        persistence: persist.map(|p| {
+            let sh = &p.shared;
+            ipb::PersistenceSummary {
+                timeline_id: p.timeline_id.to_vec(),
+                boot_generation: p.boot_generation,
+                durable_operation_sequence: sh.durable_op.load(Ordering::Acquire),
+                durable_event_sequence: sh.durable_event.load(Ordering::Acquire),
+                backlog_operations: sh.reserved_ops.load(Ordering::Relaxed),
+                journal_state: sh.state() as u32,
+                refused_queue_full: ld(&sh.refused_queue_full),
+                refused_disk_full: ld(&sh.refused_disk_full),
+                refused_fault: ld(&sh.refused_fault),
+                recovered_operation_sequence: p.recovered_op,
+                checkpoints_written: ld(&sh.checkpoints_written),
+            }
+        }),
     }
 }

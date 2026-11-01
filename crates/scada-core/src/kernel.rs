@@ -3,13 +3,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::alarm::{AlarmEngine, AlarmEvent, AlarmView, EventPage, OutboxStatus, SnapshotPage};
+use crate::alarm::{AlarmEngine, AlarmEvent, AlarmView, EventPage, OutboxStatus, RestoreError, SnapshotPage};
 use crate::config::ValidatedConfig;
 use crate::digest::CanonicalHasher;
 use crate::types::{
     AlarmId, BatchMode, ChannelId, Continuity, Quality, SourceId, Supervision, TagId, UncertainReason, Value, ValueType,
 };
-use crate::{STATE_DIGEST_VERSION, STATE_DIGEST_VERSION_ALARMS, STATE_DIGEST_VERSION_SUPERVISED};
+use crate::{
+    STATE_DIGEST_VERSION, STATE_DIGEST_VERSION_ALARMS, STATE_DIGEST_VERSION_RECOVERABLE,
+    STATE_DIGEST_VERSION_SUPERVISED,
+};
 
 /// One observation of a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +83,17 @@ pub enum Operation {
     AdvanceDurableWatermark {
         up_to_event_seq: u64,
     },
+    /// VS-006 (ADR 0013 D9): boundary between the durable state restored after a restart
+    /// and the new boot. Only a recoverable kernel accepts it. Atomically: every connected
+    /// link becomes disconnected (no link of an earlier boot survives), every source that
+    /// ever connected becomes *unverified* (it needs a `FullState`), every tag with a value
+    /// becomes `Uncertain(RecoveredUnverified)` (value kept as last known) and every rule
+    /// of those tags loses `input_valid` **without any condition evaluation and without
+    /// any event** (a restore is not a measurement). `boot_generation` is the persistent
+    /// boot counter of the runtime (> 0).
+    RecoveryFence {
+        boot_generation: u64,
+    },
 }
 
 /// An operation with the applied-transition number proposed by the external sequencer.
@@ -107,6 +121,9 @@ pub enum AppliedKind {
     Batch {
         continuity: Continuity,
         changed_tags: u32,
+        /// VS-006: this `FullState` verified a source that was unverified after a
+        /// recovery fence (its events are observations of reconciliation).
+        reconciled: bool,
     },
     /// VS-004.
     SilenceExpired {
@@ -127,6 +144,17 @@ pub enum AppliedKind {
     DurableWatermarkAdvanced {
         up_to_event_seq: u64,
         released: u64,
+    },
+    /// VS-006: recovery fence applied.
+    RecoveryFenced {
+        /// Links of an earlier boot closed.
+        links_closed: u32,
+        /// Sources now unverified.
+        unverified_sources: u32,
+        /// Tags moved to `Uncertain(RecoveredUnverified)`.
+        tags: u32,
+        /// Rules whose `input_valid` was cleared (no event).
+        rules: u32,
     },
 }
 
@@ -255,6 +283,9 @@ pub enum ApplyError {
         current: u64,
         got: u64,
     },
+    /// VS-006: `RecoveryFence` on a kernel that was not built recoverable, or with
+    /// `boot_generation == 0`.
+    RecoveryNotEnabled,
 }
 
 impl fmt::Display for ApplyError {
@@ -293,6 +324,9 @@ pub struct SourceStatus {
     /// VS-004: operation sequence of the last applied batch of the source (0 = none;
     /// maintained only for a supervised source).
     pub last_batch_operation: u64,
+    /// VS-006: restored after a recovery fence and not yet verified by a `FullState`
+    /// (always false outside a recoverable kernel).
+    pub unverified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +376,9 @@ struct SourceRuntime {
     /// state: a function of the qualities and markers already in the snapshot and digest.
     fresh_head: u32,
     fresh_tail: u32,
+    /// VS-006 (recoverable kernels only): restored and not verified since the last
+    /// recovery fence; a `FullState` is required and clears it.
+    unverified: bool,
 }
 
 /// Remove member `t` from its source's freshness list.
@@ -407,6 +444,8 @@ pub struct SourceSnapshot {
     pub silent: bool,
     /// VS-004: operation sequence of the last applied batch (0 = none or unsupervised).
     pub last_batch_operation: u64,
+    /// VS-006: unverified since the last recovery fence.
+    pub unverified: bool,
 }
 
 /// Last accepted batch of a source in canonical form (sorted by `TagId`).
@@ -448,6 +487,10 @@ pub struct Kernel {
     /// VS-005: alarm states and outbox; `None` without `[alarms]` (one branch per
     /// transition on the default path).
     alarms: Option<Box<AlarmEngine>>,
+    /// VS-006: built by the persistent runtime (accepts `RecoveryFence`, digest v4).
+    recoverable: bool,
+    /// VS-006: `boot_generation` of the last applied recovery fence (0 = none).
+    fence_boot_generation: u64,
 }
 
 impl Kernel {
@@ -477,11 +520,35 @@ impl Kernel {
                 last_batch_op: 0,
                 fresh_head: NIL,
                 fresh_tail: NIL,
+                unverified: false,
             })
             .collect();
         let staging = Vec::with_capacity(config.limits().max_observations_per_batch as usize);
         let alarms = config.alarm_table().map(|t| Box::new(AlarmEngine::new(t)));
-        Kernel { config, last_operation_sequence: 0, sources, cells, staging, alarms }
+        Kernel {
+            config,
+            last_operation_sequence: 0,
+            sources,
+            cells,
+            staging,
+            alarms,
+            recoverable: false,
+            fence_boot_generation: 0,
+        }
+    }
+
+    /// VS-006 (ADR 0013): a kernel of the persistent runtime. Identical to [`Kernel::new`]
+    /// except that it accepts [`Operation::RecoveryFence`] and digests with encoding v4
+    /// (the base encoding plus the recovery section).
+    pub fn new_recoverable(config: Arc<ValidatedConfig>) -> Kernel {
+        let mut k = Kernel::new(config);
+        k.recoverable = true;
+        k
+    }
+
+    /// VS-006: whether this kernel was built by the persistent runtime.
+    pub fn is_recoverable(&self) -> bool {
+        self.recoverable
     }
 
     /// Conservative upper bound, in bytes, of the heap the kernel state allocates for
@@ -529,6 +596,7 @@ impl Kernel {
             last_accepted_source_sequence: s.last_accepted,
             silent: s.silent,
             last_batch_operation: s.last_batch_op,
+            unverified: s.unverified,
         })
     }
 
@@ -536,33 +604,40 @@ impl Kernel {
     ///
     /// Validation is completed before any mutation; on `Err` the state is unchanged.
     pub fn apply(&mut self, input: SequencedInput) -> Result<TransitionOutcome, ApplyError> {
+        self.apply_ref(&input)
+    }
+
+    /// Same as [`Self::apply`], borrowing the input (VS-006: the runtime keeps the
+    /// operation for the journal record without cloning it).
+    pub fn apply_ref(&mut self, input: &SequencedInput) -> Result<TransitionOutcome, ApplyError> {
         let expected = self.last_operation_sequence.checked_add(1).ok_or(ApplyError::OperationSequenceExhausted)?;
         if input.operation_sequence != expected {
             return Err(ApplyError::OperationSequenceMismatch { expected, got: input.operation_sequence });
         }
-        let outcome = match input.operation {
+        let outcome = match &input.operation {
             Operation::SourceConnected { source_id, link_generation, source_epoch } => {
-                self.connect(source_id, link_generation, source_epoch, expected)?
+                self.connect(*source_id, *link_generation, *source_epoch, expected)?
             }
             Operation::SourceDisconnected { source_id, link_generation } => {
-                self.disconnect(source_id, link_generation, expected)?
+                self.disconnect(*source_id, *link_generation, expected)?
             }
-            Operation::ObservationBatch(batch) => self.batch(&batch, expected)?,
+            Operation::ObservationBatch(batch) => self.batch(batch, expected)?,
             Operation::SourceSilenceExpired { source_id, link_generation } => {
-                self.silence(source_id, link_generation, expected)?
+                self.silence(*source_id, *link_generation, expected)?
             }
             Operation::SourceLivenessRestored { source_id, link_generation } => {
-                self.restore(source_id, link_generation, expected)?
+                self.restore(*source_id, *link_generation, expected)?
             }
             Operation::FreshnessExpired { source_id, link_generation, observed_up_to } => {
-                self.freshness(source_id, link_generation, observed_up_to, expected)?
+                self.freshness(*source_id, *link_generation, *observed_up_to, expected)?
             }
             Operation::AlarmAcknowledge { alarm_id, expected_activation_token, actor_uid } => {
-                self.acknowledge(alarm_id, expected_activation_token, actor_uid, expected)?
+                self.acknowledge(*alarm_id, *expected_activation_token, *actor_uid, expected)?
             }
             Operation::AdvanceDurableWatermark { up_to_event_seq } => {
-                self.advance_watermark(up_to_event_seq, expected)?
+                self.advance_watermark(*up_to_event_seq, expected)?
             }
+            Operation::RecoveryFence { boot_generation } => self.fence(*boot_generation, expected)?,
         };
         if let TransitionOutcome::Applied { .. } = outcome {
             self.last_operation_sequence = expected;
@@ -676,7 +751,8 @@ impl Kernel {
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
             kind: AppliedKind::Connected {
-                full_state_required: rt.last_accepted.is_none(),
+                // VS-006: an unverified source must send a FullState even within its epoch.
+                full_state_required: rt.last_accepted.is_none() || rt.unverified,
                 last_accepted_source_sequence: rt.last_accepted,
                 degraded_tags: degraded,
             },
@@ -758,6 +834,13 @@ impl Kernel {
         if b.mode == BatchMode::FullState && self.staging.len() != meta.channel_count() {
             return Err(ApplyError::IncompleteFullState { expected: meta.channel_count(), got: self.staging.len() });
         }
+
+        // VS-006: a source restored after a recovery fence is verified only by a FullState
+        // (a delta would leave the other tags unverified and prove nothing about them).
+        if rt.unverified && b.mode == BatchMode::Delta {
+            return Err(ApplyError::ResyncRequired);
+        }
+        let reconciled = rt.unverified;
 
         // 5. Sequence rules.
         let seq = b.source_sequence;
@@ -897,6 +980,8 @@ impl Kernel {
             }
             rt.last_accepted = Some(seq);
             rt.continuity = Some(continuity);
+            // A FullState observed every tag of the source: it is verified (VS-006).
+            rt.unverified = false;
             rt.last_batch.present = true;
             rt.last_batch.mode = b.mode;
             rt.last_batch.source_sequence = seq;
@@ -907,7 +992,7 @@ impl Kernel {
         self.alarm_commit(op);
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
-            kind: AppliedKind::Batch { continuity, changed_tags: changed },
+            kind: AppliedKind::Batch { continuity, changed_tags: changed, reconciled },
         })
     }
 
@@ -1075,6 +1160,62 @@ impl Kernel {
         }
     }
 
+    /// VS-006 (ADR 0013 D9): recovery fence. Validation (revision overflow of every tag
+    /// that would change) precedes any mutation; the mutation itself is infallible.
+    fn fence(&mut self, boot_generation: u64, op: u64) -> Result<TransitionOutcome, ApplyError> {
+        if !self.recoverable || boot_generation == 0 {
+            return Err(ApplyError::RecoveryNotEnabled);
+        }
+        const R: UncertainReason = UncertainReason::RecoveredUnverified;
+        for (t, cell) in self.cells.iter().enumerate() {
+            if degrades(cell, R) && cell.revision == u64::MAX {
+                let tag_id = self.config.tags().get(t).map_or(TagId(0), |m| m.tag_id);
+                return Err(ApplyError::RevisionOverflow(tag_id));
+            }
+        }
+        // Validation complete: mutate.
+        let mut tags: u32 = 0;
+        for cell in &mut self.cells {
+            if degrades(cell, R) {
+                cell.quality = Quality::Uncertain(R);
+                cell.revision = cell.revision.saturating_add(1);
+                tags = tags.saturating_add(1);
+            }
+            // No tag is Good any more: every freshness list is empty.
+            cell.prev = NIL;
+            cell.next = NIL;
+        }
+        let (mut links_closed, mut unverified) = (0u32, 0u32);
+        for rt in &mut self.sources {
+            if let LinkState::Connected { generation } = rt.link {
+                rt.link = LinkState::Disconnected { generation };
+                links_closed = links_closed.saturating_add(1);
+            }
+            rt.silent = false;
+            rt.fresh_head = NIL;
+            rt.fresh_tail = NIL;
+            if rt.epoch.is_some() {
+                rt.unverified = true;
+                unverified = unverified.saturating_add(1);
+            }
+        }
+        let mut rules = 0u32;
+        if let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), self.config.alarm_table()) {
+            let cells = &self.cells;
+            rules = eng.fence(table, |t| cells.get(t as usize).is_some_and(|c| c.quality == Quality::Uncertain(R)), op);
+        }
+        self.fence_boot_generation = boot_generation;
+        Ok(TransitionOutcome::Applied {
+            operation_sequence: op,
+            kind: AppliedKind::RecoveryFenced { links_closed, unverified_sources: unverified, tags, rules },
+        })
+    }
+
+    /// VS-006: `boot_generation` of the last applied recovery fence (0 = none).
+    pub fn fence_boot_generation(&self) -> u64 {
+        self.fence_boot_generation
+    }
+
     /// VS-005: whether alarms are configured.
     pub fn alarms_enabled(&self) -> bool {
         self.alarms.is_some()
@@ -1144,8 +1285,13 @@ impl Kernel {
     }
 
     /// Version of the encoding [`Self::state_digest`] uses: 1 (VS-003 encoding) unless at
-    /// least one source is supervised, then 2.
+    /// least one source is supervised, then 2; 3 with alarms; 4 for a recoverable kernel
+    /// (VS-006: the base encoding, preceded by its version, plus the recovery section).
     pub fn state_digest_version(&self) -> u16 {
+        if self.recoverable { STATE_DIGEST_VERSION_RECOVERABLE } else { self.base_digest_version() }
+    }
+
+    fn base_digest_version(&self) -> u16 {
         if self.alarms.is_some() {
             STATE_DIGEST_VERSION_ALARMS
         } else if self.config.any_supervision() {
@@ -1181,6 +1327,7 @@ impl Kernel {
                     supervision: m.supervision,
                     silent: r.silent,
                     last_batch_operation: r.last_batch_op,
+                    unverified: r.unverified,
                 })
                 .collect(),
             tags: tags
@@ -1228,6 +1375,10 @@ impl Kernel {
         // v3 (alarms) carries every v2 field, then the alarm section.
         let v2 = self.config.any_supervision() || self.alarms.is_some();
         let mut h = CanonicalHasher::new(b"scada.kernel.state", self.state_digest_version());
+        if self.recoverable {
+            // v4: the base version selects the field list below.
+            h.u32(u32::from(self.base_digest_version()));
+        }
         h.raw(&self.config.fingerprint());
         h.u64(self.last_operation_sequence);
         let tags = self.config.tags();
@@ -1302,7 +1453,222 @@ impl Kernel {
         if let Some(eng) = self.alarms.as_deref() {
             eng.hash_into(&mut h);
         }
+        if self.recoverable {
+            h.u64(self.fence_boot_generation);
+            h.len(self.sources.len());
+            for r in &self.sources {
+                h.u8(u8::from(r.unverified));
+            }
+        }
         h.finish()
+    }
+}
+
+/// VS-006 (ADR 0013 D7): one tag in a checkpoint (configuration order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointTag {
+    pub value: Option<Value>,
+    pub quality: Quality,
+    pub revision: u64,
+    /// VS-004 freshness marker (operation sequence of the last applied observation).
+    pub observed: u64,
+}
+
+/// VS-006: canonical copy of a last accepted batch: mode, source sequence and
+/// `(tag index, value)` sorted by tag index.
+pub type CheckpointBatch = (BatchMode, u64, Vec<(u32, Value)>);
+
+/// VS-006: one source in a checkpoint (configuration order).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointSource {
+    pub link: LinkState,
+    pub epoch: Option<u64>,
+    pub last_accepted: Option<u64>,
+    pub continuity: Option<Continuity>,
+    /// Canonical copy of the last accepted batch (deduplication): mode, sequence and
+    /// `(tag index, value)` sorted by tag index.
+    pub last_batch: Option<CheckpointBatch>,
+    pub silent: bool,
+    pub last_batch_operation: u64,
+    pub unverified: bool,
+}
+
+/// VS-006 (ADR 0013 D7): the **complete** state a kernel needs to continue exactly where
+/// it was after operation `last_operation_sequence` — unlike [`LogicalSnapshot`], which
+/// lists only what is observable. Derived indices (freshness lists, alarm quiet windows,
+/// listed bitset) are not included: [`Kernel::from_checkpoint`] rebuilds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelCheckpoint {
+    pub config_fingerprint: [u8; 32],
+    pub last_operation_sequence: u64,
+    pub recoverable: bool,
+    pub fence_boot_generation: u64,
+    pub tags: Vec<CheckpointTag>,
+    pub sources: Vec<CheckpointSource>,
+    pub alarms: Option<crate::alarm::AlarmCheckpoint>,
+}
+
+impl Kernel {
+    /// VS-006: export the complete state (O(tags + rules + last batches), no ring). Called
+    /// by the sequencer between two operations, hence consistent at
+    /// `last_operation_sequence`.
+    pub fn export_checkpoint(&self) -> KernelCheckpoint {
+        KernelCheckpoint {
+            config_fingerprint: self.config.fingerprint(),
+            last_operation_sequence: self.last_operation_sequence,
+            recoverable: self.recoverable,
+            fence_boot_generation: self.fence_boot_generation,
+            tags: self
+                .cells
+                .iter()
+                .map(|c| CheckpointTag {
+                    value: c.value,
+                    quality: c.quality,
+                    revision: c.revision,
+                    observed: c.observed,
+                })
+                .collect(),
+            sources: self
+                .sources
+                .iter()
+                .map(|r| CheckpointSource {
+                    link: r.link,
+                    epoch: r.epoch,
+                    last_accepted: r.last_accepted,
+                    continuity: r.continuity,
+                    last_batch: r
+                        .last_batch
+                        .present
+                        .then(|| (r.last_batch.mode, r.last_batch.source_sequence, r.last_batch.entries.clone())),
+                    silent: r.silent,
+                    last_batch_operation: r.last_batch_op,
+                    unverified: r.unverified,
+                })
+                .collect(),
+            alarms: self.alarms.as_deref().map(AlarmEngine::export),
+        }
+    }
+
+    /// VS-006: inclusive range of event sequences that [`Self::from_checkpoint`] expects
+    /// as ring window for `cp` (`None` without alarms or before the first event).
+    pub fn checkpoint_ring_window(config: &ValidatedConfig, cp: &KernelCheckpoint) -> Option<(u64, u64)> {
+        let t = config.alarm_table()?;
+        let newest = cp.alarms.as_ref()?.next_event_seq.checked_sub(1)?;
+        if newest == 0 {
+            return None;
+        }
+        let cap = t.outbox_capacity();
+        let oldest = if newest >= cap { newest.saturating_sub(cap).saturating_add(1) } else { 1 };
+        Some((oldest, newest))
+    }
+
+    /// VS-006: rebuild a kernel from a checkpoint and the readable window of the alarm
+    /// ring (events `oldest_visible ..= next_event_seq - 1`; empty without alarms).
+    /// Every field is validated against `config`; any inconsistency is an error (the
+    /// caller fails closed). The result applies the next operation exactly as the kernel
+    /// that exported the checkpoint would have.
+    pub fn from_checkpoint(
+        config: Arc<ValidatedConfig>,
+        cp: &KernelCheckpoint,
+        ring: &[AlarmEvent],
+    ) -> Result<Kernel, RestoreError> {
+        let err = |reason: &'static str, detail: u64| Err(RestoreError { reason, detail });
+        if cp.config_fingerprint != config.fingerprint() {
+            return err("checkpoint of another configuration (fingerprint differs)", 0);
+        }
+        let mut k = if cp.recoverable { Kernel::new_recoverable(config.clone()) } else { Kernel::new(config.clone()) };
+        if cp.tags.len() != k.cells.len() {
+            return err("tag count differs from the configuration", cp.tags.len() as u64);
+        }
+        if cp.sources.len() != k.sources.len() {
+            return err("source count differs from the configuration", cp.sources.len() as u64);
+        }
+        k.last_operation_sequence = cp.last_operation_sequence;
+        k.fence_boot_generation = cp.fence_boot_generation;
+        if !cp.recoverable && (cp.fence_boot_generation != 0 || cp.sources.iter().any(|s| s.unverified)) {
+            return err("recovery state in a non-recoverable checkpoint", 0);
+        }
+        for (i, (cell, t)) in k.cells.iter_mut().zip(&cp.tags).enumerate() {
+            let meta = config.tags().get(i).map(|m| m.value_type);
+            let typed = match (t.value, meta) {
+                (None, _) => true,
+                (Some(v), Some(vt)) => v.value_type() == vt,
+                (Some(_), None) => false,
+            };
+            let consistent = match t.quality {
+                Quality::Unknown => t.value.is_none(),
+                Quality::Good | Quality::Uncertain(_) => t.value.is_some(),
+            };
+            if !typed || !consistent || t.observed > cp.last_operation_sequence {
+                return err("invalid tag in checkpoint", i as u64);
+            }
+            if t.quality == Quality::Uncertain(UncertainReason::RecoveredUnverified) && !cp.recoverable {
+                return err("RecoveredUnverified quality in a non-recoverable checkpoint", i as u64);
+            }
+            cell.value = t.value;
+            cell.quality = t.quality;
+            cell.revision = t.revision;
+            cell.observed = t.observed;
+        }
+        for (i, (rt, s)) in k.sources.iter_mut().zip(&cp.sources).enumerate() {
+            let meta = config.sources().get(i).ok_or(RestoreError { reason: "unknown source", detail: i as u64 })?;
+            rt.link = s.link;
+            rt.epoch = s.epoch;
+            rt.last_accepted = s.last_accepted;
+            rt.continuity = s.continuity;
+            rt.silent = s.silent;
+            rt.last_batch_op = s.last_batch_operation;
+            rt.unverified = s.unverified;
+            if s.epoch == Some(0) || (s.last_accepted.is_some() && s.epoch.is_none()) {
+                return err("invalid epoch/sequence of a source", i as u64);
+            }
+            rt.last_batch.entries.clear();
+            rt.last_batch.present = false;
+            if let Some((mode, seq, entries)) = &s.last_batch {
+                if entries.len() > meta.channel_count() || Some(*seq) != s.last_accepted {
+                    return err("invalid last batch of a source", i as u64);
+                }
+                let mut prev: Option<u32> = None;
+                for &(t, v) in entries {
+                    let owned = meta.channels().iter().any(|&(_, tt)| tt == t);
+                    let typed = config.tags().get(t as usize).is_some_and(|m| m.value_type == v.value_type());
+                    if !owned || !typed || prev.is_some_and(|p| p >= t) {
+                        return err("invalid last batch entry of a source", i as u64);
+                    }
+                    prev = Some(t);
+                }
+                rt.last_batch.present = true;
+                rt.last_batch.mode = *mode;
+                rt.last_batch.source_sequence = *seq;
+                // len <= channel count == preallocated capacity.
+                rt.last_batch.entries.extend_from_slice(entries);
+            }
+        }
+        // Freshness lists (derived): the source's Good tags ordered by marker.
+        for (i, meta) in config.sources().iter().enumerate() {
+            if !meta.supervision.freshness {
+                continue;
+            }
+            let mut good: Vec<(u64, u32)> = meta
+                .channels()
+                .iter()
+                .filter_map(|&(_, t)| {
+                    k.cells.get(t as usize).filter(|c| c.quality == Quality::Good).map(|c| (c.observed, t))
+                })
+                .collect();
+            good.sort_unstable();
+            let (cells, sources) = (&mut k.cells, &mut k.sources);
+            let Some(rt) = sources.get_mut(i) else { continue };
+            for (_, t) in good {
+                fresh_push_back(cells, rt, t);
+            }
+        }
+        k.alarms = match (config.alarm_table(), &cp.alarms) {
+            (Some(t), Some(a)) => Some(Box::new(AlarmEngine::restore(t, a, ring)?)),
+            (None, None) if ring.is_empty() => None,
+            _ => return err("alarm section does not match the configuration", 0),
+        };
+        Ok(k)
     }
 }
 
@@ -1567,7 +1933,7 @@ mod tests {
             k.apply(input(3, batch(BatchMode::Delta, 2, 11))),
             Ok(TransitionOutcome::Applied {
                 operation_sequence: 3,
-                kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 1 }
+                kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 1, reconciled: false }
             })
         );
         let (snap2, d2) = (k.logical_snapshot(), k.state_digest());

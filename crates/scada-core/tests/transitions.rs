@@ -36,7 +36,11 @@ fn value_quality_revision_and_identical_reacquisition() {
         out,
         TransitionOutcome::Applied {
             operation_sequence: 2,
-            kind: AppliedKind::Batch { continuity: Continuity::BaselineEstablished, changed_tags: 3 }
+            kind: AppliedKind::Batch {
+                continuity: Continuity::BaselineEstablished,
+                changed_tags: 3,
+                reconciled: false
+            }
         }
     );
     let t = tag(&k, TAMPER);
@@ -50,7 +54,7 @@ fn value_quality_revision_and_identical_reacquisition() {
         out,
         TransitionOutcome::Applied {
             operation_sequence: 3,
-            kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 0 }
+            kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 0, reconciled: false }
         }
     );
     assert_eq!(tag(&k, TEMP).revision, 1);
@@ -168,7 +172,7 @@ fn gap_stale_type_and_resync() {
         step(&mut k, full(1, 10, true, true, 1)),
         Ok(TransitionOutcome::Applied {
             operation_sequence: 5,
-            kind: AppliedKind::Batch { continuity: Continuity::Resynchronized, changed_tags: 3 }
+            kind: AppliedKind::Batch { continuity: Continuity::Resynchronized, changed_tags: 3, reconciled: false }
         })
     );
     // Delta without baseline in a new epoch.
@@ -184,7 +188,11 @@ fn first_full_state_may_start_at_any_positive_sequence() {
         step(&mut k, full(1, 4242, false, false, 0)),
         Ok(TransitionOutcome::Applied {
             operation_sequence: 2,
-            kind: AppliedKind::Batch { continuity: Continuity::BaselineEstablished, changed_tags: 3 }
+            kind: AppliedKind::Batch {
+                continuity: Continuity::BaselineEstablished,
+                changed_tags: 3,
+                reconciled: false
+            }
         })
     );
 }
@@ -326,7 +334,7 @@ fn rejected_and_duplicate_inputs_do_not_consume_operation_sequence() {
         step(&mut k, batch(1, BatchMode::Delta, 2, vec![b(1, true)])).unwrap(),
         TransitionOutcome::Applied {
             operation_sequence: 3,
-            kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 1 }
+            kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 1, reconciled: false }
         }
     );
 }

@@ -105,7 +105,11 @@ fn default_off_has_no_alarm_surface() {
     assert!(!k.ready.contains("alarms="), "{}", k.ready);
     assert!(!k.alarm.exists(), "no control socket without [alarms]");
     let mut s = Session::connect(&k.socket, "d", SRC, 1).unwrap();
-    assert_eq!((s.welcome.negotiated_protocol_major, s.welcome.negotiated_protocol_minor), (1, 1));
+    assert_eq!(
+        (s.welcome.negotiated_protocol_major, s.welcome.negotiated_protocol_minor),
+        (1, scada_protocol::PROTOCOL_MINOR),
+        "VS-006 driver library: 1.2"
+    );
     full(&mut s, 1, true);
     let r = k.introspect();
     assert_eq!(r.state_digest_version, 1, "VS-003/VS-004 digest v1 unchanged");
@@ -178,6 +182,7 @@ fn episode_and_ack_over_ipc_and_replay() {
             body: Some(apb::alarm_request::Body::Acknowledge(apb::AcknowledgeAlarm {
                 alarm_id: 1,
                 activation_token: token,
+                ..Default::default()
             })),
         })
         .unwrap();

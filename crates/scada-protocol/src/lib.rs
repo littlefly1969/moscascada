@@ -1,6 +1,7 @@
 //! IPC types and framing for the kernel <-> driver protocol (`scada.driver.v1`), the
 //! read-only test introspection (`scada.introspect.v1`) and, since VS-005, the local alarm
-//! control plane (`scada.alarm.v1`).
+//! control plane (`scada.alarm.v1`) and, since VS-006, the historian and persistence
+//! diagnostics (`scada.history.v1`).
 //!
 //! Frame = `u32` big-endian payload length + protobuf payload. A length of zero or above
 //! the configured maximum is rejected *before* any buffer is reserved.
@@ -36,14 +37,23 @@ pub mod alarm_v1 {
     include!(concat!(env!("OUT_DIR"), "/scada.alarm.v1.rs"));
 }
 
+/// VS-006: generated code for `scada.history.v1` (historian and persistence diagnostics).
+#[allow(clippy::all, clippy::pedantic, missing_debug_implementations)]
+pub mod history_v1 {
+    include!(concat!(env!("OUT_DIR"), "/scada.history.v1.rs"));
+}
+
 pub use prost::Message;
 
 /// Protocol major version implemented by this crate.
 pub const PROTOCOL_MAJOR: u32 = 1;
-/// Highest protocol minor version implemented by this crate (1.1 since VS-004).
-pub const PROTOCOL_MINOR: u32 = 1;
+/// Highest protocol minor version implemented by this crate (1.1 since VS-004, 1.2 since
+/// VS-006).
+pub const PROTOCOL_MINOR: u32 = 2;
 /// VS-004: first minor version of major 1 with `DriverMessage.heartbeat` (ADR 0011).
 pub const MINOR_HEARTBEAT: u32 = 1;
+/// VS-006: first minor with durable receipts and source timestamps (ADR 0013 D11).
+pub const MINOR_DURABLE_RECEIPTS: u32 = 2;
 /// Length of `kernel_instance_id` in bytes.
 pub const KERNEL_INSTANCE_ID_LEN: usize = 16;
 /// Maximum length of `Hello.driver_id` in bytes.
