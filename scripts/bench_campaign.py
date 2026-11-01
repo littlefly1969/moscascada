@@ -10,7 +10,9 @@ one of them. Every raw line printed by `scada-bench` is appended to OUT, prefixe
   bench_campaign.py --out FILE --runs 7 [--seed 1] [--secs 3] [--warmup 1]
       --variant NAME=KERNEL_PATH[,kernel-arg,...]   (repeatable; a kernel-arg of the form
                                                    @ipc:key=value becomes an extra [ipc]
-                                                   config line, e.g. a VS-003 ingress policy)
+                                                   config line, e.g. a VS-003 ingress policy;
+                                                   @bench:--opt=value is passed to scada-bench,
+                                                   e.g. VS-004 @bench:--supervise=5000:12000:250)
       --cell 'cell clients=8 size=128 pipeline=32'  (repeatable)
       --cell 'mixed hv=8 rare_interval_us=1000 queue=64'
 """
@@ -68,6 +70,10 @@ with open(a.out, "a") as out:
                 if k.startswith("@ipc:"):
                     key, val = k[5:].split("=", 1)
                     cmd += ["--ipc-line", f"{key} = {val}"]
+                elif k.startswith("@bench:"):
+                    # VS-004: a scada-bench option, e.g. @bench:--supervise=5000:12000:250
+                    opt, val = k[7:].split("=", 1)
+                    cmd += [opt, val]
                 else:
                     cmd += ["--kernel-arg", k]
             p = subprocess.run(cmd, capture_output=True, text=True)
