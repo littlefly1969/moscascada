@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+use scada_protocol::alarm_v1;
 use scada_protocol::driver_v1::{
     AckStatus, BatchMode, Continuity, DriverMessage, ErrorCode, Heartbeat, Hello, InputAck, KernelMessage, Observation,
     ObservationBatch, Welcome, driver_message, kernel_message, observation,
@@ -309,4 +310,92 @@ pub fn welcome_line(w: &Welcome) -> String {
         w.full_state_required,
         w.last_accepted_source_sequence.map_or("-".into(), |o| o.to_string()),
     )
+}
+
+// ------------------------------------------------------------------ VS-005 alarm client
+
+/// Blocking client of the alarm control socket (`scada.alarm.v1`, ADR 0012). Used by the
+/// tests, the benchmark harness and the `alarms` subcommand of the simulator. One request,
+/// one response; the kernel identifies the actor of an ACK by the peer credentials of this
+/// socket, never by a field of the request.
+#[derive(Debug)]
+pub struct AlarmClient {
+    stream: UnixStream,
+    wbuf: Vec<u8>,
+    rbuf: Vec<u8>,
+    /// Instance id sent with every request (empty = any; ACK requires it).
+    pub instance: Vec<u8>,
+}
+
+impl AlarmClient {
+    pub fn connect(socket: &Path) -> Result<AlarmClient, ClientError> {
+        let stream = UnixStream::connect(socket)?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        Ok(AlarmClient { stream, wbuf: Vec::new(), rbuf: Vec::new(), instance: Vec::new() })
+    }
+
+    /// Send any request (with its own instance id) and read the response.
+    pub fn call_raw(&mut self, req: &alarm_v1::AlarmRequest) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        frame::encode_frame(req, frame::MAX_FRAME_BYTES_CEILING, &mut self.wbuf)?;
+        self.stream.write_all(&self.wbuf)?;
+        self.read()
+    }
+
+    pub fn read(&mut self) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        frame::read_message(&mut self.stream, frame::MAX_FRAME_BYTES_CEILING, &mut self.rbuf)?
+            .ok_or(ClientError::Closed)
+    }
+
+    pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ClientError> {
+        self.stream.write_all(bytes)?;
+        Ok(())
+    }
+
+    pub fn call(&mut self, body: alarm_v1::alarm_request::Body) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        let req = alarm_v1::AlarmRequest {
+            alarm_api_version: 1,
+            kernel_instance_id: self.instance.clone(),
+            body: Some(body),
+        };
+        let r = self.call_raw(&req)?;
+        if self.instance.is_empty() {
+            self.instance = r.kernel_instance_id.clone();
+        }
+        Ok(r)
+    }
+
+    pub fn snapshot(
+        &mut self,
+        after: u32,
+        limit: u32,
+        expected_change: u64,
+    ) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        self.call(alarm_v1::alarm_request::Body::Snapshot(alarm_v1::GetAlarmSnapshot {
+            after_alarm_id: after,
+            limit,
+            expected_change_operation: expected_change,
+        }))
+    }
+
+    pub fn events(&mut self, after: u64, limit: u32) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        self.call(alarm_v1::alarm_request::Body::ReadEvents(alarm_v1::ReadEvents { after_event_seq: after, limit }))
+    }
+
+    pub fn ack(&mut self, alarm_id: u32, activation_token: u64) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        self.call(alarm_v1::alarm_request::Body::Acknowledge(alarm_v1::AcknowledgeAlarm { alarm_id, activation_token }))
+    }
+
+    pub fn capacity(&mut self) -> Result<alarm_v1::CapacityStatus, ClientError> {
+        match self.call(alarm_v1::alarm_request::Body::Capacity(alarm_v1::GetCapacityStatus {}))?.body {
+            Some(alarm_v1::alarm_response::Body::Capacity(c)) => Ok(c),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
+    /// TEST ONLY (`--test-simulated-durable-sink`): release events up to `up_to`.
+    pub fn simulated_commit(&mut self, up_to: u64) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        self.call(alarm_v1::alarm_request::Body::SimulatedDurableCommit(alarm_v1::SimulatedDurableCommit {
+            up_to_event_seq: up_to,
+        }))
+    }
 }

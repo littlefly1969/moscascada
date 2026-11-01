@@ -208,3 +208,60 @@ fn invalid_supervision_settings_are_refused() {
     assert_eq!((p.liveness_timeout_ms, p.freshness_timeout_ms), (Some(300), None));
     assert_eq!(c.core.sources()[0].supervision, scada_core::Supervision { liveness: true, freshness: false });
 }
+
+// VS-005: the shipped alarm example is valid, has the documented limits and fits the
+// profiles' order of magnitude; incoherent [alarms] sections are refused (fail fast).
+#[test]
+fn shipped_alarm_example_is_valid() {
+    use scada_runtime::budget;
+    let c = config::parse(include_str!("../../../config/examples/alarms.toml")).unwrap();
+    let t = c.core.alarm_table().unwrap();
+    assert_eq!((t.len(), t.max_rules(), t.outbox_capacity()), (5, 16, 65_536));
+    assert_eq!(t.worst_fanout().0, 5);
+    let a = c.alarms.as_ref().unwrap();
+    assert_eq!(a.control_authorized_uids, [1000]);
+    let b = budget::compute(&c, false, false);
+    assert!(b.alarm_core > 65_536 * 48, "{b}");
+    assert!(b.alarms > 0);
+    // The demo without [alarms] has no alarm term at all.
+    let d = config::parse(DEMO).unwrap();
+    assert!(d.alarms.is_none() && d.core.alarm_table().is_none());
+    let b = budget::compute(&d, false, false);
+    assert_eq!((b.alarms, b.alarm_core), (0, 0));
+}
+
+#[test]
+fn invalid_alarm_sections_are_refused() {
+    let base = include_str!("../../../config/examples/alarms.toml");
+    let err = |from: &str, to: &str| {
+        let t = base.replacen(from, to, 1);
+        assert_ne!(t, base, "patch {from:?} did not apply");
+        config::parse(&t).err().map(|e| e.to_string()).unwrap_or_default()
+    };
+    assert!(err("outbox_capacity_events = 65536", "outbox_capacity_events = 4").contains("cannot hold"));
+    assert!(err("outbox_capacity_events = 65536", "outbox_capacity_events = 0").contains("outbox"));
+    assert!(err("max_rules = 16", "max_rules = 4").contains("rules"));
+    assert!(
+        err("control_authorized_uids = [1000]", "control_authorized_uids = []").contains("control_authorized_uids")
+    );
+    assert!(err("control_page_max = 1024", "control_page_max = 0").contains("control_page_max"));
+    assert!(err("max_control_connections = 4", "max_control_connections = 65").contains("max_control_connections"));
+    assert!(err("outbox_high_percent = 80", "outbox_high_percent = 101").contains("outbox_high_percent"));
+    assert!(err("trip = 4500\nreset = 4300", "trip = 4500\nreset = 4600").contains("threshold"), "high: reset > trip");
+    assert!(
+        err("trip = -1000\nreset = -800", "trip = -1000\nreset = -1200").contains("threshold"),
+        "low: reset < trip"
+    );
+    assert!(
+        err("tag_id = 101\nkind = \"bool_equals\"", "tag_id = 103\nkind = \"bool_equals\"")
+            .contains("needs a bool tag")
+    );
+    assert!(err("tag_id = 101", "tag_id = 999").contains("999"));
+    assert!(err("id = 2\nname = \"tamper\"", "id = 1\nname = \"tamper\"").contains("duplicate"));
+    assert!(err("name = \"tamper\"", "name = \"door_open\"").contains("duplicate"));
+    assert!(err("kind = \"bool_equals\"      #", "kind = \"rate_of_change\" #").contains("unknown kind"));
+    assert!(err("severity = \"major\"", "severity = \"urgent\"").contains("severity"));
+    assert!(err("expected = true\nseverity = \"major\"", "severity = \"major\"").contains("expected"));
+    assert!(err("[alarms]\n", "[alarms]\nreplay_window = 5\n").contains("unknown field"));
+    assert!(err("id = 1\nname", "id = 0\nname").contains("alarm"), "zero id");
+}

@@ -32,11 +32,13 @@ fn supervised(live: Option<u64>, fresh: Option<u64>) -> Limits {
     if let Some(f) = fresh {
         src.push_str(&format!("freshness_timeout_ms = {f}\n"));
     }
-    Limits { runtime: format!("watchdog_poll_ms = {POLL_MS}\n"), source_1001: src, ..Limits::default() }
+    // VS-004 digest versions (1/2) are asserted here: alarms stay off (VS-005 coupling is
+    // tested in vs005.rs).
+    Limits { runtime: format!("watchdog_poll_ms = {POLL_MS}\n"), source_1001: src, alarms: None, ..Limits::default() }
 }
 
 fn unsupervised() -> Limits {
-    Limits { runtime: String::new(), source_1001: String::new(), ..Limits::default() }
+    Limits { runtime: String::new(), source_1001: String::new(), alarms: None, ..Limits::default() }
 }
 
 fn liveness(r: &IntrospectResponse, id: u32) -> Liveness {

@@ -43,6 +43,78 @@ pub struct Limits {
     /// `SCADA_TEST_SUPERVISION=live_ms:fresh_ms` (with a 100 ms watchdog), so that the whole
     /// earlier suite can also run with supervision enabled on that source.
     pub source_1001: String,
+    /// VS-005: `[alarms]` section (`None` = alarms disabled, the default). Default from
+    /// `SCADA_TEST_ALARMS=1`, so that the whole earlier suite also runs with alarms enabled
+    /// (rules on every tag, an outbox large enough never to refuse).
+    pub alarms: Option<Alarms>,
+}
+
+/// VS-005 `[alarms]` of the test configuration. The control socket is `<dir>/alarm.sock`.
+#[derive(Clone, Debug)]
+pub struct Alarms {
+    pub capacity: u64,
+    /// `None` = only the current uid.
+    pub authorized_uids: Option<Vec<u32>>,
+    /// Extra `[alarms]` lines (e.g. `control_page_max = 4`).
+    pub extra: String,
+    /// `[[alarms.rules]]` blocks.
+    pub rules: String,
+    /// No control socket at all.
+    pub no_socket: bool,
+}
+
+/// One `[[alarms.rules]]` block.
+pub fn rule(id: u32, tag: u32, kind: &str, params: &str, severity: &str) -> String {
+    format!(
+        "[[alarms.rules]]\nid = {id}\nname = \"a{id}\"\ntag_id = {tag}\nkind = \"{kind}\"\n{params}severity = \"{severity}\"\n"
+    )
+}
+
+/// Rules on every tag of the demo configuration (used by `SCADA_TEST_ALARMS=1`).
+pub fn demo_rules() -> String {
+    let mut r = rule(1, 101, "bool_equals", "expected = true\n", "major");
+    r.push_str(&rule(2, 102, "bool_equals", "expected = true\n", "critical"));
+    r.push_str(&rule(3, 103, "high", "trip = 3000\nreset = 2900\n", "warning"));
+    r.push_str(&rule(4, 103, "bad_quality", "", "info"));
+    r.push_str(&rule(5, 101, "bad_quality", "", "info"));
+    r.push_str(&rule(6, 201, "bad_quality", "", "info"));
+    for n in 1..=16 {
+        r.push_str(&rule(100 + n, 300 + n, "low", "trip = -1000\nreset = -900\n", "info"));
+    }
+    r
+}
+
+pub fn alarms_from_env() -> Option<Alarms> {
+    match std::env::var("SCADA_TEST_ALARMS").ok().as_deref() {
+        Some("1") => Some(Alarms {
+            capacity: 1 << 20,
+            authorized_uids: None,
+            extra: String::new(),
+            rules: demo_rules(),
+            no_socket: false,
+        }),
+        _ => None,
+    }
+}
+
+impl Alarms {
+    pub fn with(capacity: u64, rules: String) -> Alarms {
+        Alarms { capacity, authorized_uids: None, extra: String::new(), rules, no_socket: false }
+    }
+
+    fn section(&self, dir: &Path) -> String {
+        let uids = self.authorized_uids.clone().unwrap_or_else(|| vec![current_uid()]);
+        let sock = if self.no_socket {
+            String::new()
+        } else {
+            format!(
+                "control_socket_path = \"{}\"\ncontrol_authorized_uids = [{}]\n",
+                dir.join("alarm.sock").display(),
+                uids.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
+            )
+        };
+        format!("\n[alarms]\noutbox_capacity_events = {}\n{sock}{}\n{}", self.capacity, self.extra, self.rules)
+    }
 }
 
 /// `SCADA_TEST_SUPERVISION=live_ms:fresh_ms` -> (`[runtime]` lines, source lines).
@@ -86,6 +158,7 @@ impl Default for Limits {
             ingress: ingress_from_env(),
             runtime: supervision_from_env().0,
             source_1001: supervision_from_env().1,
+            alarms: alarms_from_env(),
         }
     }
 }
@@ -140,7 +213,7 @@ id = 2001
 name = "restricted"
 authorized_uids = [4294967294]
 channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
-{load}"#,
+{load}{alarms}"#,
         load = (1..=16)
             .map(|n| format!(
                 "\n[[tags]]\nid = {t}\nname = \"load_{n}\"\ntype = \"i64\"\n\n[[sources]]\nid = {s}\nname = \"load-{n}\"\nchannels = [ {{ channel = 1, tag = {t}, type = \"i64\" }} ]\n",
@@ -161,6 +234,7 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         ingress = l.ingress,
         runtime = l.runtime,
         sup = l.source_1001,
+        alarms = l.alarms.as_ref().map_or(String::new(), |a| a.section(dir)),
     )
 }
 
@@ -168,9 +242,13 @@ pub struct KernelProc {
     pub child: Child,
     pub socket: PathBuf,
     pub intro: PathBuf,
+    /// VS-005: `<dir>/alarm.sock` (exists only when alarms are configured with a socket).
+    pub alarm: PathBuf,
     pub instance: String,
     pub dir: tempfile::TempDir,
     stderr: Option<std::thread::JoinHandle<String>>,
+    /// The READY line.
+    pub ready: String,
 }
 
 impl KernelProc {
@@ -218,7 +296,8 @@ impl KernelProc {
         let line = rx.recv_timeout(Duration::from_secs(10)).expect("kernel did not print READY");
         assert!(line.starts_with("READY instance="), "{line}");
         let instance = line["READY instance=".len()..].split(' ').next().unwrap().to_owned();
-        KernelProc { child, socket, intro, instance, dir, stderr: Some(stderr) }
+        let alarm = dir.path().join("alarm.sock");
+        KernelProc { child, socket, intro, alarm, instance, dir, stderr: Some(stderr), ready: line }
     }
 
     pub fn pid(&self) -> u32 {

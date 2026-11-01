@@ -1,0 +1,102 @@
+# VS-005 alarm example (ADR 0012). The [ipc]/[tags]/[sources] part is the demo of VS-001;
+# the [alarms] section is OPTIONAL: without it, nothing of VS-005 exists (no outbox, no
+# control socket, digests v1/v2 byte-identical, wire protocol 1.1 unchanged).
+#
+# WARNING: alarm states and events are VOLATILE in VS-005. They are lost on restart and
+# the outbox slots are never released without a durable consumer (VS-006 journal):
+# NOT PRODUCTION-READY FOR LONG-RUN ALARM RETENTION. Size `outbox_capacity_events` with
+# scripts/alarm_capacity.py.
+
+[ipc]
+socket_path = "/tmp/scada-vs005/driver.sock"
+max_frame_bytes = 65536
+max_driver_connections = 16
+input_queue_capacity = 64
+max_inflight_per_connection = 32
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "door_contact"
+type = "bool"
+
+[[tags]]
+id = 102
+name = "tamper_switch"
+type = "bool"
+
+[[tags]]
+id = 103
+name = "case_temperature_centi_c"   # hundredths of °C, scaled integer
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "sim-enclosure-1"
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "i64" },
+]
+
+[alarms]
+# Hard ceiling of the rule table (defaults to the number of rules). Startup is refused
+# above it, so that the memory bound is fixed by configuration.
+max_rules = 16
+# Bounded outbox: events are NEVER overwritten while not durable. A transition that does
+# not fit is refused as a whole (batch: OUTBOX_CAPACITY_EXCEEDED, retry later). Must hold
+# at least the worst fan-out of one operation (all rules of the tags of one source).
+outbox_capacity_events = 65536
+# Occupancy (percent) from which the capacity status reports HIGH (CRITICAL = refusals).
+outbox_high_percent = 80
+# Control socket (snapshot, events, ACK, capacity). ACKs are attributed to the peer uid
+# of this socket (SO_PEERCRED), never to a client-declared value.
+control_socket_path = "/tmp/scada-vs005/alarm.sock"
+control_authorized_uids = [1000]
+max_control_connections = 4
+control_page_max = 1024
+
+[[alarms.rules]]
+id = 1
+name = "door_open"
+tag_id = 101
+kind = "bool_equals"      # bool_equals | high | low | bad_quality
+expected = true
+severity = "major"        # info | warning | major | critical
+
+[[alarms.rules]]
+id = 2
+name = "tamper"
+tag_id = 102
+kind = "bool_equals"
+expected = true
+severity = "critical"
+
+[[alarms.rules]]
+id = 3
+name = "case_temperature_high"
+tag_id = 103
+kind = "high"             # active while v >= trip; returns when v <= reset (hysteresis)
+trip = 4500
+reset = 4300
+severity = "warning"
+
+[[alarms.rules]]
+id = 4
+name = "case_temperature_low"
+tag_id = 103
+kind = "low"              # active while v <= trip; returns when v >= reset
+trip = -1000
+reset = -800
+severity = "warning"
+
+[[alarms.rules]]
+id = 5
+name = "enclosure_signal_lost"
+tag_id = 103
+kind = "bad_quality"      # armed by the first Good value; active while not Good
+severity = "info"
