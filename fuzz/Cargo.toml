@@ -55,3 +55,10 @@ path = "fuzz_targets/supervision_transitions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "alarm_transitions"
+path = "fuzz_targets/alarm_transitions.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,1 @@
+alarm_transitions (cargo-fuzz, -O, nightly, x86_64): Done 129108 runs in 121 second(s), 0 crashes, corpus 703 entries (2026-11-01T14:22Z)

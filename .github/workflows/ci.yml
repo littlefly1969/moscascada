@@ -36,3 +36,5 @@ jobs:
         run: mkdir -p fuzz/corpus/decode_equivalence && cd fuzz && cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=60
       - name: supervision_transitions (60 s, VS-004)
         run: mkdir -p fuzz/corpus/supervision_transitions && cd fuzz && cargo +nightly fuzz run -O supervision_transitions corpus/supervision_transitions -- -max_total_time=60
+      - name: alarm_transitions (60 s, VS-005)
+        run: mkdir -p fuzz/corpus/alarm_transitions && cd fuzz && cargo +nightly fuzz run -O alarm_transitions corpus/alarm_transitions -- -max_total_time=60
