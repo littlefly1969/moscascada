@@ -3,9 +3,10 @@
 
 use std::fmt;
 
+use crate::alarm::{AlarmSpec, AlarmTable};
 use crate::digest::CanonicalHasher;
-use crate::types::{ChannelId, SourceId, Supervision, TagId, ValueType};
-use crate::{CONFIG_FINGERPRINT_VERSION, CONFIG_FINGERPRINT_VERSION_SUPERVISED};
+use crate::types::{AlarmId, ChannelId, SourceId, Supervision, TagId, ValueType};
+use crate::{CONFIG_FINGERPRINT_VERSION, CONFIG_FINGERPRINT_VERSION_ALARMS, CONFIG_FINGERPRINT_VERSION_SUPERVISED};
 
 /// Upper bound for `max_observations_per_batch` (protects the preallocation).
 pub const MAX_OBSERVATIONS_PER_BATCH_CEILING: u32 = 4096;
@@ -69,26 +70,86 @@ pub struct ConfigSpec {
 /// Reason why a configuration is refused. The kernel does not start with an invalid one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    InvalidLimit { name: &'static str, value: u64 },
+    InvalidLimit {
+        name: &'static str,
+        value: u64,
+    },
     NoTags,
     NoSources,
-    TooManyTags { count: usize, max: usize },
-    TooManySources { count: usize, max: usize },
+    TooManyTags {
+        count: usize,
+        max: usize,
+    },
+    TooManySources {
+        count: usize,
+        max: usize,
+    },
     ZeroTagId,
     ZeroSourceId,
-    ZeroChannelId { source_id: SourceId },
+    ZeroChannelId {
+        source_id: SourceId,
+    },
     DuplicateTagId(TagId),
     DuplicateTagName(String),
-    InvalidName { name: String },
+    InvalidName {
+        name: String,
+    },
     DuplicateSourceId(SourceId),
     DuplicateSourceName(String),
     SourceWithoutChannels(SourceId),
-    TooManyChannels { source_id: SourceId, count: usize, max: u32 },
-    DuplicateChannel { source_id: SourceId, channel_id: ChannelId },
-    UnknownTag { source_id: SourceId, channel_id: ChannelId, tag_id: TagId },
-    TypeMismatch { source_id: SourceId, channel_id: ChannelId, tag_id: TagId, binding: ValueType, tag: ValueType },
+    TooManyChannels {
+        source_id: SourceId,
+        count: usize,
+        max: u32,
+    },
+    DuplicateChannel {
+        source_id: SourceId,
+        channel_id: ChannelId,
+    },
+    UnknownTag {
+        source_id: SourceId,
+        channel_id: ChannelId,
+        tag_id: TagId,
+    },
+    TypeMismatch {
+        source_id: SourceId,
+        channel_id: ChannelId,
+        tag_id: TagId,
+        binding: ValueType,
+        tag: ValueType,
+    },
     TagBoundTwice(TagId),
     TagWithoutBinding(TagId),
+    /// VS-005: an `[alarms]` section without rules (omit the section to disable alarms).
+    NoAlarmRules,
+    TooManyAlarmRules {
+        count: usize,
+        max: u32,
+    },
+    ZeroAlarmId,
+    DuplicateAlarmId(AlarmId),
+    DuplicateAlarmName(String),
+    AlarmUnknownTag {
+        alarm_id: AlarmId,
+        tag_id: TagId,
+    },
+    AlarmTypeMismatch {
+        alarm_id: AlarmId,
+        tag_id: TagId,
+        rule: ValueType,
+        tag: ValueType,
+    },
+    AlarmInvalidThresholds {
+        alarm_id: AlarmId,
+        trip: i64,
+        reset: i64,
+    },
+    /// The outbox cannot hold the events of the largest single operation.
+    OutboxTooSmallForFanout {
+        capacity: u64,
+        worst_fanout: u32,
+        source_id: SourceId,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -125,6 +186,28 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::TagBoundTwice(t) => write!(f, "tag {t} is bound to more than one channel"),
             ConfigError::TagWithoutBinding(t) => write!(f, "tag {t} is not bound to any channel"),
+            ConfigError::NoAlarmRules => {
+                f.write_str("[alarms] has no rules (omit the section to keep alarms disabled)")
+            }
+            ConfigError::TooManyAlarmRules { count, max } => {
+                write!(f, "{count} alarm rules exceed alarms.max_rules = {max}")
+            }
+            ConfigError::ZeroAlarmId => f.write_str("alarm id 0 is reserved"),
+            ConfigError::DuplicateAlarmId(a) => write!(f, "duplicate alarm id {a}"),
+            ConfigError::DuplicateAlarmName(n) => write!(f, "duplicate alarm name {n:?}"),
+            ConfigError::AlarmUnknownTag { alarm_id, tag_id } => write!(f, "alarm {alarm_id}: unknown tag {tag_id}"),
+            ConfigError::AlarmTypeMismatch { alarm_id, tag_id, rule, tag } => {
+                write!(f, "alarm {alarm_id}: rule needs a {rule} tag but tag {tag_id} is {tag}")
+            }
+            ConfigError::AlarmInvalidThresholds { alarm_id, trip, reset } => write!(
+                f,
+                "alarm {alarm_id}: invalid thresholds trip={trip} reset={reset} (high: reset < trip; low: reset > trip)"
+            ),
+            ConfigError::OutboxTooSmallForFanout { capacity, worst_fanout, source_id } => write!(
+                f,
+                "alarms.outbox_capacity_events = {capacity} cannot hold the {worst_fanout} events one operation of \
+                 source {source_id} can produce (one event per rule of its tags); raise the capacity"
+            ),
         }
     }
 }
@@ -222,6 +305,8 @@ pub struct ValidatedConfig {
     limits: CoreLimits,
     tags: Vec<TagMeta>,
     sources: Vec<SourceMeta>,
+    /// VS-005: `None` = alarms disabled.
+    alarms: Option<AlarmTable>,
     fingerprint: [u8; 32],
 }
 
@@ -234,6 +319,12 @@ fn valid_name(name: &str) -> bool {
 impl ValidatedConfig {
     /// Validate a specification. Any error refuses the whole configuration.
     pub fn validate(spec: ConfigSpec) -> Result<ValidatedConfig, ConfigError> {
+        Self::validate_with_alarms(spec, None)
+    }
+
+    /// VS-005: validate a specification and an optional alarm rule set. `None` is exactly
+    /// [`Self::validate`] (fingerprint v1/v2 unchanged).
+    pub fn validate_with_alarms(spec: ConfigSpec, alarms: Option<AlarmSpec>) -> Result<ValidatedConfig, ConfigError> {
         let limits = spec.limits;
         if limits.max_observations_per_batch == 0
             || limits.max_observations_per_batch > MAX_OBSERVATIONS_PER_BATCH_CEILING
@@ -389,7 +480,11 @@ impl ValidatedConfig {
             return Err(ConfigError::TagWithoutBinding(tag_id));
         }
 
-        let mut cfg = ValidatedConfig { limits, tags, sources, fingerprint: [0; 32] };
+        let alarms = match alarms {
+            Some(a) => Some(AlarmTable::build(a, &tags, &sources)?),
+            None => None,
+        };
+        let mut cfg = ValidatedConfig { limits, tags, sources, alarms, fingerprint: [0; 32] };
         cfg.fingerprint = cfg.compute_fingerprint();
         Ok(cfg)
     }
@@ -398,7 +493,18 @@ impl ValidatedConfig {
     /// source is supervised, 2 when at least one is (the v1 fields followed by the
     /// supervision flags of every source).
     pub fn fingerprint_version(&self) -> u16 {
-        if self.any_supervision() { CONFIG_FINGERPRINT_VERSION_SUPERVISED } else { CONFIG_FINGERPRINT_VERSION }
+        if self.alarms.is_some() {
+            CONFIG_FINGERPRINT_VERSION_ALARMS
+        } else if self.any_supervision() {
+            CONFIG_FINGERPRINT_VERSION_SUPERVISED
+        } else {
+            CONFIG_FINGERPRINT_VERSION
+        }
+    }
+
+    /// VS-005: the validated alarm rules, `None` when alarms are disabled.
+    pub fn alarm_table(&self) -> Option<&AlarmTable> {
+        self.alarms.as_ref()
     }
 
     /// Whether at least one source has a supervision kind enabled (VS-004).
@@ -425,11 +531,16 @@ impl ValidatedConfig {
                 h.u32(self.tags.get(t as usize).map_or(0, |m| m.tag_id.0));
             }
         }
-        if self.any_supervision() {
-            // v2 only: appended after the complete v1 field list.
+        if self.any_supervision() || self.alarms.is_some() {
+            // v2 and v3: appended after the complete v1 field list.
             for s in &self.sources {
                 h.u8(u8::from(s.supervision.liveness) | (u8::from(s.supervision.freshness) << 1));
             }
+        }
+        if let Some(a) = &self.alarms {
+            // v3 only (VS-005): the semantic rule set, sorted by alarm id. The outbox
+            // capacity is not semantic: it is part of the state digest v3 instead.
+            a.hash_into(&mut h);
         }
         h.finish()
     }
@@ -473,7 +584,8 @@ impl ValidatedConfig {
             .iter()
             .map(|s| (std::mem::size_of::<SourceMeta>() as u128).saturating_add(s.heap_bytes()))
             .sum();
-        tags.saturating_add(sources)
+        let alarms = self.alarms.as_ref().map_or(0, AlarmTable::heap_bytes);
+        tags.saturating_add(sources).saturating_add(alarms)
     }
 
     pub fn source(&self, source_id: SourceId) -> Option<&SourceMeta> {

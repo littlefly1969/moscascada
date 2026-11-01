@@ -143,6 +143,10 @@ impl RefKernel {
                 self.source_index(source_id)?;
                 return Err(ApplyError::SupervisionNotConfigured(source_id));
             }
+            // VS-005 operations: the current kernel without [alarms] refuses them.
+            Operation::AlarmAcknowledge { .. } | Operation::AdvanceDurableWatermark { .. } => {
+                return Err(ApplyError::AlarmsNotConfigured);
+            }
         };
         if let TransitionOutcome::Applied { .. } = outcome {
             self.last_operation_sequence = expected;
@@ -424,6 +428,7 @@ impl RefKernel {
                     last_observed_operation: 0, // VS-004 field, neutral
                 })
                 .collect(),
+            alarms: None,
         }
     }
 

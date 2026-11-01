@@ -568,6 +568,7 @@ fn generator_covers_every_supervised_transition() {
                     IgnoredReason::NotSilent => "ign-notsilent",
                     IgnoredReason::NothingExpired => "ign-nothing",
                     IgnoredReason::StaleLinkGeneration => "ign-stale",
+                    IgnoredReason::AlreadyAcknowledged | IgnoredReason::WatermarkUnchanged => "ign-alarm",
                 },
                 Ok(TransitionOutcome::Duplicate { .. }) => "duplicate",
                 Err(ApplyError::SupervisionNotConfigured(_)) => "err-notconfigured",

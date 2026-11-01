@@ -28,6 +28,11 @@ id_type!(
     /// Stable identity of an RTDB tag; the canonical ordering key.
     TagId
 );
+id_type!(
+    /// VS-005: stable, plant-wide identity of an alarm rule (non-zero). The foreign key of
+    /// the external alarm catalog and of every alarm event; never reused for another rule.
+    AlarmId
+);
 
 /// Static type of a tag.
 ///

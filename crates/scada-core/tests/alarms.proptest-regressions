@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 93f94d580f1adf252a1c4a131bd731a8759fae198ad961e3b632ebb3286d78c4 # shrinks to acts = [Connect(0, false), Full(0, [195, 7, 20, 0]), Full(0, [0, 0, 0, 0]), Fresh(18), Fresh(18), Connect(0, false)], cap = 6

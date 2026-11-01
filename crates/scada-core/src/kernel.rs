@@ -3,12 +3,13 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::alarm::{AlarmEngine, AlarmEvent, AlarmView, EventPage, OutboxStatus, SnapshotPage};
 use crate::config::ValidatedConfig;
 use crate::digest::CanonicalHasher;
 use crate::types::{
-    BatchMode, ChannelId, Continuity, Quality, SourceId, Supervision, TagId, UncertainReason, Value, ValueType,
+    AlarmId, BatchMode, ChannelId, Continuity, Quality, SourceId, Supervision, TagId, UncertainReason, Value, ValueType,
 };
-use crate::{STATE_DIGEST_VERSION, STATE_DIGEST_VERSION_SUPERVISED};
+use crate::{STATE_DIGEST_VERSION, STATE_DIGEST_VERSION_ALARMS, STATE_DIGEST_VERSION_SUPERVISED};
 
 /// One observation of a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,21 @@ pub enum Operation {
         link_generation: u64,
         observed_up_to: u64,
     },
+    /// VS-005 (ADR 0012): an operator acknowledgement, sequenced like every other input.
+    /// `expected_activation_token` must be the alarm's current activation token (the
+    /// operation sequence of its latest Raised/Retriggered); `actor_uid` is the
+    /// authenticated peer uid captured by the runtime, never a value the client declared.
+    AlarmAcknowledge {
+        alarm_id: AlarmId,
+        expected_activation_token: u64,
+        actor_uid: u32,
+    },
+    /// VS-005: the durable sink confirmed every event `<= up_to_event_seq` (continuous
+    /// prefix); their outbox slots become reusable. VS-005 has no durable sink: only a
+    /// test harness emits it (ADR 0012 §5). Never emitted because an event was *read*.
+    AdvanceDurableWatermark {
+        up_to_event_seq: u64,
+    },
 }
 
 /// An operation with the applied-transition number proposed by the external sequencer.
@@ -102,6 +118,16 @@ pub enum AppliedKind {
     FreshnessExpired {
         expired_tags: u32,
     },
+    /// VS-005: the acknowledgement was applied and produced event `event_seq`.
+    AlarmAcknowledged {
+        alarm_id: AlarmId,
+        event_seq: u64,
+    },
+    /// VS-005: `released` outbox slots became reusable.
+    DurableWatermarkAdvanced {
+        up_to_event_seq: u64,
+        released: u64,
+    },
 }
 
 /// Why an input was a no-op that is not an error.
@@ -116,6 +142,10 @@ pub enum IgnoredReason {
     NotSilent,
     /// VS-004: freshness expiry that would change no tag.
     NothingExpired,
+    /// VS-005: acknowledgement of the current token of an already acknowledged alarm.
+    AlreadyAcknowledged,
+    /// VS-005: watermark equal to the current one.
+    WatermarkUnchanged,
 }
 
 /// Successful result of [`Kernel::apply`].
@@ -188,6 +218,42 @@ pub enum ApplyError {
     /// VS-004: a freshness token that does not designate an already applied operation.
     InvalidFreshnessToken {
         observed_up_to: u64,
+    },
+    /// VS-005: an alarm operation on a kernel without `[alarms]`.
+    AlarmsNotConfigured,
+    UnknownAlarm(AlarmId),
+    /// VS-005: the alarm never had an episode.
+    NotAcknowledgeable(AlarmId),
+    /// VS-005: the ACK quotes a token that is not the alarm's current one (e.g. issued
+    /// before a retrigger).
+    StaleActivationToken {
+        alarm_id: AlarmId,
+        current: u64,
+    },
+    /// VS-005: the transition would produce `required` events but only `free` outbox slots
+    /// are free (slots are freed only by the durable watermark). Nothing was applied.
+    OutboxCapacityExceeded {
+        required: u64,
+        free: u64,
+    },
+    /// VS-005: the event sequence would overflow `u64` (never wraps).
+    EventSequenceExhausted,
+    /// VS-005: an occurrence counter would overflow.
+    AlarmCounterOverflow(AlarmId),
+    /// VS-005: more rules touched than the preallocated worst-case fanout (cannot happen
+    /// with a validated configuration; typed instead of growing the scratch).
+    AlarmFanoutExceeded {
+        limit: u64,
+    },
+    /// VS-005: watermark beyond the last committed event.
+    WatermarkBeyondCommitted {
+        up_to: u64,
+        last_committed: u64,
+    },
+    /// VS-005: watermark below the current one (it is monotonic).
+    WatermarkRegression {
+        current: u64,
+        got: u64,
     },
 }
 
@@ -358,6 +424,16 @@ pub struct LogicalSnapshot {
     pub last_operation_sequence: u64,
     pub sources: Vec<SourceSnapshot>,
     pub tags: Vec<TagSnapshot>,
+    /// VS-005: every alarm (sorted by id) and the outbox sequences; `None` without alarms.
+    pub alarms: Option<AlarmsSnapshot>,
+}
+
+/// VS-005 part of [`LogicalSnapshot`]. Event contents are compared separately with
+/// [`Kernel::alarm_events_digest`] (O(capacity), not part of every snapshot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlarmsSnapshot {
+    pub alarms: Vec<AlarmView>,
+    pub outbox: OutboxStatus,
 }
 
 /// The kernel state machine. Single owner of all RTDB writes.
@@ -369,6 +445,9 @@ pub struct Kernel {
     cells: Vec<TagCell>,
     /// Scratch space for validation; not part of the logical state.
     staging: Vec<Staged>,
+    /// VS-005: alarm states and outbox; `None` without `[alarms]` (one branch per
+    /// transition on the default path).
+    alarms: Option<Box<AlarmEngine>>,
 }
 
 impl Kernel {
@@ -401,7 +480,8 @@ impl Kernel {
             })
             .collect();
         let staging = Vec::with_capacity(config.limits().max_observations_per_batch as usize);
-        Kernel { config, last_operation_sequence: 0, sources, cells, staging }
+        let alarms = config.alarm_table().map(|t| Box::new(AlarmEngine::new(t)));
+        Kernel { config, last_operation_sequence: 0, sources, cells, staging, alarms }
     }
 
     /// Conservative upper bound, in bytes, of the heap the kernel state allocates for
@@ -418,6 +498,13 @@ impl Kernel {
             .saturating_add(sources.saturating_mul(sz(std::mem::size_of::<SourceRuntime>())))
             .saturating_add(channels.saturating_mul(sz(std::mem::size_of::<(u32, Value)>())))
             .saturating_add(max_obs.saturating_mul(sz(std::mem::size_of::<Staged>())))
+            .saturating_add(Self::alarm_storage_bytes(config))
+    }
+
+    /// VS-005: bytes of the alarm states, listed index, outbox ring and preflight scratch
+    /// (0 without alarms). Included in [`Self::storage_bound_bytes`].
+    pub fn alarm_storage_bytes(config: &ValidatedConfig) -> u128 {
+        config.alarm_table().map_or(0, AlarmEngine::storage_bytes)
     }
 
     pub fn config(&self) -> &Arc<ValidatedConfig> {
@@ -470,6 +557,12 @@ impl Kernel {
             Operation::FreshnessExpired { source_id, link_generation, observed_up_to } => {
                 self.freshness(source_id, link_generation, observed_up_to, expected)?
             }
+            Operation::AlarmAcknowledge { alarm_id, expected_activation_token, actor_uid } => {
+                self.acknowledge(alarm_id, expected_activation_token, actor_uid, expected)?
+            }
+            Operation::AdvanceDurableWatermark { up_to_event_seq } => {
+                self.advance_watermark(up_to_event_seq, expected)?
+            }
         };
         if let TransitionOutcome::Applied { .. } = outcome {
             self.last_operation_sequence = expected;
@@ -521,6 +614,30 @@ impl Kernel {
         }
     }
 
+    /// VS-005 preflight of a degradation of `src` to `Uncertain(reason)`: stage every rule
+    /// of the tags that would change and check the outbox. Mutates only the scratch.
+    fn alarm_preflight_degrade(&mut self, src: usize, reason: UncertainReason, op: u64) -> Result<(), ApplyError> {
+        let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), self.config.alarm_table()) else { return Ok(()) };
+        let Some(meta) = self.config.sources().get(src) else { return Ok(()) };
+        eng.begin();
+        for &(_, t) in meta.channels() {
+            if let Some(cell) = self.cells.get(t as usize)
+                && degrades(cell, reason)
+            {
+                eng.stage_tag(table, t, cell.value, Quality::Uncertain(reason), op)?;
+            }
+        }
+        eng.check()
+    }
+
+    /// VS-005: commit the checked preflight (infallible). No-op without alarms.
+    #[inline]
+    fn alarm_commit(&mut self, op: u64) {
+        if let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), self.config.alarm_table()) {
+            eng.commit(table, op);
+        }
+    }
+
     fn connect(
         &mut self,
         source_id: SourceId,
@@ -539,8 +656,10 @@ impl Kernel {
             return Err(ApplyError::NonMonotonicLinkGeneration { current, got: generation });
         }
         let degraded = self.check_degrade(src, UncertainReason::SourceUnavailable)?;
+        self.alarm_preflight_degrade(src, UncertainReason::SourceUnavailable, op)?;
         // Validation complete: mutate.
         self.degrade(src, UncertainReason::SourceUnavailable);
+        self.alarm_commit(op);
         let Some(rt) = self.sources.get_mut(src) else {
             return Err(ApplyError::UnknownSource(source_id));
         };
@@ -575,7 +694,9 @@ impl Kernel {
             _ => return Err(ApplyError::UnknownLinkGeneration { got: generation }),
         }
         let degraded = self.check_degrade(src, UncertainReason::SourceUnavailable)?;
+        self.alarm_preflight_degrade(src, UncertainReason::SourceUnavailable, op)?;
         self.degrade(src, UncertainReason::SourceUnavailable);
+        self.alarm_commit(op);
         if let Some(rt) = self.sources.get_mut(src) {
             rt.link = LinkState::Disconnected { generation };
             rt.silent = false;
@@ -696,6 +817,21 @@ impl Kernel {
             }
         }
 
+        // 7. VS-005 alarm preflight: rules of the tags whose value or quality changes, from
+        // the predicted post-batch cell (value, Good). An identical refresh changes nothing
+        // and is skipped. Refused here (outbox full) = nothing applied, sequence unused.
+        if let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), config.alarm_table()) {
+            eng.begin();
+            for s in &self.staging {
+                if let Some(cell) = self.cells.get(s.tag_index as usize)
+                    && (cell.value != Some(s.value) || cell.quality != Quality::Good)
+                {
+                    eng.stage_tag(table, s.tag_index, Some(s.value), Quality::Good, op)?;
+                }
+            }
+            eng.check()?;
+        }
+
         // Validation complete: mutate, in TagId order.
         let mut changed: u32 = 0;
         if meta.supervision.freshness {
@@ -749,6 +885,7 @@ impl Kernel {
             // len <= channel count == preallocated capacity: never reallocates.
             rt.last_batch.entries.extend(self.staging.iter().map(|s| (s.tag_index, s.value)));
         }
+        self.alarm_commit(op);
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
             kind: AppliedKind::Batch { continuity, changed_tags: changed },
@@ -787,7 +924,9 @@ impl Kernel {
             return Ok(TransitionOutcome::Ignored(IgnoredReason::AlreadySilent));
         }
         let degraded = self.check_degrade(src, UncertainReason::SourceSilent)?;
+        self.alarm_preflight_degrade(src, UncertainReason::SourceSilent, op)?;
         self.degrade(src, UncertainReason::SourceSilent);
+        self.alarm_commit(op);
         if let Some(rt) = self.sources.get_mut(src) {
             rt.silent = true;
         }
@@ -845,6 +984,19 @@ impl Kernel {
         if n == 0 {
             return Ok(TransitionOutcome::Ignored(IgnoredReason::NothingExpired));
         }
+        // VS-005 preflight over the same prefix (value kept, quality StaleData).
+        if let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), self.config.alarm_table()) {
+            eng.begin();
+            let mut t = rt.fresh_head;
+            while let Some(cell) = self.cells.get(t as usize) {
+                if !expires(cell, up_to) {
+                    break;
+                }
+                eng.stage_tag(table, t, cell.value, Quality::Uncertain(UncertainReason::StaleData), op)?;
+                t = cell.next;
+            }
+            eng.check()?;
+        }
         // Pop the prefix: those tags leave `Good`, hence the list.
         let mut t = rt.fresh_head;
         while t != NIL {
@@ -861,10 +1013,93 @@ impl Kernel {
             Some(c) => c.prev = NIL,
             None => rt.fresh_tail = NIL,
         }
+        self.alarm_commit(op);
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
             kind: AppliedKind::FreshnessExpired { expired_tags: n },
         })
+    }
+
+    /// VS-005: operator acknowledgement (ADR 0012 §3).
+    fn acknowledge(
+        &mut self,
+        alarm_id: AlarmId,
+        token: u64,
+        actor_uid: u32,
+        op: u64,
+    ) -> Result<TransitionOutcome, ApplyError> {
+        let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), self.config.alarm_table()) else {
+            return Err(ApplyError::AlarmsNotConfigured);
+        };
+        eng.begin();
+        if let Some(reason) = eng.stage_ack(table, alarm_id, token, actor_uid)? {
+            return Ok(TransitionOutcome::Ignored(reason));
+        }
+        eng.check()?;
+        let event_seq = eng.status().next_event_seq;
+        eng.commit(table, op);
+        Ok(TransitionOutcome::Applied {
+            operation_sequence: op,
+            kind: AppliedKind::AlarmAcknowledged { alarm_id, event_seq },
+        })
+    }
+
+    /// VS-005: durable watermark (test harness only in VS-005).
+    fn advance_watermark(&mut self, up_to: u64, op: u64) -> Result<TransitionOutcome, ApplyError> {
+        let Some(eng) = self.alarms.as_deref_mut() else { return Err(ApplyError::AlarmsNotConfigured) };
+        match eng.advance_watermark(up_to)? {
+            None => Ok(TransitionOutcome::Ignored(IgnoredReason::WatermarkUnchanged)),
+            Some(released) => Ok(TransitionOutcome::Applied {
+                operation_sequence: op,
+                kind: AppliedKind::DurableWatermarkAdvanced { up_to_event_seq: up_to, released },
+            }),
+        }
+    }
+
+    /// VS-005: whether alarms are configured.
+    pub fn alarms_enabled(&self) -> bool {
+        self.alarms.is_some()
+    }
+
+    /// VS-005: outbox counters and sequences (`None` without alarms). O(1).
+    pub fn outbox_status(&self) -> Option<OutboxStatus> {
+        self.alarms.as_deref().map(AlarmEngine::status)
+    }
+
+    /// VS-005: state of one alarm. O(log rules).
+    pub fn alarm(&self, alarm_id: AlarmId) -> Option<AlarmView> {
+        let table = self.config.alarm_table()?;
+        self.alarms.as_deref()?.view(table, table.rule_index(alarm_id)?)
+    }
+
+    /// VS-005: one page of the alarms that are `active || unacknowledged`, with id greater
+    /// than `after` (`AlarmId(0)` = from the start), ascending. Fills `out` up to
+    /// `min(limit, out.capacity())` without allocating. O(page + skipped empty blocks).
+    pub fn alarm_snapshot_page(&self, after: AlarmId, limit: usize, out: &mut Vec<AlarmView>) -> Option<SnapshotPage> {
+        let table = self.config.alarm_table()?;
+        Some(self.alarms.as_deref()?.snapshot(table, after, limit, out))
+    }
+
+    /// VS-005: events after `after_event_seq`, in order, up to `min(limit, out.capacity())`.
+    /// Reading never frees a slot and never moves the durable watermark. O(page).
+    pub fn read_alarm_events(
+        &self,
+        after_event_seq: u64,
+        limit: usize,
+        out: &mut Vec<AlarmEvent>,
+    ) -> Option<EventPage> {
+        Some(self.alarms.as_deref()?.read(after_event_seq, limit, out))
+    }
+
+    /// VS-005: one event, if still in the ring.
+    pub fn alarm_event(&self, event_seq: u64) -> Option<AlarmEvent> {
+        self.alarms.as_deref()?.event(event_seq)
+    }
+
+    /// VS-005: BLAKE3 of every event still readable, for replay comparisons in tests.
+    /// O(capacity): never on the hot path.
+    pub fn alarm_events_digest(&self) -> Option<[u8; 32]> {
+        self.alarms.as_deref().map(AlarmEngine::events_digest)
     }
 
     /// VS-004, pure query for the runtime watchdog: how many tags a
@@ -892,7 +1127,13 @@ impl Kernel {
     /// Version of the encoding [`Self::state_digest`] uses: 1 (VS-003 encoding) unless at
     /// least one source is supervised, then 2.
     pub fn state_digest_version(&self) -> u16 {
-        if self.config.any_supervision() { STATE_DIGEST_VERSION_SUPERVISED } else { STATE_DIGEST_VERSION }
+        if self.alarms.is_some() {
+            STATE_DIGEST_VERSION_ALARMS
+        } else if self.config.any_supervision() {
+            STATE_DIGEST_VERSION_SUPERVISED
+        } else {
+            STATE_DIGEST_VERSION
+        }
     }
 
     /// Owned logical snapshot, ordered by `SourceId` and `TagId`. Not for the hot path.
@@ -935,6 +1176,13 @@ impl Kernel {
                     last_observed_operation: c.observed,
                 })
                 .collect(),
+            alarms: match (self.alarms.as_deref(), self.config.alarm_table()) {
+                (Some(eng), Some(table)) => Some(AlarmsSnapshot {
+                    alarms: (0..eng.rules()).filter_map(|r| eng.view(table, r)).collect(),
+                    outbox: eng.status(),
+                }),
+                _ => None,
+            },
         }
     }
 
@@ -958,7 +1206,8 @@ impl Kernel {
     /// is supervised (ADR 0011 §7: v1 fields plus the supervision markers, appended in the
     /// same canonical order). Computed on demand; allocation free.
     pub fn state_digest(&self) -> [u8; 32] {
-        let v2 = self.config.any_supervision();
+        // v3 (alarms) carries every v2 field, then the alarm section.
+        let v2 = self.config.any_supervision() || self.alarms.is_some();
         let mut h = CanonicalHasher::new(b"scada.kernel.state", self.state_digest_version());
         h.raw(&self.config.fingerprint());
         h.u64(self.last_operation_sequence);
@@ -1030,6 +1279,9 @@ impl Kernel {
             if v2 {
                 h.u64(c.observed);
             }
+        }
+        if let Some(eng) = self.alarms.as_deref() {
+            eng.hash_into(&mut h);
         }
         h.finish()
     }
@@ -1248,6 +1500,94 @@ mod tests {
             }
         }
         assert_eq!(caps, (k.staging.capacity(), k.sources[0].last_batch.entries.capacity(), k.cells.capacity()));
+    }
+
+    fn alarm_kernel() -> Kernel {
+        use crate::alarm::{AlarmCondition, AlarmRuleSpec, AlarmSpec, Severity};
+        let spec = ConfigSpec {
+            limits: Default::default(),
+            tags: vec![TagSpec { tag_id: TagId(1), name: "a".into(), value_type: ValueType::I64 }],
+            sources: vec![SourceSpec {
+                source_id: SourceId(7),
+                name: "s".into(),
+                channels: vec![ChannelSpec { channel_id: ChannelId(1), tag_id: TagId(1), value_type: ValueType::I64 }],
+                supervision: Supervision::NONE,
+            }],
+        };
+        let rules = vec![
+            AlarmRuleSpec {
+                alarm_id: AlarmId(1),
+                name: "hi".into(),
+                tag_id: TagId(1),
+                condition: AlarmCondition::High { trip: 10, reset: 5 },
+                severity: Severity::Major,
+            },
+            AlarmRuleSpec {
+                alarm_id: AlarmId(2),
+                name: "bq".into(),
+                tag_id: TagId(1),
+                condition: AlarmCondition::BadQuality,
+                severity: Severity::Warning,
+            },
+        ];
+        let a = AlarmSpec { max_rules: 2, outbox_capacity_events: 4, rules };
+        Kernel::new(Arc::new(ValidatedConfig::validate_with_alarms(spec, Some(a)).unwrap()))
+    }
+
+    /// VS-005: the event sequence never wraps; exhaustion is a typed refusal without effect.
+    #[test]
+    fn event_sequence_exhaustion_is_atomic() {
+        let mut k = alarm_kernel();
+        k.apply(input(1, Operation::SourceConnected { source_id: SourceId(7), link_generation: 1, source_epoch: 9 }))
+            .unwrap();
+        k.apply(input(2, batch(BatchMode::FullState, 1, 0))).unwrap();
+        // One event still fits (u64::MAX - 1); two do not.
+        k.alarms.as_deref_mut().unwrap().set_next_event_seq_for_test(u64::MAX - 1);
+        let (snap, d) = (k.logical_snapshot(), k.state_digest());
+        assert_eq!(
+            k.apply(input(3, batch(BatchMode::Delta, 2, 11))),
+            Ok(TransitionOutcome::Applied {
+                operation_sequence: 3,
+                kind: AppliedKind::Batch { continuity: Continuity::Continuous, changed_tags: 1 }
+            })
+        );
+        let (snap2, d2) = (k.logical_snapshot(), k.state_digest());
+        assert_ne!((snap, d), (snap2.clone(), d2));
+        k.alarms.as_deref_mut().unwrap().set_next_event_seq_for_test(u64::MAX);
+        let (snap, d) = (k.logical_snapshot(), k.state_digest());
+        assert_eq!(k.apply(input(4, batch(BatchMode::Delta, 3, 0))), Err(ApplyError::EventSequenceExhausted));
+        assert_eq!((snap, d), (k.logical_snapshot(), k.state_digest()));
+        // A transition without events is still possible.
+        assert!(k.apply(input(4, batch(BatchMode::Delta, 3, 12))).is_ok());
+    }
+
+    #[test]
+    fn alarm_apply_never_grows_internal_storage() {
+        let mut k = alarm_kernel();
+        let cap = |k: &Kernel| {
+            let a = k.alarms.as_deref().unwrap();
+            (k.staging.capacity(), format!("{:?}", a.status().capacity))
+        };
+        let c0 = cap(&k);
+        k.apply(input(1, Operation::SourceConnected { source_id: SourceId(7), link_generation: 1, source_epoch: 9 }))
+            .unwrap();
+        k.apply(input(2, batch(BatchMode::FullState, 1, 0))).unwrap();
+        let mut op = 3;
+        for i in 0..2_000u64 {
+            let r = k.apply(input(op, batch(BatchMode::Delta, 2 + i, if i % 2 == 0 { 20 } else { 0 })));
+            match r {
+                Ok(_) => op += 1,
+                Err(ApplyError::OutboxCapacityExceeded { .. }) => {
+                    let last = k.outbox_status().unwrap().next_event_seq - 1;
+                    k.apply(input(op, Operation::AdvanceDurableWatermark { up_to_event_seq: last })).unwrap();
+                    op += 1;
+                    k.apply(input(op, batch(BatchMode::Delta, 2 + i, if i % 2 == 0 { 20 } else { 0 }))).unwrap();
+                    op += 1;
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        assert_eq!(c0, cap(&k));
     }
 
     #[test]
