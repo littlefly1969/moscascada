@@ -705,7 +705,9 @@ fn ack(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext, a: AckArg
         let _ = reply.send(AlarmReply::Ack(o));
     };
     let durable_store = links.persist.as_ref().is_some_and(|p| p.durable);
-    if require_durable && !durable_store {
+    // A durable answer needs a durable journal and an idempotency key (the client must be
+    // able to retry without a second acknowledgement).
+    if require_durable && (!durable_store || action_id.is_none()) {
         return now(reply, AckOutcome::DurabilityUnavailable);
     }
     // Retry of a known action id: same outcome, no new event.

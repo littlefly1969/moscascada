@@ -8,7 +8,7 @@ echo "== clippy"; cargo clippy --workspace --all-targets -- -D warnings
 echo "== test";   cargo test --workspace
 echo "== test (release, runtime under multi_thread(2))"
 # The multiprocess tests spawn the simulator binary, which `-p scada-runtime` does not build.
-cargo build --release -p scada-sim-driver
+cargo build --release -p scada-sim-driver -p scada-journal
 SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime
 echo "== test (release, VS-001/VS-002/VS-003 runtime suite under the VS-003 ingress policies, ADR 0010)"
 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
@@ -23,6 +23,13 @@ SCADA_TEST_ALARMS=1 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_INGRESS=source_fair:1 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
+echo "== test (release, VS-001..VS-005 runtime suite with the VS-006 durable journal enabled, ADR 0013)"
+# Default-off (J10) is covered by every run above (no [persistence] section). Here the same
+# suite runs with [persistence] (synchronous=FULL) and the historian: the journal must not
+# change any earlier outcome (tests whose subject is volatility pin persistence off).
+SCADA_TEST_PERSISTENCE=1 cargo test --release -p scada-runtime
+SCADA_TEST_PERSISTENCE=1 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
+SCADA_TEST_PERSISTENCE=1 SCADA_TEST_ALARMS=1 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
 echo "== alarm capacity model (VS-005 T15)"
 python3 scripts/test_alarm_capacity.py
 echo "== alarm catalog example (VS-005, docs/alarm-catalog.md)"

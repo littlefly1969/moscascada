@@ -342,7 +342,9 @@ fn backpressure_when_queue_is_full() {
 fn kernel_restart_loses_volatile_state_explicitly() {
     let dir = tempfile::Builder::new().prefix("scada-restart").tempdir().unwrap();
     let path = dir.path().to_owned();
-    let k1 = KernelProc::start_in(dir, &Limits::default(), None, &[]);
+    // Subject: the volatile contract (no [persistence]); the journal restart is in vs006.rs.
+    let volatile = Limits { persistence: None, ..Limits::default() };
+    let k1 = KernelProc::start_in(dir, &volatile, None, &[]);
     let id1 = k1.instance.clone();
     let mut s = Session::connect(&k1.socket, "t", 1001, 42).unwrap();
     let ack = s.request(&full(1, true, true, 3000)).unwrap();
@@ -359,7 +361,7 @@ fn kernel_restart_loses_volatile_state_explicitly() {
     assert_eq!(tmp, path);
     // The driver notices the loss as EOF / error on its connection.
     assert!(s.request(&batch(BatchMode::Delta, 2, &[(3, Val::I(1))])).is_err());
-    let k2 = KernelProc::start_in(k1_dir, &Limits::default(), None, &[]);
+    let k2 = KernelProc::start_in(k1_dir, &volatile, None, &[]);
     assert_ne!(k2.instance, id1, "new kernel_instance_id");
     let r = k2.introspect();
     assert_eq!(r.last_operation_sequence, 0);

@@ -707,6 +707,26 @@ mod tests {
             prop_assert!(decode_op(&longer).is_err());
         }
 
+        /// T29: a corrupted record either fails to decode or is a canonical record (it
+        /// re-encodes to the same bytes): no silent reinterpretation of a damaged row.
+        #[test]
+        fn decoded_is_canonical(op in arb_op(), flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 1..4)) {
+            let mut b = Vec::new();
+            encode_op(&op, &mut b);
+            for (i, x) in flips {
+                let n = b.len();
+                b[i % n] ^= x;
+            }
+            if let Ok(d) = decode_op(&b) {
+                let mut again = Vec::new();
+                encode_op(&d, &mut again);
+                prop_assert_eq!(&again, &b);
+            }
+            if let Ok(t) = decode_source_times(&b) {
+                prop_assert_eq!(&encode_source_times(&t), &b);
+            }
+        }
+
         /// T29: arbitrary bytes never panic the decoders.
         #[test]
         fn decoders_never_panic(b in proptest::collection::vec(any::<u8>(), 0..256)) {

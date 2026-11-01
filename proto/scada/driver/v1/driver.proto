@@ -202,7 +202,8 @@ enum Continuity {
 message InputAck {
   uint64 source_sequence = 1;
   AckStatus status = 2;
-  // Global applied-transition number; present only for ACK_STATUS_APPLIED_VOLATILE.
+  // Global applied-transition number; present for ACK_STATUS_APPLIED_VOLATILE and (VS-006)
+  // ACK_STATUS_APPLIED_DURABLE / ACK_STATUS_APPLIED_NOT_DURABLE.
   optional uint64 operation_sequence = 3;
   ErrorCode error_code = 4;
   bytes kernel_instance_id = 5;

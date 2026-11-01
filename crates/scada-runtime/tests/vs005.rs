@@ -23,8 +23,10 @@ use support::*;
 
 const SRC: u32 = 1001;
 
+/// VS-005 contract (volatile outbox, simulated sink, `durability=none`): the VS-006 journal
+/// stays off here; alarms with the journal are tested in vs006.rs.
 fn with_alarms(a: Alarms) -> Limits {
-    Limits { alarms: Some(a), ..Limits::default() }
+    Limits { alarms: Some(a), persistence: None, ..Limits::default() }
 }
 
 fn door(s: &mut Session, seq: u64, v: bool) -> scada_protocol::driver_v1::InputAck {
@@ -100,6 +102,7 @@ fn default_off_has_no_alarm_surface() {
         alarms: None,
         runtime: String::new(),
         source_1001: String::new(),
+        persistence: None,
         ..Limits::default()
     });
     assert!(!k.ready.contains("alarms="), "{}", k.ready);
