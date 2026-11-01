@@ -2,6 +2,7 @@
 # The ordinary build and test suite stays on stable. Run with:
 #   cargo +nightly fuzz run frame_decode
 #   cargo +nightly fuzz run batch_validation
+#   cargo +nightly fuzz run supervision_transitions   (VS-004)
 [package]
 name = "scada-fuzz"
 version = "0.0.0"
@@ -44,6 +45,13 @@ bench = false
 [[bin]]
 name = "decode_equivalence"
 path = "fuzz_targets/decode_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "supervision_transitions"
+path = "fuzz_targets/supervision_transitions.rs"
 test = false
 doc = false
 bench = false
