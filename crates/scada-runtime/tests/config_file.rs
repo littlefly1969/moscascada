@@ -265,3 +265,22 @@ fn invalid_alarm_sections_are_refused() {
     assert!(err("[alarms]\n", "[alarms]\nreplay_window = 5\n").contains("unknown field"));
     assert!(err("id = 1\nname", "id = 0\nname").contains("alarm"), "zero id");
 }
+
+// VS-005: the Micro alarm profile (4 GiB physical machine, 64 MiB process budget) fits its
+// budget; the same alarms under the 2 MiB acquisition-only Micro budget are refused at
+// startup with the bound in the message (fail fast, nothing silently shrunk).
+#[test]
+fn micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it() {
+    use scada_runtime::budget;
+    let text = include_str!("../../../config/profiles/micro-alarms.toml");
+    let c = config::parse(text).unwrap();
+    assert_eq!(c.core.alarm_table().unwrap().outbox_capacity(), 524_288);
+    let b = budget::compute(&c, true, false);
+    budget::check(&c, &b).unwrap();
+    assert!(b.alarm_core >= 524_288 * 48);
+    assert!(b.total < 64 << 20, "{b}");
+    let small = text.replace("memory_budget_bytes = 67108864", "memory_budget_bytes = 2097152");
+    let c = config::parse(&small).unwrap();
+    let e = budget::check(&c, &budget::compute(&c, false, false)).unwrap_err();
+    assert!(e.contains("exceeds memory_budget_bytes"), "{e}");
+}

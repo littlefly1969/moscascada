@@ -184,6 +184,26 @@ fn main() -> ExitCode {
             bound.total
         );
         println!("memory bound: {bound}");
+        // VS-005 §10: MiB, and the share of this host's physical RAM (informational only: the
+        // physical RAM is never assumed to be free for the kernel).
+        let mib = |b: u128| b as f64 / f64::from(1u32 << 20);
+        let phys = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
+            m.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse::<u64>().ok()
+        });
+        println!(
+            "memory bound: {:.2} MiB application allocations (not RSS){}{}",
+            mib(bound.total),
+            cfg.runtime.memory_budget_bytes.map_or(String::new(), |l| format!(
+                ", budget {:.2} MiB ({:.1} % used)",
+                mib(u128::from(l)),
+                bound.total as f64 / l as f64 * 100.0
+            )),
+            phys.map_or(String::new(), |kib| format!(
+                ", {:.3} % of this host's physical RAM ({:.0} MiB)",
+                bound.total as f64 / (kib as f64 * 1024.0) * 100.0,
+                kib as f64 / 1024.0
+            ))
+        );
         // VS-004: supervision summary (diagnostic output only; nothing is started).
         match &cfg.supervision {
             Some(s) => println!("supervision: {s} memory_bound_bytes={}", bound.supervision),
@@ -196,14 +216,16 @@ fn main() -> ExitCode {
                 let (fanout, worst) = t.worst_fanout();
                 println!(
                     "alarms: rules={} max_rules={} worst_fanout={} (source {}) outbox_capacity_events={} \
-                     alarm_core_bytes={} control_plane_bytes={} sizes({}) durability=NONE (volatile until VS-006)",
+                     alarm_core_bytes={} ({:.2} MiB) control_plane_bytes={} ({:.2} MiB) sizes({}) durability=NONE (volatile until VS-006)",
                     t.len(),
                     t.max_rules(),
                     fanout,
                     worst.map_or(0, |s| s.0),
                     t.outbox_capacity(),
                     bound.alarm_core,
+                    mib(bound.alarm_core),
                     bound.alarms,
+                    mib(bound.alarms),
                     l
                 );
                 if let Some(a) = &cfg.alarms {

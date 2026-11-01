@@ -132,6 +132,7 @@ fn check_config_reports_alarm_capacity() {
     assert!(text.contains("alarms: rules=22 "), "{text}");
     assert!(text.contains("outbox_capacity_events=4096"), "{text}");
     assert!(text.contains("durability=NONE"), "{text}");
+    assert!(text.contains("MiB application allocations (not RSS)"), "{text}");
     // Outbox smaller than the worst fan-out of one operation: refused at startup.
     std::fs::write(&cfg, demo_config(dir.path(), &with_alarms(Alarms::with(3, demo_rules())), None)).unwrap();
     let out = Command::new(kernel_bin()).arg("--config").arg(&cfg).arg("--check-config").output().unwrap();
