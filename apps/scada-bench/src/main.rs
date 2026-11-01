@@ -5,6 +5,8 @@
 //! scada-bench e2e        [--secs S] [--warmup-secs W]   VS-001 table (stop-and-wait + pipelined)
 //! scada-bench saturation [--secs S] [--clients N]       producers faster than the sequencer
 //! scada-bench cell  --clients N --size S --pipeline P [--secs S] [--warmup-secs W]
+//! scada-bench stale --sources S --channels C [--poll-ms P] [--fresh-ms F] [--secs S]
+//!       VS-004 review P1: an entirely stale supervised plant, probe latency, CPU, RSS
 //! scada-bench mixed --hv N [--rare-interval-us U] [--secs S] [--warmup-secs W]
 //!       [--hv-size S] [--hv-pipeline P] [--rare-sources R] [--rare-mode stop|open]
 //!       [--rare-max-outstanding K] [--takeover-interval-ms T]
@@ -143,6 +145,16 @@ fn main() {
             );
             println!("{}", r.line(&arg_str("--label").unwrap_or_default()));
         }
+        "stale" => stale(
+            &KernelSpec::from_args(),
+            arg("--sources", 64) as u32,
+            arg("--channels", 4096) as u32,
+            arg("--poll-ms", 10),
+            arg("--fresh-ms", 300),
+            arg("--rare-interval-us", 1000),
+            arg("--secs", 10),
+            &arg_str("--label").unwrap_or_default(),
+        ),
         "mixed" => mixed(
             &KernelSpec::from_args(),
             &MixedSpec {
@@ -160,7 +172,7 @@ fn main() {
             &arg_str("--label").unwrap_or_default(),
         ),
         _ => {
-            eprintln!("usage: scada-bench core|e2e|saturation|cell|mixed [options] (see module docs)");
+            eprintln!("usage: scada-bench core|e2e|saturation|cell|mixed|stale [options] (see module docs)");
             std::process::exit(2);
         }
     }
@@ -445,6 +457,12 @@ struct KernelProc {
 
 impl KernelProc {
     fn start(spec: &KernelSpec, tag: &str, extra: &[&str]) -> KernelProc {
+        Self::start_cfg(spec, tag, extra, None)
+    }
+
+    /// `config`: a complete configuration text (`{SOCKET}` is replaced by the socket path)
+    /// instead of the generated one.
+    fn start_cfg(spec: &KernelSpec, tag: &str, extra: &[&str], config: Option<&str>) -> KernelProc {
         let dir = std::env::temp_dir().join(format!("scada-bench-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
@@ -452,8 +470,22 @@ impl KernelProc {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         // Room for every load source, the rare sources and the takeover probe's two links.
-        let cfg =
-            write_config(&dir, spec.queue, spec.load_sources + 16, spec.load_sources, &spec.ipc_lines, spec.supervise);
+        let cfg = match config {
+            Some(text) => {
+                let p = dir.join("bench.toml");
+                std::fs::write(&p, text.replace("{SOCKET}", &dir.join("driver.sock").display().to_string()))
+                    .expect("write config");
+                p
+            }
+            None => write_config(
+                &dir,
+                spec.queue,
+                spec.load_sources + 16,
+                spec.load_sources,
+                &spec.ipc_lines,
+                spec.supervise,
+            ),
+        };
         let mut child = Command::new(&spec.bin)
             .arg("--config")
             .arg(&cfg)
@@ -748,11 +780,12 @@ fn supervision_kv(r: &IntrospectResponse) -> String {
         return String::new();
     }
     format!(
-        " hb_valid={} hb_coalesced={} live_exp={} live_rec={} fresh_exp={} fresh_tags={} wd_ticks={} wd_coalesced={} wd_late={} wd_late_max_ns={}",
+        " hb_valid={} hb_coalesced={} live_exp={} live_rec={} live_rec_batch={} fresh_exp={} fresh_tags={} wd_ticks={} wd_coalesced={} wd_late={} wd_late_max_ns={}",
         c.heartbeats_valid,
         c.heartbeats_coalesced,
         c.liveness_expiries,
         c.liveness_recoveries,
+        c.liveness_recoveries_by_batch,
         c.freshness_expiries,
         c.freshness_tags_expired,
         c.watchdog_ticks,
@@ -1185,5 +1218,113 @@ fn saturation(spec: &KernelSpec, secs: u64, clients: u32) {
         "- Theoretical consumer ceiling with the throttle: {:.0} requests/s; observed {:.0} batches/s.\n",
         1e6 / throttle_us as f64,
         c.batches_applied as f64 / secs as f64
+    );
+}
+
+// ---------------------------------------------------------------- VS-004 review P1
+
+/// VS-004 review P1: a large plant that has gone **entirely stale**. `sources` sources of
+/// `channels` i64 channels each (freshness `fresh_ms`, `watchdog_poll_ms = poll_ms`, no
+/// liveness), each connected once with a FullState and then silent on its open link: after
+/// `fresh_ms` every tag is `Uncertain(StaleData)` and stays so. Measured over `secs` once
+/// every tag has expired: the send→ACK latency of an unsupervised probe source (900, one
+/// observation every `interval_us`, stop-and-wait), kernel CPU (per thread) and RSS, and
+/// with `--kernel-arg --diag` the sequencer stages, among them `watchdog_lateness`.
+#[allow(clippy::too_many_arguments)]
+fn stale(
+    spec: &KernelSpec,
+    sources: u32,
+    channels: u32,
+    poll_ms: u64,
+    fresh_ms: u64,
+    interval_us: u64,
+    secs: u64,
+    label: &str,
+) {
+    assert!((1..RARE_SOURCE).contains(&sources) && (1..=4096).contains(&channels));
+    let mut c = format!(
+        "[ipc]\nsocket_path = \"{{SOCKET}}\"\nmax_frame_bytes = 131072\nmax_driver_connections = {}\ninput_queue_capacity = {}\n\
+         max_inflight_per_connection = 32\nhandshake_timeout_ms = 5000\nframe_timeout_ms = 5000\n\n\
+         [runtime]\nwatchdog_poll_ms = {poll_ms}\n\n[core]\nmax_observations_per_batch = {channels}\n",
+        sources + 4,
+        spec.queue
+    );
+    use std::fmt::Write as _;
+    for src in 1..=sources {
+        for ch in 1..=channels {
+            let _ = write!(c, "\n[[tags]]\nid = {}\nname = \"s{src}c{ch}\"\ntype = \"i64\"\n", src * 10_000 + ch);
+        }
+    }
+    let _ = write!(c, "\n[[tags]]\nid = {}\nname = \"probe\"\ntype = \"i64\"\n", RARE_SOURCE * 10_000 + 1);
+    for src in 1..=sources {
+        let _ = write!(
+            c,
+            "\n[[sources]]\nid = {src}\nname = \"stale-{src}\"\nfreshness_timeout_ms = {fresh_ms}\nchannels = [\n"
+        );
+        for ch in 1..=channels {
+            let _ = writeln!(c, "  {{ channel = {ch}, tag = {}, type = \"i64\" }},", src * 10_000 + ch);
+        }
+        c.push_str("]\n");
+    }
+    let _ = write!(
+        c,
+        "\n[[sources]]\nid = {RARE_SOURCE}\nname = \"probe\"\nchannels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
+        RARE_SOURCE * 10_000 + 1
+    );
+    let probe = RARE_SOURCE.to_string();
+    let extra: Vec<&str> =
+        if spec.args.iter().any(|a| a == "--diag") { vec!["--diag-probe-source", &probe] } else { vec![] };
+    let k = KernelProc::start_cfg(spec, &format!("stale-{sources}x{channels}"), &extra, Some(&c));
+    // Every source: FullState once, then an open, silent link (kept until the end).
+    let t0 = Instant::now();
+    let held: Vec<(Session, u64)> = (1..=sources).map(|src| open(&k.socket(), src, epoch_for(src), channels)).collect();
+    let loaded_s = t0.elapsed().as_secs_f64();
+    let total = u64::from(sources) * u64::from(channels);
+    let deadline = Instant::now() + Duration::from_millis(fresh_ms) + Duration::from_secs(60);
+    loop {
+        let expired = k.introspect().counters.as_ref().map_or(0, |c| c.freshness_tags_expired);
+        if expired >= total {
+            break;
+        }
+        assert!(Instant::now() < deadline, "only {expired}/{total} tags expired");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Everything is stale: from now on no tag is eligible any more.
+    std::thread::sleep(Duration::from_millis(200));
+    let rss_idle = proc_status(k.pid(), "VmRSS:");
+    let before = k.introspect_with(true); // reset diagnostics
+    let dur = Duration::from_secs(secs);
+    let sock = k.socket();
+    let probe_h = std::thread::spawn(move || {
+        run_client(sock, RARE_SOURCE, 1, 1, Duration::ZERO, dur, 1, Some(Duration::from_micros(interval_us)), None)
+    });
+    let usage = measure_window(k.pid(), dur, rss_idle);
+    let intro = k.introspect();
+    let r = probe_h.join().expect("probe");
+    let lat = stats(r.lat);
+    let ctr = |f: fn(&scada_protocol::introspect_v1::RuntimeCounters) -> u64, x: &IntrospectResponse| {
+        x.counters.as_ref().map_or(0, f)
+    };
+    let ticks = ctr(|c| c.watchdog_ticks, &intro) - ctr(|c| c.watchdog_ticks, &before);
+    let expiries = ctr(|c| c.freshness_expiries, &intro) - ctr(|c| c.freshness_expiries, &before);
+    drop(held);
+    println!(
+        "kind=stale label={label} scheduler={} sources={sources} channels={channels} tags={total} poll_ms={poll_ms} fresh_ms={fresh_ms} load_s={loaded_s:.1} window_ticks={ticks} window_expiries={expiries} probe_n={} probe_p50_ns={} probe_p99_ns={} probe_p999_ns={} probe_max_ns={} cpu_pct={:.1} cpu_threads={} ctx_vol_s={:.0} ctx_invol_s={:.0} rss_idle_kib={} rss_steady_kib={} rss_peak_kib={} threads={}{}{}",
+        scheduler_of(&k.ready),
+        lat.n,
+        lat.p50,
+        lat.p99,
+        lat.p999,
+        lat.max,
+        usage.cpu_pct,
+        usage.cpu_by_thread,
+        usage.ctx_vol_per_s,
+        usage.ctx_invol_per_s,
+        usage.rss_idle,
+        usage.rss_steady,
+        usage.peak,
+        usage.threads,
+        stages_kv(&intro),
+        supervision_kv(&intro)
     );
 }

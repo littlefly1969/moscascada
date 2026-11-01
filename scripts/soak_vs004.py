@@ -32,7 +32,7 @@ COUNTERS = {5: "batches_applied", 6: "batches_duplicate", 7: "batches_rejected",
             1: "connections_accepted", 10: "active_connections", 13: "heartbeats_valid", 14: "heartbeats_invalid",
             15: "heartbeats_coalesced", 16: "liveness_expiries", 17: "liveness_recoveries", 18: "freshness_expiries",
             19: "freshness_tags_expired", 20: "watchdog_ticks", 21: "watchdog_ticks_coalesced",
-            22: "watchdog_ticks_late", 23: "watchdog_max_late_ns"}
+            22: "watchdog_ticks_late", 23: "watchdog_max_late_ns", 24: "liveness_recoveries_by_batch"}
 
 
 def varint(b, i):

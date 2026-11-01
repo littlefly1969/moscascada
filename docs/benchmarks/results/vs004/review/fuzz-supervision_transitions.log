@@ -1,0 +1,29 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running `target/x86_64-unknown-linux-gnu/release/supervision_transitions -artifact_prefix=/home/claude/moscascada/fuzz/artifacts/supervision_transitions/ -max_total_time=60 corpus/supervision_transitions`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2318911004
+INFO: Loaded 1 modules   (7292 inline 8-bit counters): 7292 [0x55faa9bbc230, 0x55faa9bbdeac), 
+INFO: Loaded 1 PC tables (7292 PCs): 7292 [0x55faa9bbdeb0,0x55faa9bda670), 
+INFO:      662 files found in corpus/supervision_transitions
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 662 min: 4b max: 208b total: 31287b rss: 36Mb
+#663	INITED cov: 1008 ft: 4204 corp: 549/26Kb exec/s: 0 rss: 77Mb
+#708	NEW    cov: 1011 ft: 4266 corp: 550/26Kb lim: 215 exec/s: 0 rss: 80Mb L: 3/208 MS: 5 ChangeBit-InsertByte-ChangeByte-ChangeBinInt-EraseBytes-
+#946	REDUCE cov: 1011 ft: 4266 corp: 550/26Kb lim: 215 exec/s: 0 rss: 90Mb L: 121/208 MS: 3 CopyPart-ChangeASCIIInt-EraseBytes-
+#977	NEW    cov: 1011 ft: 4269 corp: 551/26Kb lim: 215 exec/s: 0 rss: 92Mb L: 163/208 MS: 1 CrossOver-
+#1150	REDUCE cov: 1011 ft: 4269 corp: 551/26Kb lim: 215 exec/s: 1150 rss: 99Mb L: 132/208 MS: 3 InsertByte-ChangeByte-EraseBytes-
+#1496	REDUCE cov: 1011 ft: 4269 corp: 551/26Kb lim: 215 exec/s: 1496 rss: 113Mb L: 109/208 MS: 1 CrossOver-
+#1577	NEW    cov: 1011 ft: 4275 corp: 552/26Kb lim: 215 exec/s: 1577 rss: 117Mb L: 122/208 MS: 1 CopyPart-
+#1709	NEW    cov: 1011 ft: 4277 corp: 553/26Kb lim: 215 exec/s: 1709 rss: 123Mb L: 203/208 MS: 2 ChangeByte-InsertRepeatedBytes-
+#1892	NEW    cov: 1011 ft: 4278 corp: 554/26Kb lim: 215 exec/s: 1892 rss: 130Mb L: 96/208 MS: 3 ChangeASCIIInt-ShuffleBytes-CopyPart-
+#1913	REDUCE cov: 1011 ft: 4278 corp: 554/26Kb lim: 215 exec/s: 1913 rss: 131Mb L: 37/208 MS: 1 EraseBytes-
+[... righe NEW/REDUCE omesse ...]
+"\002\000\000\000" # Uses: 471
+"t31" # Uses: 489
+"t22" # Uses: 449
+"\001\026" # Uses: 150
+"\000\013" # Uses: 61
+"\377\377\377\377\377\377\377\377" # Uses: 47
+###### End of recommended dictionary. ######
+Done 74308 runs in 61 second(s)

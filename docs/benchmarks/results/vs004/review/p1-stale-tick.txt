@@ -1,0 +1,12 @@
+round=1 variant=old kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=7.1 ticks=1000 tick_p50_ns=450486 tick_p99_ns=524032 tick_max_ns=583160 ops=192
+round=1 variant=old kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=35.2 ticks=1000 tick_p50_ns=1807054 tick_p99_ns=3477006 tick_max_ns=6875674 ops=765
+round=1 variant=new kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=4.2 ticks=1000 tick_p50_ns=1881 tick_p99_ns=2237 tick_max_ns=17320 ops=192
+round=1 variant=new kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=18.9 ticks=1000 tick_p50_ns=9655 tick_p99_ns=43114 tick_max_ns=144117 ops=765
+round=2 variant=old kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=6.9 ticks=1000 tick_p50_ns=446752 tick_p99_ns=575178 tick_max_ns=721171 ops=192
+round=2 variant=old kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=35.3 ticks=1000 tick_p50_ns=1722485 tick_p99_ns=2770499 tick_max_ns=3376601 ops=765
+round=2 variant=new kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=4.0 ticks=1000 tick_p50_ns=1840 tick_p99_ns=1909 tick_max_ns=14198 ops=192
+round=2 variant=new kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=18.0 ticks=1000 tick_p50_ns=9760 tick_p99_ns=20929 tick_max_ns=38125 ops=765
+round=3 variant=old kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=6.5 ticks=1000 tick_p50_ns=447936 tick_p99_ns=531177 tick_max_ns=1848697 ops=192
+round=3 variant=old kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=32.8 ticks=1000 tick_p50_ns=1806416 tick_p99_ns=3821999 tick_max_ns=6662350 ops=765
+round=3 variant=new kind=stale_tick sources=64 channels=4096 tags=262144 expiry_phase_ms=4.5 ticks=1000 tick_p50_ns=2003 tick_p99_ns=5143 tick_max_ns=30734 ops=192
+round=3 variant=new kind=stale_tick sources=255 channels=4096 tags=1044480 expiry_phase_ms=18.4 ticks=1000 tick_p50_ns=10296 tick_p99_ns=25776 tick_max_ns=33260 ops=765

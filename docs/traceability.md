@@ -426,3 +426,4 @@ Brief: `MoscaSCADA_VS004_Agent_Brief.md`. Base: `main` `1071547` (merge della PR
 4. Benchmark su VM con client co-residenti; ripetere su hardware dedicato prima di qualunque qualifica.
 5. Supervisione **non qualificata per produzione** e non attivata nei profili; il soak (31 min, `vs004.md` §4) copre una sola configurazione (`ct`, 4 sorgenti).
 6. Dopo un silenzio i tag non osservati restano `Uncertain(SourceSilent)` fino alla loro prossima osservazione (atteso; un driver dovrebbe inviare un `FullState` dopo un'interruzione).
+7. Review PR #4: P1 (scansione O(tag) per tick su impianto stale) corretto con la lista di freschezza ordinata per marker, misurato fino a 1M tag (`vs004.md` §9); P2 (`liveness_recoveries` senza i recuperi per batch) corretto con test.
