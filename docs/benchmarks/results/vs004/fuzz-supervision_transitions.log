@@ -1,0 +1,51 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running `target/x86_64-unknown-linux-gnu/release/supervision_transitions -artifact_prefix=/home/claude/moscascada/fuzz/artifacts/supervision_transitions/ -max_total_time=60 corpus/supervision_transitions`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3744812569
+INFO: Loaded 1 modules   (7054 inline 8-bit counters): 7054 [0x5578c8cbfdf0, 0x5578c8cc197e), 
+INFO: Loaded 1 PC tables (7054 PCs): 7054 [0x5578c8cc1980,0x5578c8cdd260), 
+INFO:        0 files found in corpus/supervision_transitions
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 384 ft: 384 corp: 1/1b exec/s: 0 rss: 37Mb
+	NEW_FUNC[1/4]: 0x5578c8ae6fd0 in <alloc::raw_vec::RawVec<scada_core::kernel::SequencedInput>>::grow_one /rustc/92b5b8c87c61b20adc9001b41baf587634a74734/library/alloc/src/raw_vec/mod.rs:196
+	NEW_FUNC[2/4]: 0x5578c8b13020 in <scada_core::kernel::Kernel>::source_status /home/claude/moscascada/crates/scada-core/src/kernel.rs:388
+#15	NEW    cov: 496 ft: 586 corp: 2/5b lim: 4 exec/s: 0 rss: 39Mb L: 4/4 MS: 3 ChangeByte-CrossOver-CMP- DE: "\377\377"-
+#18	NEW    cov: 546 ft: 657 corp: 3/9b lim: 4 exec/s: 0 rss: 40Mb L: 4/4 MS: 3 PersAutoDict-CrossOver-CrossOver- DE: "\377\377"-
+#23	NEW    cov: 559 ft: 670 corp: 4/13b lim: 4 exec/s: 0 rss: 40Mb L: 4/4 MS: 5 PersAutoDict-ChangeBit-CMP-CrossOver-CrossOver- DE: "\377\377"-"\000\000"-
+#24	NEW    cov: 561 ft: 672 corp: 5/17b lim: 4 exec/s: 0 rss: 40Mb L: 4/4 MS: 1 ShuffleBytes-
+#25	NEW    cov: 562 ft: 673 corp: 6/21b lim: 4 exec/s: 0 rss: 40Mb L: 4/4 MS: 1 ChangeByte-
+#44	NEW    cov: 563 ft: 674 corp: 7/25b lim: 4 exec/s: 0 rss: 41Mb L: 4/4 MS: 4 ChangeBinInt-ShuffleBytes-ChangeByte-ShuffleBytes-
+#45	NEW    cov: 565 ft: 676 corp: 8/29b lim: 4 exec/s: 0 rss: 42Mb L: 4/4 MS: 1 ChangeBinInt-
+#51	NEW    cov: 577 ft: 688 corp: 9/33b lim: 4 exec/s: 0 rss: 42Mb L: 4/4 MS: 1 ChangeBit-
+	NEW_FUNC[1/1]: 0x5578c8b20f40 in <scada_core::config::ValidatedConfig>::source /home/claude/moscascada/crates/scada-core/src/config.rs:479
+#56	NEW    cov: 590 ft: 701 corp: 10/37b lim: 4 exec/s: 0 rss: 42Mb L: 4/4 MS: 5 PersAutoDict-ChangeByte-ShuffleBytes-CopyPart-ChangeBit- DE: "\377\377"-
+#61	NEW    cov: 591 ft: 702 corp: 11/41b lim: 4 exec/s: 0 rss: 42Mb L: 4/4 MS: 5 EraseBytes-ChangeBit-CrossOver-ChangeBinInt-CrossOver-
+#72	NEW    cov: 595 ft: 706 corp: 12/45b lim: 4 exec/s: 0 rss: 43Mb L: 4/4 MS: 1 ChangeByte-
+[... 1033 righe NEW/REDUCE di libFuzzer omesse ...]
+"\002\000\000\000\000\000\000\000" # Uses: 241
+"\003\000" # Uses: 246
+"\377\377\377\377\377\377\000K" # Uses: 229
+"s3" # Uses: 266
+"\000\000\000\005" # Uses: 239
+"t11" # Uses: 234
+"\002\000" # Uses: 193
+"\376\377\377\377" # Uses: 180
+"\000\000\000)" # Uses: 164
+"\000\000\000\000\000\000\001U" # Uses: 173
+"\001\000\000\000\000\000\001\011" # Uses: 155
+"t31" # Uses: 184
+"\002\000\000\000" # Uses: 160
+"\377\377\377\377\377\377\377V" # Uses: 126
+"\371\000\000\000\000\000\000\000" # Uses: 79
+"\253\000\000\000\000\000\000\000" # Uses: 79
+"\377\036" # Uses: 82
+"\207\000\000\000\000\000\000\000" # Uses: 72
+"\001\000\000\000\000\000\002\015" # Uses: 50
+"\003\000\000\000" # Uses: 34
+"\000\000\000\025" # Uses: 15
+"\230\000\000\000\000\000\000\000" # Uses: 18
+"\377\014" # Uses: 5
+###### End of recommended dictionary. ######
+Done 148378 runs in 61 second(s)

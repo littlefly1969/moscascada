@@ -1,0 +1,51 @@
+   Compiling scada-fuzz v0.0.0 (/home/claude/moscascada/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.72s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running `target/x86_64-unknown-linux-gnu/release/batch_validation -artifact_prefix=/home/claude/moscascada/fuzz/artifacts/batch_validation/ -max_total_time=60 corpus/batch_validation`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 809630610
+INFO: Loaded 1 modules   (7074 inline 8-bit counters): 7074 [0x5580eb4ee7b0, 0x5580eb4f0352), 
+INFO: Loaded 1 PC tables (7074 PCs): 7074 [0x5580eb4f0358,0x5580eb50bd78), 
+INFO:       10 files found in corpus/batch_validation
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 10 min: 8b max: 23b total: 136b rss: 37Mb
+#12	INITED cov: 661 ft: 963 corp: 10/136b exec/s: 0 rss: 37Mb
+	NEW_FUNC[1/2]: 0x5580eb314800 in core::ptr::drop_glue::<prost::error::DecodeError> /rustc/92b5b8c87c61b20adc9001b41baf587634a74734/library/core/src/ptr/mod.rs:844
+	NEW_FUNC[2/2]: 0x5580eb327580 in <prost::error::DecodeError as core::convert::From<prost::error::DecodeErrorKind>>::from /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/error.rs:95
+#13	NEW    cov: 669 ft: 978 corp: 11/156b lim: 23 exec/s: 0 rss: 38Mb L: 20/23 MS: 1 CopyPart-
+#14	NEW    cov: 672 ft: 981 corp: 12/166b lim: 23 exec/s: 0 rss: 38Mb L: 10/23 MS: 1 ShuffleBytes-
+#15	NEW    cov: 672 ft: 985 corp: 13/176b lim: 23 exec/s: 0 rss: 38Mb L: 10/23 MS: 1 ChangeBit-
+	NEW_FUNC[1/5]: 0x5580eb3160e0 in prost::encoding::skip_field::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding.rs:166
+	NEW_FUNC[2/5]: 0x5580eb326e40 in <prost::error::DecodeError>::push /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/error.rs:70
+#16	NEW    cov: 695 ft: 1014 corp: 14/186b lim: 23 exec/s: 0 rss: 38Mb L: 10/23 MS: 1 ChangeByte-
+#17	NEW    cov: 699 ft: 1018 corp: 15/200b lim: 23 exec/s: 0 rss: 38Mb L: 14/23 MS: 1 InsertRepeatedBytes-
+#18	NEW    cov: 699 ft: 1020 corp: 16/216b lim: 23 exec/s: 0 rss: 38Mb L: 16/23 MS: 1 CopyPart-
+#20	NEW    cov: 704 ft: 1025 corp: 17/222b lim: 23 exec/s: 0 rss: 38Mb L: 6/23 MS: 2 EraseBytes-ChangeByte-
+#21	NEW    cov: 706 ft: 1032 corp: 18/226b lim: 23 exec/s: 0 rss: 38Mb L: 4/23 MS: 1 EraseBytes-
+#22	NEW    cov: 708 ft: 1036 corp: 19/243b lim: 23 exec/s: 0 rss: 39Mb L: 17/23 MS: 1 InsertByte-
+[... 2061 righe NEW/REDUCE di libFuzzer omesse ...]
+"\000\000\003S" # Uses: 8117
+"\000\000\000\000\000\000\000)" # Uses: 7648
+"\001\005" # Uses: 7992
+"\265\000\000\000\000\000\000\000" # Uses: 7257
+"\377\232\317\267" # Uses: 7462
+"\223\000\000\000\000\000\000\000" # Uses: 7069
+"\000\000" # Uses: 7575
+"\016\000" # Uses: 7284
+"\177\000\000\000\000\000\000\013" # Uses: 6912
+"\0074" # Uses: 7174
+"\377\377\377\377\377\377\377\016" # Uses: 6766
+"\300\000\000\000\000\000\000\000" # Uses: 6092
+"\000\000\000\003" # Uses: 6299
+"\325\001\000\000\000\000\000\000" # Uses: 6271
+"Q\000\000\000\000\000\000\000" # Uses: 6101
+"\377\001" # Uses: 6007
+"S\000" # Uses: 5770
+"R\000\000\000" # Uses: 5458
+"d\000\000\000" # Uses: 5103
+"Y\000\000\000" # Uses: 4756
+"\000\000\000\001" # Uses: 4157
+"\377\005" # Uses: 4053
+"X\000" # Uses: 3099
+###### End of recommended dictionary. ######
+Done 3516782 runs in 61 second(s)

@@ -1,0 +1,51 @@
+   Compiling scada-fuzz v0.0.0 (/home/claude/moscascada/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.73s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running `target/x86_64-unknown-linux-gnu/release/decode_equivalence -artifact_prefix=/home/claude/moscascada/fuzz/artifacts/decode_equivalence/ -max_total_time=60 corpus/decode_equivalence`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1412350833
+INFO: Loaded 1 modules   (3574 inline 8-bit counters): 3574 [0x55b3b2f85ed0, 0x55b3b2f86cc6), 
+INFO: Loaded 1 PC tables (3574 PCs): 3574 [0x55b3b2f86cc8,0x55b3b2f94c28), 
+INFO:        0 files found in corpus/decode_equivalence
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 39 ft: 39 corp: 1/1b exec/s: 0 rss: 38Mb
+#3	NEW    cov: 40 ft: 40 corp: 2/2b lim: 4 exec/s: 0 rss: 38Mb L: 1/1 MS: 1 ChangeBit-
+	NEW_FUNC[1/10]: 0x55b3b2de1dc0 in core::ptr::drop_glue::<prost::error::DecodeError> /rustc/92b5b8c87c61b20adc9001b41baf587634a74734/library/core/src/ptr/mod.rs:844
+	NEW_FUNC[2/10]: 0x55b3b2de3020 in prost::encoding::varint::decode_varint::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding/varint.rs:37
+#4	NEW    cov: 94 ft: 94 corp: 3/4b lim: 4 exec/s: 0 rss: 38Mb L: 2/2 MS: 1 InsertByte-
+#6	NEW    cov: 98 ft: 102 corp: 4/6b lim: 4 exec/s: 0 rss: 38Mb L: 2/2 MS: 2 ChangeBit-CrossOver-
+	NEW_FUNC[1/2]: 0x55b3b2de2900 in prost::encoding::skip_field::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding.rs:166
+	NEW_FUNC[2/2]: 0x55b3b2defa90 in prost::encoding::skip_field::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding.rs:166
+#9	NEW    cov: 114 ft: 118 corp: 5/8b lim: 4 exec/s: 0 rss: 38Mb L: 2/2 MS: 3 CrossOver-ChangeBit-ChangeBit-
+#16	NEW    cov: 121 ft: 127 corp: 6/12b lim: 4 exec/s: 0 rss: 38Mb L: 4/4 MS: 2 InsertByte-InsertByte-
+	NEW_FUNC[1/1]: 0x55b3b2e04410 in prost::encoding::varint::decode_varint_slice /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding/varint.rs:71
+#26	NEW    cov: 145 ft: 151 corp: 7/15b lim: 4 exec/s: 0 rss: 38Mb L: 3/4 MS: 5 CopyPart-ChangeBit-EraseBytes-CrossOver-InsertByte-
+#28	NEW    cov: 147 ft: 153 corp: 8/17b lim: 4 exec/s: 0 rss: 38Mb L: 2/4 MS: 2 ChangeByte-CopyPart-
+	NEW_FUNC[1/1]: 0x55b3b2df5450 in prost::encoding::varint::decode_varint_slow::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding/varint.rs:157
+[... 5017 righe NEW/REDUCE di libFuzzer omesse ...]
+"\001\000\000\000\000\000\000B" # Uses: 1355
+"\013\000\000\000\000\000\000\000" # Uses: 1312
+"\377b" # Uses: 1289
+"\200\377\377\377\377\377\377\371" # Uses: 1103
+"\003>" # Uses: 1119
+"\000\000\001(" # Uses: 982
+"\004\322" # Uses: 953
+"\376\377\377\377\377\377\377\377" # Uses: 873
+"\377\377\377\377\377\377\377\004" # Uses: 803
+"\000\000{az!\023\000" # Uses: 817
+"\377\004" # Uses: 775
+"\377\377" # Uses: 764
+"\007\000\000\000" # Uses: 702
+"\000\000\000\000\000\000\0001" # Uses: 608
+"\002\377\377\372" # Uses: 533
+"\377\377\377\377\377\377\377\000" # Uses: 480
+"\001\017" # Uses: 427
+">\003\000\000" # Uses: 338
+"z\000\000\000\000\000\000\000" # Uses: 328
+"\011\000\000\000\000\000\000\000" # Uses: 310
+"\001\000\000\000\000\000\000\014" # Uses: 253
+"\001\000\000\020" # Uses: 70
+"<\000\000\000\000\000\000\000" # Uses: 60
+###### End of recommended dictionary. ######
+Done 2848690 runs in 61 second(s)

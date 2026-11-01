@@ -1,0 +1,93 @@
+=== VS-003 kernel + VS-004 driver (heartbeat scenario)
+kernel: memory bound (application allocations, not RSS): total=5372620 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3612, introspection=0, diagnostics=0)
+WELCOME instance=7325c83d345d45cdda386b8a200d5ed2 version=1.0 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+HEARTBEATS sent=0 negotiated=1.0
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5372620 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3612, introspection=0, diagnostics=0)
+READY instance=7325c83d345d45cdda386b8a200d5ed2 socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo
+SIGINT: shutting down (volatile state is discarded)
+=== VS-003 kernel + VS-004 driver (demo)
+kernel: memory bound (application allocations, not RSS): total=5372620 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3612, introspection=0, diagnostics=0)
+EPOCH 706607226754775608
+WELCOME instance=25a6760582aaad23a59a41c495f9f97f version=1.0 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+delta: ACK seq=2 status=ACK_STATUS_APPLIED_VOLATILE op=3 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=2
+delta: ACK seq=3 status=ACK_STATUS_APPLIED_VOLATILE op=4 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=3
+duplicate: ACK seq=3 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+gap: ACK seq=5 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_SEQUENCE_GAP continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+invalid: ACK seq=4 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_UNKNOWN_CHANNEL continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+delta: ACK seq=4 status=ACK_STATUS_APPLIED_VOLATILE op=5 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=4
+DISCONNECTED
+WELCOME instance=25a6760582aaad23a59a41c495f9f97f version=1.0 link_generation=2 full_state_required=false last_accepted=4
+retransmit: ACK seq=4 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=4
+delta: ACK seq=5 status=ACK_STATUS_APPLIED_VOLATILE op=8 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=5
+DONE
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5372620 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3612, introspection=0, diagnostics=0)
+READY instance=25a6760582aaad23a59a41c495f9f97f socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo
+SIGINT: shutting down (volatile state is discarded)
+=== VS-004 kernel default-off + VS-003 driver (demo)
+kernel: memory bound (application allocations, not RSS): total=5372660 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=0)
+EPOCH 9475775539940168852
+WELCOME instance=4bd1152e5634769a68fab7ba9d90eb37 version=1.0 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+delta: ACK seq=2 status=ACK_STATUS_APPLIED_VOLATILE op=3 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=2
+delta: ACK seq=3 status=ACK_STATUS_APPLIED_VOLATILE op=4 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=3
+duplicate: ACK seq=3 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+gap: ACK seq=5 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_SEQUENCE_GAP continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+invalid: ACK seq=4 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_UNKNOWN_CHANNEL continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+delta: ACK seq=4 status=ACK_STATUS_APPLIED_VOLATILE op=5 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=4
+DISCONNECTED
+WELCOME instance=4bd1152e5634769a68fab7ba9d90eb37 version=1.0 link_generation=2 full_state_required=false last_accepted=4
+retransmit: ACK seq=4 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=4
+delta: ACK seq=5 status=ACK_STATUS_APPLIED_VOLATILE op=8 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=5
+DONE
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5372660 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=0)
+READY instance=4bd1152e5634769a68fab7ba9d90eb37 socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo supervision=off
+SIGINT: shutting down (volatile state is discarded)
+=== VS-004 kernel supervised + VS-003 driver (demo)
+kernel: memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+EPOCH 6682784963264291068
+WELCOME instance=f8aaba7b1b67ce6b9d42bb7999a06b9c version=1.0 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+delta: ACK seq=2 status=ACK_STATUS_APPLIED_VOLATILE op=3 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=2
+delta: ACK seq=3 status=ACK_STATUS_APPLIED_VOLATILE op=4 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=3
+duplicate: ACK seq=3 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+gap: ACK seq=5 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_SEQUENCE_GAP continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+invalid: ACK seq=4 status=ACK_STATUS_REJECTED op=- error=ERROR_CODE_UNKNOWN_CHANNEL continuity=CONTINUITY_UNSPECIFIED last_accepted=3
+delta: ACK seq=4 status=ACK_STATUS_APPLIED_VOLATILE op=5 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=4
+DISCONNECTED
+WELCOME instance=f8aaba7b1b67ce6b9d42bb7999a06b9c version=1.0 link_generation=2 full_state_required=false last_accepted=4
+retransmit: ACK seq=4 status=ACK_STATUS_DUPLICATE op=- error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_UNSPECIFIED last_accepted=4
+delta: ACK seq=5 status=ACK_STATUS_APPLIED_VOLATILE op=8 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_CONTINUOUS last_accepted=5
+DONE
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+READY instance=f8aaba7b1b67ce6b9d42bb7999a06b9c socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo supervision=1
+SIGINT: shutting down (volatile state is discarded)
+=== VS-004 kernel supervised + VS-004 driver (heartbeat)
+kernel: memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+WELCOME instance=68a0a3be848efb4da974ae186c7746a5 version=1.1 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+HEARTBEATS sent=1000 negotiated=1.1
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+READY instance=68a0a3be848efb4da974ae186c7746a5 socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo supervision=1
+SIGINT: shutting down (volatile state is discarded)
+=== VS-004 kernel supervised + VS-004 driver --legacy-hello (heartbeat)
+kernel: memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+WELCOME instance=9caad34014d8a0c34ae9946c446510d6 version=1.0 link_generation=1 full_state_required=true last_accepted=-
+full_state: ACK seq=1 status=ACK_STATUS_APPLIED_VOLATILE op=2 error=ERROR_CODE_UNSPECIFIED continuity=CONTINUITY_BASELINE_ESTABLISHED last_accepted=1
+HEARTBEATS sent=0 negotiated=1.0
+driver exit=0
+kernel log tail:
+memory bound (application allocations, not RSS): total=5374196 (connections=2803200 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=3652, introspection=0, diagnostics=0, supervision=1536)
+READY instance=9caad34014d8a0c34ae9946c446510d6 socket=/tmp/claude-0/compat/d.sock scheduler=current_thread ingress=fifo supervision=1
+SIGINT: shutting down (volatile state is discarded)

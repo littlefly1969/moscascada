@@ -1,8 +1,10 @@
-# Contratto semantico (VS-001, aggiornato in VS-002 e VS-003)
+# Contratto semantico (VS-001, aggiornato in VS-002, VS-003 e VS-004)
 
-Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009.
+Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009; VS-003 ADR 0010; VS-004 ADR 0011.
 
 **VS-002 non modifica lo schema `scada.driver.v1`** (nessun campo, messaggio o valore enum nuovo; `buf breaking` contro la baseline v1.0 è verde) né la semantica di `Kernel::apply`, di `APPLIED_VOLATILE`, della deduplicazione e della qualità. Cambiano solo due comportamenti del runtime, entrambi espressi con messaggi già esistenti (§2.1), e si aggiunge una procedura raccomandata per il driver (§5.1). Lo schema di sola diagnostica `scada.introspect.v1` riceve solo campi additivi.
+
+**VS-004 introduce il minor 1.1** di `scada.driver.v1` (tutto additivo, `buf breaking` verde): `Hello.protocol_minor`, messaggio `Heartbeat`, `ERROR_CODE_INVALID_HEARTBEAT` (§2.3), e la supervisione opzionale di liveness e freschezza (§6.1). **A supervisione disabilitata (default) il contratto è quello VS-003**: stessi esiti, stesse qualità, stessi ACK, digest v1.
 
 ## 1. Identità
 
@@ -22,7 +24,7 @@ Relazione `driver_id` ↔ `source_id`: una connessione = una sessione logica = u
 
 1. Il driver apre la connessione e invia `DriverMessage{hello}` entro `handshake_timeout_ms`.
 2. Il kernel verifica nell'ordine: messaggio decodificabile e di tipo `Hello` (`INVALID_HELLO` / `UNEXPECTED_MESSAGE`), major `1` presente (`UNSUPPORTED_VERSION`), `driver_id` ≤64 B, `source_epoch ≠ 0` (`INVALID_HELLO`), `source_id` configurata (`UNKNOWN_SOURCE`), UID del peer autorizzato se la sorgente ha `authorized_uids` (`UNAUTHORIZED`). In caso di errore: `HandshakeRejected` e chiusura.
-3. Il sequencer applica `SourceConnected(source_id, link_generation, source_epoch)` e il kernel risponde `Welcome` con `kernel_instance_id`, versione negoziata (1.0), `link_generation`, limiti, `full_state_required`, `last_accepted_source_sequence` (se esiste baseline nella stessa epoca).
+3. Il sequencer applica `SourceConnected(source_id, link_generation, source_epoch)` e il kernel risponde `Welcome` con `kernel_instance_id`, versione negoziata (1.0, oppure 1.1 da VS-004: §2.3), `link_generation`, limiti, `full_state_required`, `last_accepted_source_sequence` (se esiste baseline nella stessa epoca).
 4. Il driver invia `ObservationBatch`; può inviarne fino a `max_inflight_batches` senza attendere. Il kernel risponde con un `InputAck` per batch, nello stesso ordine.
 5. Alla chiusura (EOF, errore, timeout di frame, kill del processo) il sequencer applica `SourceDisconnected(source_id, link_generation)`.
 6. Errori di framing o di decode dopo l'handshake: `ProtocolError` e chiusura (lo stream potrebbe essere desincronizzato).
@@ -46,6 +48,16 @@ Se arriva un `Hello` per una sorgente già collegata, il nuovo link sostituisce 
 Garanzie con ogni politica: (1) ordine dei batch e degli ACK di una sorgente = ordine del socket; (2) `APPLIED_VOLATILE` solo dopo `apply`; (3) `operation_sequence` = ordine effettivo di applicazione (l'ordine **fra sorgenti** non è un contratto: cambia fra politiche ed esecuzioni; è riproducibile solo come stream catturato, §8); (4) un batch che il kernel ha ammesso riceve un esito tipizzato, o la connessione viene chiusa senza ACK (peer morto, takeover, arresto) — mai un ACK inventato; (5) `SourceDisconnected` di un link è applicato dopo tutti i batch che quel link ha fatto ammettere.
 
 Con `source_fair`, inoltre: un `Hello` è ammesso anche con le code dati sature (le richieste di controllo non consumano la quota dati) ed è servito dopo al più `per_source_pending_limit` batch già ammessi della stessa sorgente e dopo al più un turno per ogni altra sorgente attiva; un batch del vecchio link ammesso prima del `Hello` è applicato con la vecchia generazione, uno ammesso dopo è rifiutato `LINK_SUPERSEDED`. Il limite è in **turni di servizio**, non un tempo: nessuna garanzia hard real-time.
+
+### 2.3 Minor 1.1 e heartbeat (VS-004, ADR 0011 D2–D3)
+
+- Il driver dichiara in `Hello.protocol_minor` il minor massimo che parla (assente/0 = 1.0, driver VS-001..003). Il kernel VS-004 risponde `negotiated_protocol_minor = min(1, protocol_minor)`; un kernel VS-001..003 risponde sempre 0.
+- **Regola obbligatoria del driver:** inviare `DriverMessage{heartbeat}` **solo se** `Welcome.negotiated_protocol_minor >= 1`. Un kernel 1.0 tratta un heartbeat come messaggio inatteso e chiude il link.
+- `Heartbeat.sequence` ≥ 1 e strettamente crescente sul link; non è un timestamp né una prova di acquisizione. Nessuna identità: vale per la sorgente del `Hello`.
+- **Nessun `InputAck`** per un heartbeat; nessun effetto su `source_sequence`, deduplicazione, ACK dei batch, `operation_sequence`.
+- Heartbeat su link negoziato 1.0 → `ProtocolError{UNEXPECTED_MESSAGE}`; `sequence` 0 o non crescente → `ProtocolError{INVALID_HEARTBEAT}`; in entrambi i casi chiusura (fatale).
+- Un heartbeat valido prova solo che il driver è vivo (§6.1): **non rinnova mai la freschezza né porta un tag a `Good`**. Raffiche di heartbeat sono coalescenti (al più una prova per tick del watchdog), non entrano nella coda del sequencer e non consumano memoria.
+- Con supervisione disabilitata gli heartbeat di un driver 1.1 sono accettati, contati e senza effetto.
 
 ## 3. Ingresso e ACK
 
@@ -121,7 +133,25 @@ Test: `vs002.rs::reconnection_with_partial_deltas_then_fresh_full_state`, `simul
 | `SourceConnected` (anche takeover) | `Uncertain(SourceUnavailable)`, valore preservato | resta `Unknown` |
 | Disconnessione di generazione vecchia | nessun effetto | nessun effetto |
 
-Un valore `fault=true` correttamente ricevuto è un dato `Good`: la qualità descrive la comunicazione, non lo stato fisico. Nessun timeout nel core; un futuro timeout entrerà come operazione `TimerFired` sequenziata.
+Un valore `fault=true` correttamente ricevuto è un dato `Good`: la qualità descrive la comunicazione, non lo stato fisico. Nessun timeout nel core: da VS-004 le scadenze entrano come operazioni sequenziate decise dal runtime (§6.1).
+
+### 6.1 Supervisione opzionale (VS-004, ADR 0011) — disabilitata per default
+
+Per sorgente: `liveness_timeout_ms` e/o `freshness_timeout_ms` in `[[sources]]`; `[runtime] watchdog_poll_ms` (default 250, 10..=60000). Ogni timeout `>= 3 × watchdog_poll_ms`, `<= 86 400 000`, `freshness / poll <= 4096`; configurazioni incoerenti rifiutate all'avvio.
+
+- **Liveness.** Prova di vita = heartbeat valido del link corrente o batch **applicato** (non `Duplicate`, non rifiutato). Nessuna prova per `>= liveness_timeout` ⇒ operazione `SourceSilenceExpired`: sorgente `Silent`, **link ancora `Connected`** (nessun `SourceDisconnected` fittizio), tag con valore → `Uncertain(SourceSilent)`, valore preservato. Un heartbeat successivo ⇒ `SourceLivenessRestored`: sorgente `Alive`, **nessun tag cambia**. Un batch applicato rende la sorgente `Alive` e `Good` solo i tag che contiene.
+- **Freschezza per tag.** Un batch applicato rinnova ogni tag che contiene (anche con valore identico; `FullState` = tutti, `Delta` = solo i presenti). `Duplicate`, `REJECTED`, malformati, heartbeat: nessun rinnovo. Un tag `Good` non rinnovato da `>= freshness_timeout` ⇒ `Uncertain(StaleData)`, valore preservato, revisione +1 solo su questo primo cambio. Un tag mai osservato resta `Unknown`.
+- **Precedenza:** `SourceUnavailable` > `SourceSilent` > `StaleData`; una degradazione si applica solo verso un rango strettamente maggiore; **solo un'osservazione applicata porta `Good`**.
+- **Precisione:** una scadenza è rilevata fra `T` e `T + watchdog_poll_ms + ritardo del tick`, **mai prima di `T`**. Nessuna garanzia hard real-time. «Freschezza» è il tempo dall'ultima osservazione nuova accettata dal kernel, non l'età fisica della misura nel dispositivo.
+- **Determinismo:** il core non legge clock. Le scadenze sono operazioni con guardie verificabili senza tempo (generazione del link; token `observed_up_to` in operation sequence) e consumano un `operation_sequence` solo se applicate; quelle obsolete (link sostituito, già silente, nulla da far scadere) sono no-op. Con supervisione attiva il digest è **v2** (aggiunge `silent`, `last_batch_operation`, marker per tag), senza supervisione resta **v1**.
+
+| Evento | Tag `Good` | Tag `Uncertain(StaleData)` | Tag `Uncertain(SourceSilent)` | Tag `Unknown` |
+|---|---|---|---|---|
+| Osservazione applicata del tag | `Good` | `Good` | `Good` | `Good` |
+| `FreshnessExpired` (tag non osservato da ≥ T) | `Uncertain(StaleData)` | invariato | invariato | invariato |
+| `SourceSilenceExpired` | `Uncertain(SourceSilent)` | `Uncertain(SourceSilent)` | invariato | invariato |
+| Heartbeat / `SourceLivenessRestored` | invariato | invariato | invariato | invariato |
+| `SourceDisconnected` / `SourceConnected` | `Uncertain(SourceUnavailable)` | `Uncertain(SourceUnavailable)` | `Uncertain(SourceUnavailable)` | invariato |
 
 Revisione: +1 a ogni cambio di `(value, quality)`; nessun wrap (`REVISION_OVERFLOW`).
 
@@ -139,3 +169,6 @@ Un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i
 - I6 Ordine di applicazione dei tag e digest indipendenti dall'ordine delle osservazioni nel batch.
 - I7 (VS-002) Equivalenza: il `Kernel::apply` ottimizzato dà lo stesso esito e lo stesso snapshot logico della copia congelata di VS-001 (`tests/reference/vs001_kernel.rs`) su ogni input (`tests/equivalence.rs`, e sugli stream catturati da kernel reali in `vs002.rs`).
 - I8 (VS-002) Per ogni sorgente, ACK nello stesso ordine dei batch e `operation_sequence` strettamente crescenti, con qualunque scheduler; nessun `operation_sequence` assegnato due volte.
+- I9 (VS-004) Senza supervisione: digest/fingerprint v1 byte-identici, operazioni di supervisione rifiutate (`SupervisionNotConfigured`).
+- I10 (VS-004) Solo un batch applicato porta un tag a `Good`; heartbeat e `SourceLivenessRestored` non cambiano nessun tag; `FreshnessExpired` cambia solo tag `Good` con marker `<=` token.
+- I11 (VS-004) Le operazioni di supervisione obsolete o ripetute sono no-op (stato, digest, `operation_sequence` invariati); il replay di uno stream catturato con scadenze riproduce lo stesso digest senza clock.
