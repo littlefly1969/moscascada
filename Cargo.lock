@@ -766,6 +766,7 @@ name = "scada-sim-driver"
 version = "0.1.0"
 dependencies = [
  "scada-protocol",
+ "tempfile",
 ]
 
 [[package]]

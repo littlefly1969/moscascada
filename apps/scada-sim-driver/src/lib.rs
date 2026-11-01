@@ -7,12 +7,12 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use scada_protocol::PROTOCOL_MAJOR;
 use scada_protocol::driver_v1::{
-    AckStatus, BatchMode, Continuity, DriverMessage, ErrorCode, Hello, InputAck, KernelMessage, Observation,
+    AckStatus, BatchMode, Continuity, DriverMessage, ErrorCode, Heartbeat, Hello, InputAck, KernelMessage, Observation,
     ObservationBatch, Welcome, driver_message, kernel_message, observation,
 };
 use scada_protocol::frame::{self, FrameError};
+use scada_protocol::{MINOR_HEARTBEAT, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 
 /// Frame limit used for reading kernel messages before the Welcome tells us the real one.
 pub const CLIENT_MAX_FRAME: u32 = 1 << 20;
@@ -62,17 +62,36 @@ pub struct Session {
     pub welcome: Welcome,
     rbuf: Vec<u8>,
     wbuf: Vec<u8>,
+    /// VS-004: sequence of the last heartbeat sent on this link (0 = none).
+    heartbeat_sequence: u64,
 }
 
+/// `Hello` announcing the highest minor this driver implements (1.1, VS-004).
 pub fn hello(driver_id: &str, source_id: u32, source_epoch: u64) -> DriverMessage {
+    hello_minor(driver_id, source_id, source_epoch, PROTOCOL_MINOR)
+}
+
+/// `Hello` of a 1.0 driver (VS-001..VS-003): byte-identical to what those drivers send
+/// (the `protocol_minor` field is absent on the wire).
+pub fn hello_v10(driver_id: &str, source_id: u32, source_epoch: u64) -> DriverMessage {
+    hello_minor(driver_id, source_id, source_epoch, 0)
+}
+
+pub fn hello_minor(driver_id: &str, source_id: u32, source_epoch: u64, protocol_minor: u32) -> DriverMessage {
     DriverMessage {
         body: Some(driver_message::Body::Hello(Hello {
             driver_id: driver_id.to_owned(),
             source_id,
             source_epoch,
             supported_protocol_majors: vec![PROTOCOL_MAJOR],
+            protocol_minor,
         })),
     }
+}
+
+/// VS-004 heartbeat message (minor 1.1).
+pub fn heartbeat(sequence: u64) -> DriverMessage {
+    DriverMessage { body: Some(driver_message::Body::Heartbeat(Heartbeat { sequence })) }
 }
 
 pub fn batch(mode: BatchMode, source_sequence: u64, obs: &[(u32, Val)]) -> DriverMessage {
@@ -113,7 +132,12 @@ pub fn connect_raw(socket: &Path, first: &DriverMessage) -> Result<(UnixStream, 
 
 impl Session {
     pub fn connect(socket: &Path, driver_id: &str, source_id: u32, source_epoch: u64) -> Result<Session, ClientError> {
-        let (s, msg) = connect_raw(socket, &hello(driver_id, source_id, source_epoch))?;
+        Session::connect_with(socket, &hello(driver_id, source_id, source_epoch))
+    }
+
+    /// Handshake with an explicit `Hello` (e.g. [`hello_v10`] for a legacy driver).
+    pub fn connect_with(socket: &Path, hello: &DriverMessage) -> Result<Session, ClientError> {
+        let (s, msg) = connect_raw(socket, hello)?;
         let welcome = match msg.body {
             Some(kernel_message::Body::Welcome(w)) => w,
             Some(kernel_message::Body::HandshakeRejected(r)) => {
@@ -127,7 +151,31 @@ impl Session {
             welcome,
             rbuf: Vec::new(),
             wbuf: Vec::new(),
+            heartbeat_sequence: 0,
         })
+    }
+
+    /// VS-004: whether the negotiated minor allows heartbeats on this link.
+    pub fn heartbeats_negotiated(&self) -> bool {
+        self.welcome.negotiated_protocol_minor >= MINOR_HEARTBEAT
+    }
+
+    /// VS-004: send one heartbeat (next sequence) and flush, only if the kernel negotiated
+    /// minor >= 1. Returns whether it was sent: against a 1.0 kernel nothing is written.
+    /// No ACK is expected.
+    pub fn heartbeat(&mut self) -> Result<bool, ClientError> {
+        if !self.heartbeats_negotiated() {
+            return Ok(false);
+        }
+        self.heartbeat_sequence += 1;
+        self.send(&heartbeat(self.heartbeat_sequence))?;
+        self.flush()?;
+        Ok(true)
+    }
+
+    /// Sequence of the last heartbeat sent (0 = none).
+    pub fn heartbeat_sequence(&self) -> u64 {
+        self.heartbeat_sequence
     }
 
     pub fn max_frame(&self) -> u32 {
