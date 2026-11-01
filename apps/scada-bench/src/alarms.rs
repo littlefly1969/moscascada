@@ -196,6 +196,60 @@ impl Timed {
 
 const HEADER: &str = "| case | ops | ops/s | events/s | p50 µs | p95 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | notes |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|";
 
+/// Sequencer hot path of the process benchmark, in-process: `sources` x 128 tags, every
+/// tag carries `rules_per_tag` quiet `high` rules (0 = alarms disabled), Delta x 128 with
+/// every value changing, rotating over the sources. No per-op timer: wall time of chunks of
+/// 10 000 applies, `reps` repetitions; prints the median and min ns/op (A/B of variants).
+pub fn alarms_hot(sources: u32, rules_per_tag: u32, ops: u64, reps: u32) {
+    let quiet = AlarmCondition::High { trip: 1 << 60, reset: (1 << 60) - 1 };
+    let rules = sources * CHANNELS * rules_per_tag;
+    let (cfg, _) = config(sources, rules, quiet, 1 << 16);
+    let mut r = Run::new(cfg);
+    let mut inputs: Vec<Operation> = Vec::with_capacity(10_000);
+    let mut per_rep = Vec::new();
+    let mut v: i64 = 1;
+    for rep in 0..=reps {
+        let mut spent = Duration::ZERO;
+        let mut done = 0u64;
+        while done < ops {
+            inputs.clear();
+            let n = 10_000.min(ops - done);
+            for j in 0..n {
+                let s = ((done + j) % u64::from(sources)) as u32 + 1;
+                let idx = (s - 1) as usize;
+                r.seqs[idx] += 1;
+                v += 1;
+                inputs.push(Operation::ObservationBatch(ObservationBatch {
+                    source_id: SourceId(s),
+                    link_generation: r.gens[idx],
+                    mode: BatchMode::Delta,
+                    source_sequence: r.seqs[idx],
+                    observations: all(v),
+                }));
+            }
+            let t0 = Instant::now();
+            for op in inputs.drain(..) {
+                let seq = r.k.last_operation_sequence() + 1;
+                let out = r.k.apply(SequencedInput { operation_sequence: seq, operation: op });
+                debug_assert!(out.is_ok());
+                std::hint::black_box(&out);
+            }
+            spent += t0.elapsed();
+            done += n;
+        }
+        if rep > 0 {
+            per_rep.push(spent.as_nanos() as f64 / ops as f64); // rep 0 = warm-up
+        }
+    }
+    per_rep.sort_by(f64::total_cmp);
+    let med = per_rep[per_rep.len() / 2];
+    println!(
+        "kind=alarms-hot sources={sources} rules_per_tag={rules_per_tag} rules={rules} ops={ops} reps={reps} median_ns_per_op={med:.1} min_ns_per_op={:.1} all={:?}",
+        per_rep[0],
+        per_rep.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>()
+    );
+}
+
 pub fn alarms_core(ops: u64) {
     println!("## VS-005 alarm engine in-memory (`scada-bench alarms-core --ops {ops}`)\n");
     println!("Timing: `Instant::now()` around each single `apply` (inputs built outside the timed region).");

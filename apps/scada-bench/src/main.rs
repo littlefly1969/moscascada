@@ -160,6 +160,12 @@ fn main() {
     match mode.as_str() {
         "core" => core_bench(arg("--ops", 1_000_000), std::env::args().any(|a| a == "--supervised")),
         "alarms-core" => alarms::alarms_core(arg("--ops", 200_000)),
+        "alarms-hot" => alarms::alarms_hot(
+            arg("--sources", 16) as u32,
+            arg("--rules-per-tag", 1) as u32,
+            arg("--ops", 200_000),
+            arg("--reps", 7) as u32,
+        ),
         "alarm-storm" => alarms::alarm_storm(&KernelSpec::from_args()),
         "e2e" => e2e_bench(&KernelSpec::from_args(), arg("--secs", 10), arg("--warmup-secs", 2)),
         "saturation" => saturation(&KernelSpec::from_args(), arg("--secs", 60), arg("--clients", 8) as u32),

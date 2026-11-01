@@ -806,29 +806,48 @@ impl Kernel {
             }
         };
 
-        // 6. Revision overflow.
+        // 6. Revision overflow and 7. VS-005 alarm preflight, fused in ONE pass over the
+        // staged tags (vs005.md §2.3: the second pass cost ~1 µs per 128-tag batch). Alarm
+        // rules are staged for the tags whose value or quality changes, from the predicted
+        // post-batch cell (value, Good); an identical refresh changes nothing and is
+        // skipped. Precedence is unchanged: any revision overflow wins over an alarm
+        // staging error (the first one is kept and returned after the scan), and the
+        // outbox admission (`check`) comes last. Refused here = nothing applied, sequence
+        // unused.
+        let mut alarm = match (self.alarms.as_deref_mut(), config.alarm_table()) {
+            (Some(eng), Some(table)) => {
+                eng.begin();
+                Some((eng, table))
+            }
+            _ => None,
+        };
+        let mut alarm_err: Option<ApplyError> = None;
         for s in &self.staging {
             if let Some(cell) = self.cells.get(s.tag_index as usize)
                 && (cell.value != Some(s.value) || cell.quality != Quality::Good)
-                && cell.revision == u64::MAX
             {
-                let tag_id = config.tags().get(s.tag_index as usize).map_or(TagId(0), |m| m.tag_id);
-                return Err(ApplyError::RevisionOverflow(tag_id));
-            }
-        }
-
-        // 7. VS-005 alarm preflight: rules of the tags whose value or quality changes, from
-        // the predicted post-batch cell (value, Good). An identical refresh changes nothing
-        // and is skipped. Refused here (outbox full) = nothing applied, sequence unused.
-        if let (Some(eng), Some(table)) = (self.alarms.as_deref_mut(), config.alarm_table()) {
-            eng.begin();
-            for s in &self.staging {
-                if let Some(cell) = self.cells.get(s.tag_index as usize)
-                    && (cell.value != Some(s.value) || cell.quality != Quality::Good)
+                if cell.revision == u64::MAX {
+                    let tag_id = config.tags().get(s.tag_index as usize).map_or(TagId(0), |m| m.tag_id);
+                    return Err(ApplyError::RevisionOverflow(tag_id));
+                }
+                if let Some((eng, table)) = alarm.as_mut()
+                    && alarm_err.is_none()
                 {
-                    eng.stage_tag(table, s.tag_index, Some(s.value), Quality::Good, op)?;
+                    // Fast path: the tag's quiet window says no rule changes (exact; no
+                    // CSR, rule or state access). Otherwise stage its rules.
+                    if eng.is_quiet(s.tag_index, s.value) {
+                        #[cfg(debug_assertions)]
+                        eng.assert_quiet_exact(table, s.tag_index, s.value, op);
+                    } else if let Err(e) = eng.stage_tag(table, s.tag_index, Some(s.value), Quality::Good, op) {
+                        alarm_err = Some(e);
+                    }
                 }
             }
+        }
+        if let Some(e) = alarm_err {
+            return Err(e);
+        }
+        if let Some((eng, _)) = alarm {
             eng.check()?;
         }
 

@@ -672,6 +672,62 @@ pub(crate) struct AlarmEngine {
     /// Preflight scratch: capacity = worst fanout, never grows.
     staging: Vec<Staged>,
     staged_events: u64,
+    /// Quiet window per tag index (derived, never digested): a `Good` input whose value
+    /// (bool as 0/1) lies in `[lo, hi]` changes none of the tag's rules, so the batch
+    /// preflight skips the tag without touching the CSR, the rules or the states. Tags
+    /// without rules: the whole range. Empty (`lo > hi`) while any rule of the tag would
+    /// change on a `Good` input whatever the value (input not yet valid, bad-quality
+    /// rule not armed or active). Recomputed at commit for the tags of committed rules.
+    quiet: Vec<[i64; 2]>,
+    /// Tags with at least one staged rule in the current preflight, each once (capacity =
+    /// worst fanout >= distinct tags of one operation, never grows): the commit refreshes
+    /// each of their quiet windows once, O(rules of the touched tags).
+    staged_tags: Vec<u32>,
+    refresh_all: bool,
+}
+
+const FULL_WINDOW: [i64; 2] = [i64::MIN, i64::MAX];
+const EMPTY_WINDOW: [i64; 2] = [1, 0];
+
+/// Values (bool as 0/1) for which [`evaluate`] with a `Good` input returns `Ok(None)`:
+/// the exact complement of every flag change and transition of a `Good` input.
+fn rule_quiet_window(rule: &CompiledRule, st: &AlarmState) -> [i64; 2] {
+    if st.flags & F_INPUT_VALID == 0 {
+        return EMPTY_WINDOW; // a Good input sets INPUT_VALID
+    }
+    let active = st.flags & F_ACTIVE != 0;
+    match rule.kind {
+        // Good: arms (if not yet) and returns (if active).
+        K_BADQ => {
+            if st.flags & F_ARMED == 0 || active {
+                EMPTY_WINDOW
+            } else {
+                FULL_WINDOW
+            }
+        }
+        // Active iff value == expected: quiet on the value that keeps the current state.
+        K_BOOL => {
+            let x = if active { rule.trip } else { i64::from(rule.trip == 0) };
+            [x, x]
+        }
+        // Not active: trips at v >= trip. Active: returns at v <= reset.
+        K_HIGH => {
+            if active {
+                [rule.reset.saturating_add(1), i64::MAX]
+            } else {
+                [i64::MIN, rule.trip.saturating_sub(1)]
+            }
+        }
+        // Not active: trips at v <= trip. Active: returns at v >= reset.
+        K_LOW => {
+            if active {
+                [i64::MIN, rule.reset.saturating_sub(1)]
+            } else {
+                [rule.trip.saturating_add(1), i64::MAX]
+            }
+        }
+        _ => EMPTY_WINDOW,
+    }
 }
 
 /// Result of evaluating one rule against a predicted input.
@@ -750,6 +806,13 @@ impl Clone for AlarmEngine {
             last_change_op: self.last_change_op,
             staging,
             staged_events: self.staged_events,
+            quiet: self.quiet.clone(),
+            staged_tags: {
+                let mut v = Vec::with_capacity(self.staged_tags.capacity());
+                v.extend_from_slice(&self.staged_tags);
+                v
+            },
+            refresh_all: self.refresh_all,
         }
     }
 }
@@ -757,7 +820,7 @@ impl Clone for AlarmEngine {
 impl AlarmEngine {
     pub(crate) fn new(t: &AlarmTable) -> AlarmEngine {
         let n = t.rules.len();
-        AlarmEngine {
+        let mut e = AlarmEngine {
             states: vec![AlarmState::default(); n],
             listed: ListedIndex::new(n),
             ring: vec![EMPTY_EVENT; usize::try_from(t.outbox_capacity).unwrap_or(0)],
@@ -768,6 +831,47 @@ impl AlarmEngine {
             last_change_op: 0,
             staging: Vec::with_capacity(t.worst_fanout.max(1) as usize),
             staged_events: 0,
+            quiet: vec![FULL_WINDOW; t.offsets.len().saturating_sub(1)],
+            staged_tags: Vec::with_capacity(t.worst_fanout.max(1) as usize),
+            refresh_all: false,
+        };
+        for tag in 0..e.quiet.len() {
+            e.refresh_quiet(t, tag);
+        }
+        e
+    }
+
+    /// `true`: a `Good` `value` on tag index `t` changes none of its rules (exact, see
+    /// `quiet`); the caller may skip `stage_tag`.
+    #[inline]
+    pub(crate) fn is_quiet(&self, t: u32, value: Value) -> bool {
+        let x = match value {
+            Value::Bool(b) => i64::from(b),
+            Value::I64(v) => v,
+        };
+        self.quiet.get(t as usize).is_some_and(|w| w[0] <= x && x <= w[1])
+    }
+
+    /// Debug builds: the quiet window is exact (every rule of the tag evaluates to no
+    /// change). Checked on every skip by the test suites and the fuzz target.
+    #[cfg(debug_assertions)]
+    pub(crate) fn assert_quiet_exact(&self, table: &AlarmTable, t: u32, value: Value, op: u64) {
+        for &r in table.tag_rules(t as usize) {
+            if let (Some(rule), Some(&st)) = (table.rules.get(r as usize), self.states.get(r as usize)) {
+                assert_eq!(evaluate(rule, st, Some(value), Quality::Good, op), Ok(None), "quiet window not exact");
+            }
+        }
+    }
+
+    fn refresh_quiet(&mut self, table: &AlarmTable, tag: usize) {
+        let mut w = FULL_WINDOW;
+        for &r in table.tag_rules(tag) {
+            let (Some(rule), Some(st)) = (table.rules.get(r as usize), self.states.get(r as usize)) else { continue };
+            let rw = rule_quiet_window(rule, st);
+            w = [w[0].max(rw[0]), w[1].min(rw[1])];
+        }
+        if let Some(q) = self.quiet.get_mut(tag) {
+            *q = w;
         }
     }
 
@@ -779,6 +883,8 @@ impl AlarmEngine {
             .saturating_add(w0.saturating_add(w0.div_ceil(64)).saturating_mul(8))
             .saturating_add(u128::from(t.outbox_capacity).saturating_mul(size_of::<AlarmEvent>() as u128))
             .saturating_add(u128::from(t.worst_fanout.max(1)).saturating_mul(size_of::<Staged>() as u128))
+            .saturating_add((t.offsets.len().saturating_sub(1) as u128).saturating_mul(size_of::<[i64; 2]>() as u128))
+            .saturating_add(u128::from(t.worst_fanout.max(1)).saturating_mul(size_of::<u32>() as u128))
     }
 
     fn used(&self) -> u64 {
@@ -790,6 +896,23 @@ impl AlarmEngine {
     pub(crate) fn begin(&mut self) {
         self.staging.clear();
         self.staged_events = 0;
+        self.staged_tags.clear();
+        self.refresh_all = false;
+    }
+
+    /// Remember that tag `t` has staged rules (called once per tag per preflight).
+    fn note_tag(&mut self, t: u32) {
+        // Distinct staged tags <= staged rules <= worst fanout = capacity, so the list
+        // cannot overflow with a validated table; if it ever did, the commit refreshes
+        // every tag (correct, slower) instead of growing inside `apply`.
+        if self.staged_tags.last() == Some(&t) {
+            return;
+        }
+        if self.staged_tags.len() < self.staged_tags.capacity() {
+            self.staged_tags.push(t);
+        } else {
+            self.refresh_all = true;
+        }
     }
 
     fn push(&mut self, s: Staged) -> Result<(), ApplyError> {
@@ -808,6 +931,23 @@ impl AlarmEngine {
     /// Stage the rules of tag index `t` for a predicted post-transition `value`/`quality`.
     #[inline]
     pub(crate) fn stage_tag(
+        &mut self,
+        table: &AlarmTable,
+        t: u32,
+        value: Option<Value>,
+        quality: Quality,
+        op: u64,
+    ) -> Result<(), ApplyError> {
+        let before = self.staging.len();
+        let result = self.stage_tag_rules(table, t, value, quality, op);
+        if self.staging.len() != before {
+            self.note_tag(t);
+        }
+        result
+    }
+
+    #[inline]
+    fn stage_tag_rules(
         &mut self,
         table: &AlarmTable,
         t: u32,
@@ -853,6 +993,9 @@ impl AlarmEngine {
         s.flags &= !F_UNACKED;
         let rule = u32::try_from(r).map_err(|_| ApplyError::UnknownAlarm(alarm_id))?;
         self.push(Staged { rule, state: s, event: Some(AlarmEventKind::Acknowledged), actor_uid })?;
+        if let Some(tag) = table.rules.get(r).map(|x| x.tag) {
+            self.note_tag(tag);
+        }
         Ok(None)
     }
 
@@ -910,6 +1053,19 @@ impl AlarmEngine {
             }
             self.listed.set(s.rule, state.flags & (F_ACTIVE | F_UNACKED) != 0);
         }
+        if self.refresh_all {
+            for tag in 0..self.quiet.len() {
+                self.refresh_quiet(table, tag);
+            }
+        } else {
+            for i in 0..self.staged_tags.len() {
+                if let Some(&tag) = self.staged_tags.get(i) {
+                    self.refresh_quiet(table, tag as usize);
+                }
+            }
+        }
+        self.staged_tags.clear();
+        self.refresh_all = false;
         self.next_event_seq = seq;
         self.last_change_op = op;
         self.high_water = self.high_water.max(self.used());
@@ -1153,6 +1309,55 @@ mod tests {
 
     fn rule(kind: u8, trip: i64, reset: i64) -> CompiledRule {
         CompiledRule { trip, reset, tag: 0, kind, severity: Severity::Major }
+    }
+
+    /// The quiet window is EXACT: for every rule kind, every reachable flag combination
+    /// and values around (and at the extremes of) the thresholds, `x` lies in the window
+    /// iff a `Good` input `x` leaves the rule unchanged (`evaluate` = `Ok(None)`).
+    #[test]
+    fn quiet_window_is_exact() {
+        let rules = [
+            rule(K_HIGH, 10, 5),
+            rule(K_HIGH, i64::MAX, i64::MAX - 1),
+            rule(K_HIGH, i64::MIN + 1, i64::MIN),
+            rule(K_LOW, -10, -5),
+            rule(K_LOW, i64::MIN, i64::MIN + 1),
+            rule(K_LOW, i64::MAX - 1, i64::MAX),
+            rule(K_BOOL, 1, 0),
+            rule(K_BOOL, 0, 0),
+            rule(K_BADQ, 0, 0),
+        ];
+        let mut checked = 0u32;
+        for r in &rules {
+            let mut xs: Vec<i64> =
+                vec![i64::MIN, i64::MIN + 1, i64::MIN + 2, -1, 0, 1, 2, i64::MAX - 2, i64::MAX - 1, i64::MAX];
+            for t in [r.trip, r.reset] {
+                for d in -2i64..=2 {
+                    xs.push(t.saturating_add(d));
+                }
+            }
+            for flags in 0u8..16 {
+                let st = AlarmState { token: 3, occurrence: 2, last_event_seq: 9, flags };
+                let w = rule_quiet_window(r, &st);
+                for &x in &xs {
+                    let v = if r.kind == K_BOOL {
+                        if !(0..=1).contains(&x) {
+                            continue;
+                        }
+                        Value::Bool(x == 1)
+                    } else if r.kind == K_BADQ {
+                        Value::Bool(x & 1 == 1)
+                    } else {
+                        Value::I64(x)
+                    };
+                    let x = if let Value::Bool(b) = v { i64::from(b) } else { x };
+                    let unchanged = evaluate(r, st, Some(v), Quality::Good, 77) == Ok(None);
+                    assert_eq!(w[0] <= x && x <= w[1], unchanged, "{r:?} flags={flags:#06b} x={x} w={w:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1_000);
     }
 
     #[test]
