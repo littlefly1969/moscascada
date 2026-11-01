@@ -24,6 +24,7 @@ ack_coalesce_max = 32
 #   "source_fair" (lane per sorgente servite round-robin) con per_source_pending_limit
 #   (1..=max_inflight_per_connection): misurata utile solo in saturazione con current_thread
 #   e coda 16 (p99 rara -75 %, throughput -21 %); su multi_thread nessun beneficio. vs003.md.
+#   NON qualificata per produzione: condizioni di promozione in ADR 0010 §11.6.
 # ingress_policy = "fifo"
 # per_source_pending_limit = 4
 

@@ -216,6 +216,13 @@ Dettagli e tabella in `docs/benchmarks/vs003.md` §1. Sintesi: con `mt2`, 16 hv,
 3. **B (`source_capped`) non è tenuta**: dove migliora (cap 1) equivale a ridurre la coda globale (già configurabile con `input_queue_capacity`), con cap 4 non ha effetto. Codice riproducibile dal commit `b21dc31`.
 4. **D (DRR) non implementata**: il modello non mostra squilibrio utile (−1/2 % di attesa) e la misura mostra che l'ordine di servizio non è il termine dominante.
 5. Il default resta modificabile solo con una nuova campagna che mostri il beneficio su hardware con core dedicati (vedi lavoro futuro in `vs003.md` §6).
+6. **`source_fair` non è qualificata per produzione.** Prima di abilitarla in un profilo operativo, o di renderla default, servono misure che chiudano tutti questi punti (review VS-003):
+   1. soak ≥ 60 min con 16 e 32 sorgenti, flood, takeover e disconnect ripetuti, arresto e crash del sequencer; RSS e heap stabili, nessun permit perso (permessi disponibili = configurati a riposo), nessuna starvation (ogni sorgente servita entro il bound in turni);
+   2. sanitizer o model checking della concorrenza (`loom` o equivalente) sul protocollo `Mutex` + `Condvar` + semafori, dove praticabile;
+   3. DHAT (allocazioni per batch) e `perf`/contesa del `Mutex` su `mt2`: il costo di throughput va spiegato prima di ottimizzare l'algoritmo;
+   4. benchmark con client su host separato o core dedicati, e su ARM64 reale (profilo Micro);
+   5. latenza della rara giudicata su `rare_sched_p99` e `rare_late` (dal tempo pianificato), non solo sul p99 send→ACK, che sotto saturazione sottostima il ritardo (`vs003.md` §4: su `ct` Q64, 25 ms contro 350–480 ms).
+7. **Criterio di rimozione.** `source_fair` aggiunge un percorso concorrente senza vantaggio per il profilo Server. Va rimossa (come B, lasciando il commit di riferimento) se la prossima campagna sui punti 6.3–6.4 non mostra, in almeno un profilo supportato, una riduzione ripetibile di `rare_sched_p99` ≥ 2× con throughput hv ≥ −10 % rispetto alla FIFO con la stessa `input_queue_capacity`, oppure se i punti 6.1–6.2 trovano un difetto il cui costo di correzione supera il beneficio misurato.
 
 ## 12. Fonti
 

@@ -345,3 +345,4 @@ Brief: `MoscaSCADA_VS003_Agent_Brief.md`. Base: VS-002 finale `d9502c1` (P1/P2, 
 3. `source_fair` costa −10…−39 % di throughput su `multi_thread` (contesa del mutex, ipotesi non profilata) e +10 % di p99 in underload `mt2`.
 4. Soak ≥ 60 min, dhat e `perf` non eseguiti per `source_fair`.
 5. Garanzie in **turni di servizio**, non in tempo: nessuna garanzia hard real-time.
+6. `source_fair` è un esperimento opt-in **non qualificato per produzione**: condizioni di promozione e criterio di rimozione in ADR 0010 §11.6–§11.7; latenza della rara da giudicare su `rare_sched_p99`/`rare_late` (`vs003.md` §4).
