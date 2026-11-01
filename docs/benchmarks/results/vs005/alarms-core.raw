@@ -1,0 +1,27 @@
+kind=alarms-core case=quiet rules=0 n=200000 ops_s=273441 events_s=0 p50_ns=2997 p95_ns=3929 p99_ns=8921 p999_ns=52985 max_ns=2705237 allocs_per_op=0.000 alarm_storage_0_B,_table_0_B,_validate_31.6_ms
+kind=alarms-core case=quiet rules=100 n=200000 ops_s=224723 events_s=0 p50_ns=3651 p95_ns=5268 p99_ns=12517 p999_ns=55516 max_ns=2601541 allocs_per_op=0.000 alarm_storage_3153752_B,_table_420334_B,_validate_28.3_ms
+kind=alarms-core case=quiet rules=1000 n=200000 ops_s=242730 events_s=0 p50_ns=3539 p95_ns=4753 p99_ns=10495 p999_ns=48144 max_ns=2614689 allocs_per_op=0.000 alarm_storage_3184008_B,_table_517534_B,_validate_21.4_ms
+kind=alarms-core case=quiet rules=100000 n=200000 ops_s=204231 events_s=0 p50_ns=4133 p95_ns=6147 p99_ns=13705 p999_ns=51381 max_ns=2929192 allocs_per_op=0.000 alarm_storage_6364576_B,_table_11209534_B,_validate_51.3_ms
+kind=alarms-core case=storm events/op=1 n=200000 ops_s=282788 events_s=282788 p50_ns=3189 p95_ns=4654 p99_ns=6198 p999_ns=25067 max_ns=2464869 allocs_per_op=0.000 trip+clear_alternate
+kind=alarms-core case=storm events/op=10 n=20000 ops_s=264556 events_s=2645564 p50_ns=3316 p95_ns=4633 p99_ns=7041 p999_ns=40004 max_ns=812515 allocs_per_op=0.000 trip+clear_alternate
+kind=alarms-core case=storm events/op=100 n=2000 ops_s=179345 events_s=17934546 p50_ns=4697 p95_ns=6831 p99_ns=11723 p999_ns=34666 max_ns=522967 allocs_per_op=0.000 trip+clear_alternate
+kind=alarms-core case=storm events/op=1000 n=2000 ops_s=27044 events_s=27044305 p50_ns=35290 p95_ns=48300 p99_ns=71269 p999_ns=115654 max_ns=504679 allocs_per_op=0.000 trip+clear_alternate
+kind=alarms-core case=disconnect fanout=128 n=1562 ops_s=338411 events_s=43316591 p50_ns=2790 p95_ns=2873 p99_ns=5047 p999_ns=22129 max_ns=92705 allocs_per_op=0.000 raises_fanout_events
+kind=alarms-core case=reconnect FullState fanout=128 n=1562 ops_s=191584 events_s=24522712 p50_ns=5092 p95_ns=5176 p99_ns=7765 p999_ns=21897 max_ns=21919 allocs_per_op=0.000 returns_fanout_events
+kind=alarms-core case=disconnect fanout=1024 n=500 ops_s=30998 events_s=31742217 p50_ns=30520 p95_ns=45851 p99_ns=55243 p999_ns=108170 max_ns=108170 allocs_per_op=0.000 raises_fanout_events
+kind=alarms-core case=reconnect FullState fanout=1024 n=500 ops_s=27535 events_s=28195475 p50_ns=32865 p95_ns=43750 p99_ns=65030 p999_ns=741960 max_ns=741960 allocs_per_op=0.000 returns_fanout_events
+kind=alarms-core case=disconnect fanout=8192 n=500 ops_s=2867 events_s=23489918 p50_ns=326369 p95_ns=480526 p99_ns=611777 p999_ns=1364166 max_ns=1364166 allocs_per_op=0.000 raises_fanout_events
+kind=alarms-core case=reconnect FullState fanout=8192 n=500 ops_s=2821 events_s=23106433 p50_ns=328462 p95_ns=508023 p99_ns=675173 p999_ns=1674700 max_ns=1674700 allocs_per_op=0.000 returns_fanout_events
+kind=alarms-core case=accept at free == required (C) n=1 ops_s=146606 events_s=18765577 p50_ns=6821 p95_ns=6821 p99_ns=6821 p999_ns=6821 max_ns=6821 allocs_per_op=0.000 128_events_into_the_last_128_slots
+kind=alarms-core case=refuse at C+1 (outbox full) n=20000 ops_s=282653 events_s=0 p50_ns=2989 p95_ns=4539 p99_ns=5707 p999_ns=33506 max_ns=66451 allocs_per_op=0.000 OutboxCapacityExceeded,_state_unchanged
+kind=alarms-core case=ack n=10000 ops_s=10223590 events_s=10223590 p50_ns=84 p95_ns=104 p99_ns=231 p999_ns=483 max_ns=44170 allocs_per_op=0.000 1_000_alarms_x_10_rounds
+kind=alarms-cold rules=100 cap=65536 validate_ms=0.07 new_ms=0.381 storage_b=3153752 table_b=11246 per_rule_b=192.7
+kind=alarms-cold rules=1000 cap=65536 validate_ms=0.46 new_ms=0.315 storage_b=3184008 table_b=112030 per_rule_b=150.3
+kind=alarms-cold rules=100000 cap=65536 validate_ms=53.86 new_ms=5.955 storage_b=6364576 table_b=11200318 per_rule_b=144.2
+kind=alarms-cold rules=1000000 cap=1048576 validate_ms=516.65 new_ms=54.127 storage_b=82470896 table_b=110097086 per_rule_b=142.2
+kind=alarms-core case=SourceSilenceExpired fanout=128 n=1562 ops_s=347549 events_s=44486275 p50_ns=2757 p95_ns=2874 p99_ns=3710 p999_ns=26120 max_ns=29649 allocs_per_op=0.000 raises_fanout_bad-quality_events
+kind=alarms-core case=FreshnessExpired fanout=128 n=1562 ops_s=308082 events_s=39434517 p50_ns=3142 p95_ns=3175 p99_ns=3942 p999_ns=21953 max_ns=31066 allocs_per_op=0.000 raises_fanout_events
+kind=alarms-core case=FreshnessExpired stale plant rules=128 n=1562 ops_s=24818075 events_s=0 p50_ns=32 p95_ns=65 p99_ns=100 p999_ns=227 max_ns=367 allocs_per_op=0.000 no_candidate:_Ignored,_O(1)
+kind=alarms-core case=SourceSilenceExpired fanout=8192 n=200 ops_s=2888 events_s=23660598 p50_ns=327751 p95_ns=515786 p99_ns=634608 p999_ns=848486 max_ns=848486 allocs_per_op=0.000 raises_fanout_bad-quality_events
+kind=alarms-core case=FreshnessExpired fanout=8192 n=200 ops_s=2839 events_s=23256480 p50_ns=330653 p95_ns=501593 p99_ns=747045 p999_ns=1047323 max_ns=1047323 allocs_per_op=0.000 raises_fanout_events
+kind=alarms-core case=FreshnessExpired stale plant rules=8192 n=200 ops_s=5564675 events_s=0 p50_ns=144 p95_ns=461 p99_ns=541 p999_ns=703 max_ns=703 allocs_per_op=0.000 no_candidate:_Ignored,_O(1)

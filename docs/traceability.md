@@ -487,12 +487,12 @@ Brief: `MoscaSCADA_VS005_Alarm_Engine_Agent_Brief_v2.md`. Base: `main` `b762242`
 | Voce | Stato | Evidenza |
 |---|---|---|
 | Bound da `size_of` e capacità reali, `--check-config`, fail-fast | ✅ | `budget.rs` (`alarms`, `alarm_core`); `rt/config_file.rs::shipped_alarm_example_is_valid` |
-| Profili Micro (4 GiB fisici) / Server | 🟡 | profili invariati (allarmi off); esempi di dimensionamento Micro in `vs005.md` §7; nessuna misura su hardware Micro reale |
+| Profili Micro (4 GiB fisici) / Server | 🟡 | `config/profiles/micro-alarms.toml` (budget 64 MiB, outbox 524 288 slot) verificato da `rt/config_file.rs::micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it`; esempi di dimensionamento in `vs005.md` §7; nessuna misura su hardware Micro reale |
 | Capacity tool A/B/C, formule, test | ✅ | `scripts/alarm_capacity.py`, `scripts/test_alarm_capacity.py` (8 test, T15) |
-| A/B VS-004 vs VS-005 disabilitato | vedi `vs005.md` §2 | `results/vs005/c1-ab.txt`, tabelle `c1-*.md` |
+| A/B VS-004 vs VS-005 disabilitato | ✅ nessuna regressione ripetibile di throughput (25/25 celle), RSS +2,5…+3,7 %; allarmi on mt2 −16…−26 % (`vs005.md` §2) | `results/vs005/c1-ab.txt`, tabelle `c1-*.md` |
 | Enabled: no trip, storm, fan-out, pressione, C/C+1, preflight, zero alloc, cold start | ✅ | `vs005.md` §3, `results/vs005/alarms-core.*` |
-| Storm 60 s misurato PASS/FAIL + sink fermo | vedi `vs005.md` §4–§5 | `results/vs005/storm.txt` |
-| Soak ≥ 30 min | vedi `vs005.md` §6 | `results/vs005/soak/` |
+| Storm 60 s misurato PASS/FAIL + sink fermo | ✅ (`vs005.md` §4–§5) | `results/vs005/storm.txt` |
+| Soak ≥ 30 min | ✅ (`vs005.md` §6) | `results/vs005/soak.txt` |
 | T01–T15 | ✅ | sopra; T13 (≥ 100 000 regole: `alarms-core` A/F fino a 1 000 000 regole); T14 `restart_is_a_new_instance` |
 | CI: allarmi on/off, supervisione on/off, FIFO, `source_fair`, ct/mt2, fuzz smoke | ✅ | `scripts/check.sh`, `.github/workflows/ci.yml` (`alarm_transitions` 60 s) |
 | ARM64 | 🟡 | solo `cargo check` (**NOT TESTED ON HARDWARE**) |

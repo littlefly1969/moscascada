@@ -31,3 +31,7 @@ run --label S4_ct_stopped_max   --alarms 1:1048576:storm --clients 4 --size 128 
 run --label S4_mt2_stopped_max  --alarms 1:1048576:storm --clients 4 --size 128 --sink stopped "${MT[@]}"
 # S5: slow consumer (pages of 16) against the unthrottled storm.
 run --label S5_ct_slow_sink     --alarms 1:1048576:storm --clients 4 --size 128 --sink drain --sink-page 16
+# S6: unthrottled storm the drain sink keeps up with (fewer producers): sustained rate with
+#     zero refusals over 60 s = the level-A input of scripts/alarm_capacity.py.
+run --label S6_ct_drain_2 --alarms 1:1048576:storm --clients 2 --size 128 --sink drain
+run --label S6_ct_drain_1 --alarms 1:1048576:storm --clients 1 --size 128 --sink drain

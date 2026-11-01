@@ -171,6 +171,13 @@ Pagine limitate da `control_page_max`, buffer per sessione riciclati; costo O(pa
 
 Vedi `docs/benchmarks/vs005.md` per i valori assoluti e la varianza: A/B VS-004 vs VS-005 disabilitato, overhead con regole senza trip, storm, fan-out, rifiuto a outbox pieno, storm di processo 60 s con sink attivo e fermo, soak.
 
+Sintesi (VM 4 vCPU, client co-residenti; valori assoluti solo relativi):
+
+- **Default-off:** nessuna regressione ripetibile di throughput in 25 celle (ct, mt2, `source_fair`, supervisione); RSS +2,5…+3,7 % (codice in più nel binario).
+- **Allarmi on, nessun trip (2 057 regole):** `current_thread` throughput invariato, CPU +10 %, RSS + ring preallocato (48 B/slot); `multi_thread(2)` pipelined **−16…−26 %** di batches/s e p99 +16…+20 %: il sequencer è il collo di bottiglia e paga ≈ 10 ns per regola valutata (+1,3 µs per batch da 128). Accettato e documentato per VS-005; candidati di ottimizzazione in `vs005.md` §2.2.
+- **In-process:** zero allocazioni in `apply` in ogni caso; 100 000 regole a riposo p50 4,1 µs (3,0 µs senza); storm 1 000 eventi/op 27 M eventi/s; fan-out 8 192 ≈ 0,33 ms p50; rifiuto C+1 p50 3,0 µs; ACK 0,08 µs; 1 000 000 regole costruite in ≈ 0,6 s, 142 B/regola.
+- **Profilo Micro:** `config/profiles/micro-alarms.toml` (budget 64 MiB, 524 288 slot = 24 MiB): ≈ 14,5 h di ritenzione a 10 eventi/s senza journal.
+
 ## 7. Compatibilità
 
 Additivo: nuovo namespace protobuf, un codice d'errore driver nuovo (44, solo con allarmi configurati), campo introspezione `alarms = 11`, nuove varianti di `Operation`/`ApplyError`/`IgnoredReason` nel core (API Rust interna). Driver 1.0/1.1 invariati; un driver legacy che riceve il codice 44 lo tratta come qualsiasi `REJECTED` con codice sconosciuto (ritenta o si ferma, secondo la sua policy).

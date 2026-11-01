@@ -1,0 +1,39 @@
+{
+  "level_A_measured": {
+    "event_record_bytes": 48,
+    "alarm_state_bytes": 32,
+    "compiled_rule_bytes": 24,
+    "per_rule_bytes_measured": 192.7,
+    "kernel_events_s_process_drain_pass": 1299864.0,
+    "kernel_events_s_in_memory_max": 44486275.0,
+    "bench_results": "docs/benchmarks/results/vs005/storm.txt + alarms-core.raw"
+  },
+  "level_B_assumed": {
+    "event_rate_per_s": 10.0,
+    "durable_rate_per_s_projection": 0.0,
+    "durable_rate_per_s_vs005": 0.0,
+    "storm_seconds": 600.0,
+    "reserve_slots": 10000,
+    "initial_backlog": 0,
+    "rules": 10000,
+    "ram_budget_mib": 1024.0,
+    "outbox_slots": null,
+    "burst_profile": null
+  },
+  "level_C_computed": {
+    "slots_from_ram_budget": 22329475,
+    "slots": 22329475,
+    "outbox_bytes": 1071814800,
+    "rule_bytes_estimate": 1927000,
+    "usable_slots": 22319475,
+    "vs005_mu_0": {
+      "net_growth_per_s": 10.0,
+      "time_to_full_s": 2231947.5,
+      "required_slots_for_storm": 16000,
+      "storm_verdict": "PASS",
+      "backlog_drain_time_s": 0.0
+    }
+  },
+  "warnings": [],
+  "limitation": "NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION: without the VS-006 journal no slot is ever released; time_to_full is the lifetime of the process at the assumed rate."
+}
