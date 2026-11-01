@@ -156,6 +156,8 @@ pub struct JournalShared {
     pub committed_events: AtomicU64,
     pub committed_bytes: AtomicU64,
     pub checkpoints_written: AtomicU64,
+    /// ADR 0013 D13: highest operation whose replay payload was compacted (0 = none).
+    pub compacted_operations: AtomicU64,
     pub last_checkpoint_op: AtomicU64,
     /// Checkpoint messages processed (written, skipped or failed).
     pub checkpoints_done: AtomicU64,
@@ -174,6 +176,8 @@ pub struct JournalShared {
     pub durable_lag: Hist,
     /// Checkpoint export pause on the sequencer.
     pub checkpoint_pause: Hist,
+    /// Writer time to store one checkpoint (commits wait behind it).
+    pub checkpoint_write: Hist,
     /// Operations per committed transaction.
     pub group_size: Hist,
     pub last_error: Mutex<String>,
@@ -197,6 +201,7 @@ impl JournalShared {
             committed_events: AtomicU64::new(0),
             committed_bytes: AtomicU64::new(0),
             checkpoints_written: AtomicU64::new(0),
+            compacted_operations: AtomicU64::new(0),
             last_checkpoint_op: AtomicU64::new(0),
             checkpoints_done: AtomicU64::new(0),
             wal_bytes: AtomicU64::new(0),
@@ -210,6 +215,7 @@ impl JournalShared {
             commit_latency: Hist::default(),
             durable_lag: Hist::default(),
             checkpoint_pause: Hist::default(),
+            checkpoint_write: Hist::default(),
             group_size: Hist::default(),
             last_error: Mutex::new(String::new()),
             shutdown: AtomicBool::new(false),

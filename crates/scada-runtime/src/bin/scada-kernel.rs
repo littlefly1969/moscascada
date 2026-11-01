@@ -307,7 +307,7 @@ fn main() -> ExitCode {
                     .map_or(0u128, |t| u128::from(t.outbox_capacity()) * scada_core::layout_sizes()[1].1 as u128);
                 println!(
                     "persistence: path={} durability={} queue_operations={} queue_bytes={} commit_max_operations={} \
-                     commit_max_delay_ms={} checkpoint_every_operations={} checkpoints_keep={} startup_check={:?} \
+                     commit_max_delay_ms={} checkpoint_every_operations={} checkpoints_keep={} compact_replay_payloads={} startup_check={:?} \
                      wal_max_bytes={} min_disk_free_bytes={} max_db_bytes={} history_socket={}",
                     p.path.display(),
                     if p.durable { "full (synchronous=FULL)" } else { "normal (NOT DURABLE, benchmark only)" },
@@ -317,6 +317,7 @@ fn main() -> ExitCode {
                     p.commit_max_delay_ms,
                     p.checkpoint_every_operations,
                     p.checkpoints_keep,
+                    p.compact_replay_payloads,
                     p.startup_check,
                     p.wal_max_bytes,
                     p.min_disk_free_bytes,
@@ -540,6 +541,7 @@ fn open_journal(
             commit_max_operations: p.commit_max_operations as usize,
             commit_max_delay: Duration::from_millis(p.commit_max_delay_ms),
             checkpoints_keep: p.checkpoints_keep,
+            compact_replay_payloads: p.compact_replay_payloads,
             wal_max_bytes: p.wal_max_bytes,
             durability: o.durability,
             boot_generation: boot,

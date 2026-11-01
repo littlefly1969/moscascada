@@ -28,6 +28,13 @@ pub struct WriterOptions {
     /// Optional extra wait for more records after the first one (0 = natural batching).
     pub commit_max_delay: Duration,
     pub checkpoints_keep: u32,
+    /// ADR 0013 D13 retention (explicit, default off): after a checkpoint, the replay
+    /// payloads of operations up to the OLDEST kept complete checkpoint (only when at
+    /// least two are kept) are emptied, in bounded chunks, each with a
+    /// `retention_markers` row. Row metadata (times, source timestamps, event links) and
+    /// the alarm history are never touched. Recovery then needs one of the kept
+    /// checkpoints: without a valid one it fails closed.
+    pub compact_replay_payloads: bool,
     pub wal_max_bytes: u64,
     pub durability: Durability,
     pub boot_generation: u64,
@@ -64,7 +71,15 @@ struct Writer {
     prev_commit: Option<(u64, u64, i64)>,
     commits: u64,
     last_stats: Option<Instant>,
+    /// Highest operation whose replay payload is compacted (from `retention_markers`).
+    compacted_upto: i64,
 }
+
+/// Operations compacted per transaction, and transactions per checkpoint: bounds the
+/// pause of the writer (the rest is done at the next checkpoint).
+const COMPACT_CHUNK: i64 = 20_000;
+const COMPACT_CHUNKS_PER_CHECKPOINT: u32 = 8;
+pub const COMPACTED_TABLE: &str = "journal_operations.payload";
 
 /// Result of one group transaction.
 struct Written {
@@ -87,6 +102,14 @@ fn ops_in(group: &[WriterMsg]) -> usize {
 impl Writer {
     fn new(store: Store, shared: Arc<JournalShared>, opts: WriterOptions, wake: Box<dyn Fn() + Send>) -> Writer {
         store.conn.set_prepared_statement_cache_capacity(32);
+        let compacted_upto = store
+            .conn
+            .query_row(
+                "SELECT coalesce(max(to_key), 0) FROM retention_markers WHERE timeline_no = ?1 AND table_name = ?2",
+                params![store.info.timeline_no, COMPACTED_TABLE],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         Writer {
             store,
             shared,
@@ -96,6 +119,7 @@ impl Writer {
             prev_commit: None,
             commits: 0,
             last_stats: None,
+            compacted_upto,
         }
     }
 
@@ -240,6 +264,11 @@ impl Writer {
                     self.shared.set_error(e.to_string());
                     self.shared.state.store(JournalState::Fault as u8, Release);
                 }
+            } else if self.opts.compact_replay_payloads
+                && let Err(e) = self.compact()
+            {
+                // Optional space reclamation: a failure leaves the payloads in place.
+                self.shared.set_error(format!("replay payload compaction skipped: {e}"));
             }
         }
         self.maybe_stats();
@@ -340,7 +369,56 @@ impl Writer {
         }
         self.shared.checkpoints_written.fetch_add(1, Relaxed);
         self.shared.last_checkpoint_op.store(m.checkpoint.last_operation_sequence, Relaxed);
-        let _ = t0;
+        self.shared.checkpoint_write.record_ns(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    /// ADR 0013 D13: empty the replay payloads covered by the oldest kept checkpoint.
+    fn compact(&mut self) -> Result<(), JournalError> {
+        let tl = self.store.info.timeline_no;
+        let c = &self.store.conn;
+        let (n, oldest): (i64, Option<i64>) = c.query_row(
+            "SELECT count(*), min(operation_seq) FROM journal_checkpoints WHERE timeline_no = ?1 AND complete = 1",
+            params![tl],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(upto) = oldest.filter(|_| n >= 2) else { return Ok(()) };
+        for _ in 0..COMPACT_CHUNKS_PER_CHECKPOINT {
+            if self.compacted_upto >= upto {
+                break;
+            }
+            let from = self.compacted_upto + 1;
+            let to = upto.min(from + COMPACT_CHUNK - 1);
+            c.execute_batch("BEGIN IMMEDIATE")?;
+            let r = (|| -> Result<(), JournalError> {
+                c.execute(
+                    "UPDATE journal_operations SET payload = x'' WHERE timeline_no = ?1 AND operation_seq BETWEEN ?2 AND ?3",
+                    params![tl, from, to],
+                )?;
+                c.execute(
+                    "INSERT INTO retention_markers (timeline_no, table_name, from_key, to_key, reason, persisted_at_utc_ns) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        tl,
+                        COMPACTED_TABLE,
+                        from,
+                        to,
+                        format!("replay payloads covered by the checkpoint at operation {upto} (compact_replay_payloads)"),
+                        realtime_ns()
+                    ],
+                )?;
+                Ok(())
+            })();
+            match r {
+                Ok(()) => c.execute_batch("COMMIT")?,
+                Err(e) => {
+                    let _ = c.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            }
+            self.compacted_upto = to;
+            self.shared.compacted_operations.store(to as u64, Relaxed);
+        }
         Ok(())
     }
 

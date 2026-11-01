@@ -57,6 +57,9 @@ fn config(fanout: u32, ring: u64) -> Arc<ValidatedConfig> {
     Arc::new(ValidatedConfig::validate_with_alarms(spec, alarms).expect("config"))
 }
 
+/// `--compact`: the writer compacts replay payloads after checkpoints (ADR 0013 D13).
+static COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn io_write_bytes() -> u64 {
     std::fs::read_to_string("/proc/self/io")
         .ok()
@@ -93,6 +96,7 @@ pub fn journal_bench() {
     let queries = arg("--queries", 2000) as usize;
     let ring = arg("--ring", 65_536);
     let label = arg_str("--label").unwrap_or_default();
+    COMPACT.store(std::env::args().any(|a| a == "--compact"), std::sync::atomic::Ordering::Relaxed);
     let durability = match arg_str("--durability").as_deref() {
         Some("normal") => Durability::NormalBenchmarkOnly,
         _ => Durability::Full,
@@ -126,6 +130,7 @@ pub fn journal_bench() {
             commit_max_operations: commit_max,
             commit_max_delay: Duration::ZERO,
             checkpoints_keep: 2,
+            compact_replay_payloads: COMPACT.load(std::sync::atomic::Ordering::Relaxed),
             wal_max_bytes: 64 << 20,
             durability,
             boot_generation: boot,
@@ -175,14 +180,14 @@ pub fn journal_bench() {
         shared.reserved_bytes.fetch_add(r.reserved_bytes, Relaxed);
         tx.send(WriterMsg::Op(Box::new(r))).expect("writer alive");
         if checkpoint_every > 0 && s.is_multiple_of(checkpoint_every) {
+            // Sequencer-side pause (as in the kernel): export + digest.
+            let t0 = Instant::now();
             let cp = k.export_checkpoint();
             let event_seq_high = k.outbox_status().map_or(0, |x| x.next_event_seq - 1);
-            tx.send(WriterMsg::Checkpoint(Box::new(CheckpointMsg {
-                checkpoint: cp,
-                state_digest: k.state_digest(),
-                event_seq_high,
-            })))
-            .expect("writer alive");
+            let state_digest = k.state_digest();
+            shared.checkpoint_pause.record_ns(t0.elapsed().as_nanos() as u64);
+            tx.send(WriterMsg::Checkpoint(Box::new(CheckpointMsg { checkpoint: cp, state_digest, event_seq_high })))
+                .expect("writer alive");
         }
         Ok(())
     };
@@ -244,10 +249,12 @@ pub fn journal_bench() {
     let durable_at = t0.elapsed();
     let events = shared.durable_event.load(Acquire);
     let commits = shared.commits.load(Relaxed);
+    let compacted = shared.compacted_operations.load(Relaxed);
     let cl = shared.commit_latency.summary();
     let gs = shared.group_size.summary();
     let checkpoints = shared.checkpoints_written.load(Relaxed);
     let cpause = shared.checkpoint_pause.summary();
+    let cwrite = shared.checkpoint_write.summary();
 
     drop(tx);
     w.join().expect("writer");
@@ -270,7 +277,7 @@ pub fn journal_bench() {
         "kind=journal label={label} durability={durable_label} fs={} ops={data_ops} total_ops={total_ops} events_per_op={fanout} events={events} \
          commit_max={commit_max} ring={ring} ring_waits={ring_waits} applied_s={:.3} durable_s={dsecs:.3} ops_per_s={:.0} events_per_s={:.0} \
          commits={commits} fsync_per_s={:.0} group_p50={} group_max={} commit_us_p50={} commit_us_p99={} commit_us_max={} \
-         checkpoints={checkpoints} checkpoint_pause_us_p99={} db_bytes={db_bytes} wal_bytes_at_close={wal_before} \
+         checkpoints={checkpoints} checkpoint_pause_us_p99={} checkpoint_write_us_p50={} checkpoint_write_us_max={} compacted_upto_op={compacted} db_bytes={db_bytes} wal_bytes_at_close={wal_before} \
          bytes_per_event={:.1} bytes_per_op={:.1} event_table_bytes={} io_write_bytes={io_bytes} write_amplification={:.2}",
         fsinfo(&dir),
         applied_at.as_secs_f64(),
@@ -283,6 +290,8 @@ pub fn journal_bench() {
         cl.p99_ns / 1000,
         cl.max_ns / 1000,
         cpause.p99_ns / 1000,
+        cwrite.p50_ns / 1000,
+        cwrite.max_ns / 1000,
         if events > 0 { db_bytes as f64 / events as f64 } else { 0.0 },
         db_bytes as f64 / total_ops as f64,
         ev_bytes.map_or("n/a".to_owned(), |b| b.to_string()),

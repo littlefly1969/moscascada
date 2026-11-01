@@ -32,6 +32,8 @@ struct FileConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePersistence {
+    /// `false` = the section is ignored (VS-005 volatile kernel); default `true`.
+    enabled: Option<bool>,
     path: PathBuf,
     /// `"full"` (default, the only durable mode) or `"normal"` (benchmarks only, needs
     /// `--test-allow-non-durable`).
@@ -42,6 +44,7 @@ struct FilePersistence {
     commit_max_delay_ms: Option<u64>,
     checkpoint_every_operations: Option<u64>,
     checkpoints_keep: Option<u32>,
+    compact_replay_payloads: Option<bool>,
     /// `"quick"` (default), `"full"` or `"none"`.
     startup_check: Option<String>,
     sqlite_cache_kib: Option<u32>,
@@ -87,6 +90,8 @@ pub struct PersistenceSettings {
     pub commit_max_delay_ms: u64,
     pub checkpoint_every_operations: u64,
     pub checkpoints_keep: u32,
+    /// ADR 0013 D13: explicit retention of replay payloads (default off).
+    pub compact_replay_payloads: bool,
     pub startup_check: StartupCheck,
     pub sqlite_cache_kib: u32,
     pub wal_max_bytes: u64,
@@ -121,7 +126,7 @@ pub struct TimeSettings {
 impl Default for TimeSettings {
     fn default() -> Self {
         TimeSettings {
-            clock_regression_alert_ms: 1_000,
+            clock_regression_alert_ms: 1,
             clock_jump_alert_ms: 60_000,
             host_sync_probe: HostSyncProbe::None,
             host_sync_probe_period_ms: 60_000,
@@ -134,6 +139,10 @@ fn parse_persistence(
     t: Option<FileTime>,
 ) -> Result<(Option<PersistenceSettings>, TimeSettings), LoadError> {
     let e = |m: String| LoadError::Persistence(m);
+    // `enabled = false`: the whole VS-006 configuration (and its [time]) is ignored.
+    if p.as_ref().is_some_and(|p| p.enabled == Some(false)) {
+        return Ok((None, TimeSettings::default()));
+    }
     let time = match t {
         None => TimeSettings::default(),
         Some(_) if p.is_none() => return Err(LoadError::Persistence("[time] requires [persistence]".into())),
@@ -177,7 +186,7 @@ fn parse_persistence(
         durable,
         journal_queue_operations: range(
             "journal_queue_operations",
-            p.journal_queue_operations.unwrap_or(4096).into(),
+            p.journal_queue_operations.unwrap_or(65_536).into(),
             16,
             1 << 20,
         )? as u32,
@@ -196,6 +205,7 @@ fn parse_persistence(
             1 << 40,
         )?,
         checkpoints_keep: range("checkpoints_keep", p.checkpoints_keep.unwrap_or(2).into(), 1, 16)? as u32,
+        compact_replay_payloads: p.compact_replay_payloads.unwrap_or(false),
         startup_check,
         sqlite_cache_kib: range("sqlite_cache_kib", p.sqlite_cache_kib.unwrap_or(8192).into(), 256, 1 << 20)? as u32,
         wal_max_bytes: range("wal_max_bytes", p.wal_max_bytes.unwrap_or(64 << 20), 1 << 20, 16 << 30)?,

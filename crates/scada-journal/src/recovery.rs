@@ -145,6 +145,17 @@ pub fn recover(c: &Connection, tl: i64, config: Arc<ValidatedConfig>) -> Result<
                 )
                 .optional()?
                 .flatten();
+            let compacted: i64 = c.query_row(
+                "SELECT count(*) FROM retention_markers WHERE timeline_no = ?1 AND table_name = ?2",
+                params![tl, crate::writer::COMPACTED_TABLE],
+                |r| r.get(0),
+            )?;
+            if compacted > 0 {
+                return Err(JournalError::Corrupt(format!(
+                    "no valid checkpoint ({}) and the replay payloads before it were compacted (compact_replay_payloads)",
+                    report.checkpoints_rejected.join("; ")
+                )));
+            }
             if first.is_some_and(|f| f != 1) {
                 return Err(JournalError::Corrupt(format!(
                     "no valid checkpoint ({}) and the journal no longer starts at operation 1",

@@ -1202,3 +1202,82 @@ fn replay_emits_nothing() {
     assert_eq!(r.counters.unwrap().batches_applied, 0, "no batch applied in this process");
     k.stop();
 }
+
+// ------------------------------------------------- T24: kill -9 during a storm, repeated
+
+/// T24 (crash-recovery part; the 30-60 min soak is `results/vs006/soak.txt`): five cycles
+/// of a durable-receipt storm (alarm 3 toggles every 4 batches) killed with SIGKILL at an
+/// arbitrary moment. After every kill: `scada-journal verify` passes on the cold store; on
+/// restart every durably acknowledged operation is there, the event sequence is gap-free
+/// and ends at the durable watermark, and the active projection of alarm 3 is the state of
+/// its last historical event (RTDB <-> alarms <-> historian coherent). The storm then
+/// resumes from the recovered source sequence.
+#[test]
+fn kill9_during_a_storm_recovers_coherently_every_time() {
+    let limits = journal_limits("checkpoint_every_operations = 50\n", Some(alarms(65536)));
+    let tool = kernel_bin().with_file_name("scada-journal");
+    let mut k = KernelProc::start_with(&limits, None, &[]);
+    let mut recovered_seq = 0u64;
+    for cycle in 0..5u64 {
+        let pid = k.pid();
+        let delay = Duration::from_millis(150 + cycle * 97);
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+        });
+        let mut last_durable_op = 0u64;
+        let mut sent = 0u64;
+        if let Ok(mut s) = Session::connect_with(&k.socket, &hello_durable("d", SRC, 77)) {
+            let mut seq = recovered_seq + 1;
+            loop {
+                let temp = if (seq / 4).is_multiple_of(2) { seq as i64 } else { 5000 + seq as i64 };
+                let msg = if seq == recovered_seq + 1 {
+                    batch(BatchMode::FullState, seq, &[(1, Val::B(false)), (2, Val::B(false)), (3, Val::I(temp))])
+                } else {
+                    batch(BatchMode::Delta, seq, &[(3, Val::I(temp))])
+                };
+                match s.request(&msg) {
+                    Ok(a) if a.status == AckStatus::AppliedDurable as i32 => {
+                        last_durable_op = a.operation_sequence.unwrap();
+                        sent = seq; // the last durably acknowledged batch
+                    }
+                    Ok(a) => panic!("cycle {cycle}: unexpected ACK {a:?}"),
+                    Err(_) => break,
+                }
+                seq += 1;
+            }
+        }
+        killer.join().unwrap();
+        let (_status, _err, dir) = k.wait_exit(Duration::from_secs(10));
+        assert!(sent > recovered_seq, "cycle {cycle}: the storm made no progress before the kill");
+        let v = std::process::Command::new(&tool).args(["verify"]).arg(db_path(dir.path())).output().unwrap();
+        assert!(v.status.success(), "cycle {cycle}: verify failed: {}", String::from_utf8_lossy(&v.stderr));
+        assert!(String::from_utf8_lossy(&v.stdout).contains("integrity_check: ok"));
+
+        k = restart(dir, &limits, &[]);
+        let durable_op = ready_u64(&k.ready, "durable_op");
+        assert!(
+            durable_op >= last_durable_op,
+            "cycle {cycle}: J1 lost a durable ACK ({durable_op} < {last_durable_op})"
+        );
+        let r = k.introspect();
+        let src = r.sources.iter().find(|x| x.source_id == SRC).unwrap();
+        recovered_seq = src.last_accepted_source_sequence.unwrap_or(0);
+        assert!(recovered_seq >= sent, "cycle {cycle}: durably acknowledged batch {sent} missing ({recovered_seq})");
+        let mut h = hist(&k);
+        let ev = all_events(&mut h);
+        let dj = h.journal().unwrap();
+        assert_eq!(ev.len() as u64, dj.durable_event_seq, "cycle {cycle}: historian != durable watermark");
+        for (i, e) in ev.iter().enumerate() {
+            assert_eq!(e.event_seq, i as u64 + 1, "cycle {cycle}: hole in the event sequence");
+        }
+        if let Some(last) = ev.iter().rev().find(|e| e.alarm_id == 3) {
+            let mut c = AlarmClient::connect(&k.alarm).unwrap();
+            let entry = snapshot_entry(&mut c, 3);
+            assert_eq!(entry.state, last.state_after, "cycle {cycle}: projection != history");
+            assert_eq!(entry.occurrence_id, last.occurrence_id, "cycle {cycle}");
+            assert_eq!(entry.last_event_seq, last.event_seq, "cycle {cycle}");
+        }
+    }
+    k.stop();
+}

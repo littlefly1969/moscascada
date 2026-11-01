@@ -750,12 +750,27 @@ fn epoch_for(source: u32) -> u64 {
 struct ClientResult {
     lat: Vec<u64>,
     batches: u64,
+    /// VS-006: explicit journal backpressure refusals (`JOURNAL_QUEUE_FULL`) seen in the
+    /// measured window; the refused batches are resent and are not counted as applied.
+    refused: u64,
+}
+
+/// VS-006: a refusal the bench treats as backpressure (resend after a pause); anything
+/// else is a harness or kernel error.
+fn backpressure(a: &scada_protocol::driver_v1::InputAck) -> bool {
+    use scada_protocol::driver_v1::ErrorCode;
+    a.status == AckStatus::Rejected as i32
+        && (a.error_code == ErrorCode::JournalQueueFull as i32 || a.error_code == ErrorCode::SequenceGap as i32)
 }
 
 /// One client: `pipeline` = 1 is stop-and-wait, > 1 keeps that many batches in flight.
-/// Latency = send of a batch -> its `AppliedVolatile` ACK, in both modes (pipelined
-/// latency therefore includes waiting behind the client's own earlier batches).
+/// Latency = send of a batch -> its applied ACK (`AppliedVolatile`, or with
+/// `--durable-receipts` `AppliedDurable`), in both modes (pipelined latency therefore
+/// includes waiting behind the client's own earlier batches).
 /// `interval`: stop-and-wait only, sleep between batches (low-traffic source).
+/// VS-006: a `JOURNAL_QUEUE_FULL` refusal is explicit backpressure: the client drains
+/// what is in flight, pauses 200 µs and resends from the kernel's
+/// `last_accepted_source_sequence` (refusals are counted, never hidden).
 #[allow(clippy::too_many_arguments)]
 fn run_client(
     socket: PathBuf,
@@ -779,8 +794,10 @@ fn run_client(
             *at += h;
         }
     };
+    let pause = Duration::from_micros(200);
     let mut lat = Vec::new();
     let mut batches = 0u64;
+    let mut refused = 0u64;
     let start = Instant::now();
     let mut v = 1i64;
     if pipeline <= 1 {
@@ -794,6 +811,14 @@ fn run_client(
             let t0 = Instant::now();
             let a = s.request(&msg).expect("request");
             let dt = t0.elapsed().as_nanos() as u64;
+            if backpressure(&a) {
+                if el >= warmup {
+                    refused += 1;
+                }
+                seq = a.last_accepted_source_sequence.map_or(seq, |l| l + 1);
+                std::thread::sleep(pause);
+                continue;
+            }
             assert!(applied_ok(a.status), "{a:?}");
             assert_eq!(a.source_sequence, seq, "ACK out of order");
             if el >= warmup {
@@ -807,38 +832,60 @@ fn run_client(
             }
         }
     } else {
-        let (mut sent, mut acked, mut counted) = (0u64, 0u64, 0u64);
+        // `next` = next source sequence to send; `in_flight` = sent, not yet answered.
+        let mut next = seq;
+        let mut counted = 0u64;
         let mut measuring = false;
-        let mut sent_at: std::collections::VecDeque<Instant> = std::collections::VecDeque::with_capacity(64);
+        let mut sent_at: std::collections::VecDeque<(u64, Instant)> = std::collections::VecDeque::with_capacity(64);
+        let mut rewind: Option<u64> = None;
         loop {
             let el = start.elapsed();
             if !measuring && el >= warmup {
                 measuring = true;
                 counted = 0;
+                refused = 0;
             }
             let done = el >= warmup + dur;
-            if !done {
+            if !done && rewind.is_none() {
                 beat(&mut s);
             }
+            if sent_at.is_empty()
+                && let Some(r) = rewind.take()
+            {
+                next = r;
+                if !done {
+                    std::thread::sleep(pause);
+                }
+            }
             let mut queued = false;
-            while !done && sent - acked < pipeline {
-                s.send(&delta(seq + sent, size, v)).expect("send");
-                sent_at.push_back(Instant::now());
-                sent += 1;
+            while !done && rewind.is_none() && (sent_at.len() as u64) < pipeline {
+                s.send(&delta(next, size, v)).expect("send");
+                sent_at.push_back((next, Instant::now()));
+                next += 1;
                 v += 1;
                 queued = true;
             }
             if queued {
                 s.flush().expect("flush");
             }
-            if acked == sent {
-                break;
-            }
+            let Some(&(want, t)) = sent_at.front() else {
+                if done {
+                    break;
+                }
+                continue;
+            };
             let a = s.recv_ack().expect("ack");
-            let t = sent_at.pop_front().expect("in flight");
+            sent_at.pop_front();
+            assert_eq!(a.source_sequence, want, "ACK out of order");
+            if backpressure(&a) {
+                if measuring && !done {
+                    refused += 1;
+                }
+                let resume = a.last_accepted_source_sequence.map_or(want, |l| l + 1);
+                rewind = Some(rewind.map_or(resume, |r: u64| r.min(resume)));
+                continue;
+            }
             assert!(applied_ok(a.status), "{a:?}");
-            assert_eq!(a.source_sequence, seq + acked, "ACK out of order");
-            acked += 1;
             if measuring && !done {
                 counted += 1;
                 lat.push(t.elapsed().as_nanos() as u64);
@@ -846,7 +893,7 @@ fn run_client(
         }
         batches = counted;
     }
-    ClientResult { lat, batches }
+    ClientResult { lat, batches, refused }
 }
 
 /// Kernel-side resource usage over a measured window.
@@ -1008,6 +1055,7 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
     let intro = k.introspect();
     let results: Vec<ClientResult> = handles.into_iter().map(|h| h.join().expect("client")).collect();
     let batches: u64 = results.iter().map(|r| r.batches).sum();
+    let refused: u64 = results.iter().map(|r| r.refused).sum();
     let applied = intro.counters.as_ref().map_or(0, |c| c.batches_applied);
     assert!(applied >= batches);
     let lat: Vec<u64> = results.into_iter().flat_map(|r| r.lat).collect();
@@ -1019,7 +1067,11 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
         lat: (!lat.is_empty()).then(|| stats(lat)),
         usage,
         scheduler: scheduler_of(&k.ready),
-        diag: stages_kv(&intro) + &supervision_kv(&intro) + &alarm_kv(&intro) + &journal_kv(&k.dir),
+        diag: stages_kv(&intro)
+            + &supervision_kv(&intro)
+            + &alarm_kv(&intro)
+            + &journal_kv(&k.dir)
+            + &if spec.persistence.is_some() { format!(" bp_refused={refused}") } else { String::new() },
     }
 }
 

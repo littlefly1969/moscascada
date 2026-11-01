@@ -58,6 +58,7 @@ fn wopts(boot: u64) -> WriterOptions {
         commit_max_operations: 64,
         commit_max_delay: Duration::ZERO,
         checkpoints_keep: 2,
+        compact_replay_payloads: false,
         wal_max_bytes: 64 << 20,
         durability: Durability::Full,
         boot_generation: boot,
@@ -455,4 +456,75 @@ fn historian_pages_beyond_the_ring() {
         [1u32, 2, 3].into_iter().filter(|a| live.alarm(AlarmId(*a)).unwrap().flags.listed()).collect();
     let proj: Vec<u32> = rows.iter().map(|r| r.alarm_id).collect();
     assert_eq!(proj, live_listed);
+}
+
+/// T23 / ADR 0013 D13: explicit replay-payload compaction. With two kept checkpoints
+/// the payloads up to the oldest one are emptied (each range has a `retention_markers`
+/// row), the history and the operation metadata stay, recovery from a kept checkpoint
+/// gives the live digest, the corrupt newest checkpoint still falls back to the older
+/// one, and with no valid checkpoint left recovery fails closed (never a silent replay
+/// of emptied payloads). Default off: nothing is compacted.
+#[test]
+fn replay_payload_compaction_is_explicit_and_fail_closed() {
+    // Default off.
+    let (_d0, path0) = dir();
+    let mut p = Pipe::open(&path0, 40);
+    workload(&mut p, 200);
+    p.wait_durable();
+    p.close();
+    let raw = rusqlite::Connection::open(&path0).unwrap();
+    let empty: i64 =
+        raw.query_row("SELECT count(*) FROM journal_operations WHERE length(payload) = 0", [], |r| r.get(0)).unwrap();
+    assert_eq!(empty, 0, "compaction is opt-in");
+
+    let (_d, path) = dir();
+    let mut p = Pipe::open_with(&path, 40, opts(&path), |w| w.compact_replay_payloads = true);
+    workload(&mut p, 400);
+    p.wait_durable();
+    let events_live = p.k.outbox_status().unwrap().next_event_seq - 1;
+    let live = p.close();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let (n, oldest): (i64, i64) = raw
+        .query_row("SELECT count(*), min(operation_seq) FROM journal_checkpoints WHERE complete = 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(n, 2);
+    let (empty, max_empty): (i64, Option<i64>) = raw
+        .query_row("SELECT count(*), max(operation_seq) FROM journal_operations WHERE length(payload) = 0", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(empty > 0, "something was compacted");
+    assert!(max_empty.unwrap() <= oldest, "never beyond the oldest kept checkpoint");
+    let marked: i64 = raw
+        .query_row(
+            "SELECT coalesce(max(to_key), 0) FROM retention_markers WHERE table_name = 'journal_operations.payload'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(marked, max_empty.unwrap(), "every compacted range is marked");
+    // Rows and history stay.
+    let rows: i64 = raw.query_row("SELECT count(*) FROM journal_operations", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows as u64, live.last_operation_sequence());
+    let ev: i64 = raw.query_row("SELECT count(*) FROM alarm_events", [], |r| r.get(0)).unwrap();
+    assert_eq!(ev as u64, events_live);
+    // Recovery from the newest checkpoint.
+    let r = reopen(&path).unwrap();
+    assert_eq!(r.kernel.state_digest(), live.state_digest());
+    // Newest corrupt: the older kept checkpoint is still usable.
+    raw.execute(
+        "UPDATE journal_checkpoints SET blob = zeroblob(length(blob)) WHERE operation_seq = (SELECT max(operation_seq) FROM journal_checkpoints)",
+        [],
+    )
+    .unwrap();
+    let r = reopen(&path).unwrap();
+    assert_eq!(r.kernel.state_digest(), live.state_digest());
+    // Both corrupt: fail-closed, naming the compaction.
+    raw.execute("UPDATE journal_checkpoints SET blob = zeroblob(length(blob))", []).unwrap();
+    match reopen(&path) {
+        Err(JournalError::Corrupt(m)) => assert!(m.contains("compacted"), "{m}"),
+        other => panic!("{other:?}"),
+    }
 }

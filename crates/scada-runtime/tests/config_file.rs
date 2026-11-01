@@ -284,3 +284,26 @@ fn micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it() {
     let e = budget::check(&c, &budget::compute(&c, false, false)).unwrap_err();
     assert!(e.contains("exceeds memory_budget_bytes"), "{e}");
 }
+
+/// VS-006: the shipped persistence example is valid, lists the defaults, and its memory
+/// is accounted; `enabled = false` is the VS-005 kernel (no persistence, default time).
+#[test]
+fn shipped_persistence_example_is_valid() {
+    use scada_runtime::budget;
+    let text = include_str!("../../../config/examples/persistence.toml");
+    let c = config::parse(text).unwrap();
+    let p = c.persistence.as_ref().expect("[persistence]");
+    assert!(p.durable);
+    assert_eq!((p.journal_queue_operations, p.journal_queue_bytes), (65_536, 64 << 20));
+    assert_eq!((p.commit_max_operations, p.checkpoint_every_operations, p.checkpoints_keep), (1024, 100_000, 2));
+    assert!(!p.compact_replay_payloads);
+    assert_eq!(p.min_disk_free_bytes, 256 << 20);
+    assert_eq!(p.history_authorized_uids, [1000]);
+    assert_eq!(c.time.clock_regression_alert_ms, 1);
+    let b = budget::compute(&c, false, false);
+    assert!(b.persistence >= u128::from(p.journal_queue_bytes), "{b}");
+    let off = text.replacen("enabled = true", "enabled = false", 1);
+    assert_ne!(off, text);
+    let c = config::parse(&off).unwrap();
+    assert!(c.persistence.is_none());
+}
