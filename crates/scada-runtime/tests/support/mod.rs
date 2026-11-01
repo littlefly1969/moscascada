@@ -37,6 +37,23 @@ pub struct Limits {
     /// variable `SCADA_TEST_INGRESS` (`source_fair:4`, `source_fair:1`, ...), so that the
     /// whole VS-001/VS-002 suite can be run under every policy.
     pub ingress: String,
+    /// VS-004: `[runtime]` lines (e.g. `watchdog_poll_ms = 20`).
+    pub runtime: String,
+    /// VS-004: extra lines of source 1001 (e.g. `liveness_timeout_ms = 150`). Default from
+    /// `SCADA_TEST_SUPERVISION=live_ms:fresh_ms` (with a 100 ms watchdog), so that the whole
+    /// earlier suite can also run with supervision enabled on that source.
+    pub source_1001: String,
+}
+
+/// `SCADA_TEST_SUPERVISION=live_ms:fresh_ms` -> (`[runtime]` lines, source lines).
+pub fn supervision_from_env() -> (String, String) {
+    match std::env::var("SCADA_TEST_SUPERVISION") {
+        Ok(v) if !v.is_empty() => {
+            let (l, f) = v.split_once(':').expect("live_ms:fresh_ms");
+            ("watchdog_poll_ms = 100\n".into(), format!("liveness_timeout_ms = {l}\nfreshness_timeout_ms = {f}\n"))
+        }
+        _ => (String::new(), String::new()),
+    }
 }
 
 /// `SCADA_TEST_INGRESS=policy:limit` -> `[ipc]` lines.
@@ -67,6 +84,8 @@ impl Default for Limits {
             read_buffer_bytes: 8_192,
             ack_coalesce_max: 32,
             ingress: ingress_from_env(),
+            runtime: supervision_from_env().0,
+            source_1001: supervision_from_env().1,
         }
     }
 }
@@ -88,6 +107,8 @@ ack_write_timeout_ms = {wt}
 read_buffer_bytes = {rb}
 ack_coalesce_max = {co}
 {ingress}
+[runtime]
+{runtime}
 [[tags]]
 id = 101
 name = "door_contact"
@@ -108,7 +129,7 @@ type = "i64"
 [[sources]]
 id = 1001
 name = "sim-enclosure-1"
-{auth}channels = [
+{auth}{sup}channels = [
   {{ channel = 1, tag = 101, type = "bool" }},
   {{ channel = 2, tag = 102, type = "bool" }},
   {{ channel = 3, tag = 103, type = "i64" }},
@@ -138,6 +159,8 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         rb = l.read_buffer_bytes,
         co = l.ack_coalesce_max,
         ingress = l.ingress,
+        runtime = l.runtime,
+        sup = l.source_1001,
     )
 }
 
