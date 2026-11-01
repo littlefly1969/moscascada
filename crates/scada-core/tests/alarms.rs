@@ -806,7 +806,7 @@ fn concretize(k: &Kernel, d: &mut Driver, a: &Act) -> Operation {
         if s == S1 { vec![(1u32, false), (2, false), (3, true), (4, false)] } else { vec![(1, false), (2, true)] }
     };
     let val = |is_bool: bool, x: u8| {
-        if is_bool { Value::Bool(x % 2 == 0) } else { Value::I64(VALS[x as usize % VALS.len()]) }
+        if is_bool { Value::Bool(x.is_multiple_of(2)) } else { Value::I64(VALS[x as usize % VALS.len()]) }
     };
     match a {
         Act::Connect(s, new_epoch) => {
