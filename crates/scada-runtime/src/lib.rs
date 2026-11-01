@@ -14,3 +14,4 @@ pub mod diag;
 pub mod ingress;
 pub mod sequencer;
 pub mod server;
+pub mod supervision;

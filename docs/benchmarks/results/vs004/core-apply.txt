@@ -1,0 +1,183 @@
+### round=1 variant=A
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 25 ns, p99 31 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 12240641 | 0.08 | 0.10 | 0.12 | 27.13 | 0.000 | 0 | 2692→5880 |
+| 32 | 300000 | 1349621 | 0.66 | 1.01 | 11.86 | 731.76 | 0.000 | 0 | 3544→5704 |
+| 128 | 300000 | 327953 | 2.76 | 4.01 | 23.31 | 3137.37 | 0.000 | 0 | 5708→6252 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 79.96 µs, p99 112.49 µs (not on the hot path).
+
+### round=1 variant=B
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 24 ns, p99 32 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 12367434 | 0.08 | 0.10 | 0.16 | 45.15 | 0.000 | 0 | 2756→5944 |
+| 32 | 300000 | 1480309 | 0.61 | 0.98 | 10.00 | 460.00 | 0.000 | 0 | 3608→5768 |
+| 128 | 300000 | 396810 | 2.29 | 3.20 | 18.36 | 1630.60 | 0.000 | 0 | 5772→6316 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 82.89 µs, p99 119.01 µs (not on the hot path).
+
+### round=1 variant=C
+## Kernel in-memory (`scada-bench core --ops 300000 --supervised`)
+
+VS-004: the source has liveness + freshness supervision (markers maintained, digest v2).
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 29 ns, p99 42 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 10058559 | 0.09 | 0.14 | 0.25 | 31.36 | 0.000 | 0 | 2672→5860 |
+| 32 | 300000 | 1458857 | 0.61 | 0.91 | 11.64 | 374.76 | 0.000 | 0 | 3524→5684 |
+| 128 | 300000 | 377176 | 2.29 | 3.74 | 22.45 | 3150.45 | 0.000 | 0 | 5688→6232 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 85.27 µs, p99 142.82 µs (not on the hot path).
+
+### round=2 variant=A
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 26 ns, p99 28 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 9729236 | 0.09 | 0.14 | 0.25 | 243.14 | 0.000 | 0 | 2720→5908 |
+| 32 | 300000 | 1257982 | 0.67 | 1.09 | 12.95 | 683.73 | 0.000 | 0 | 3572→5732 |
+| 128 | 300000 | 328998 | 2.79 | 5.74 | 25.87 | 2081.42 | 0.000 | 0 | 5736→6280 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 80.05 µs, p99 136.60 µs (not on the hot path).
+
+### round=2 variant=B
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 24 ns, p99 25 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 12138865 | 0.08 | 0.11 | 0.16 | 29.24 | 0.000 | 0 | 2680→5868 |
+| 32 | 300000 | 1374588 | 0.67 | 0.98 | 12.54 | 432.20 | 0.000 | 0 | 3532→5692 |
+| 128 | 300000 | 361671 | 2.49 | 3.82 | 24.48 | 2261.42 | 0.000 | 0 | 5696→6240 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 88.44 µs, p99 140.72 µs (not on the hot path).
+
+### round=2 variant=C
+## Kernel in-memory (`scada-bench core --ops 300000 --supervised`)
+
+VS-004: the source has liveness + freshness supervision (markers maintained, digest v2).
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 25 ns, p99 33 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 11163295 | 0.09 | 0.11 | 0.14 | 35.01 | 0.000 | 0 | 2724→5912 |
+| 32 | 300000 | 1323785 | 0.62 | 1.03 | 13.09 | 1157.09 | 0.000 | 0 | 3576→5736 |
+| 128 | 300000 | 371613 | 2.36 | 3.71 | 24.38 | 1791.23 | 0.000 | 0 | 5740→6284 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 79.16 µs, p99 131.96 µs (not on the hot path).
+
+### round=3 variant=A
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 34 ns, p99 45 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 8503171 | 0.11 | 0.14 | 0.20 | 44.51 | 0.000 | 0 | 2700→5888 |
+| 32 | 300000 | 1200956 | 0.69 | 1.16 | 13.33 | 1222.87 | 0.000 | 0 | 3552→5712 |
+| 128 | 300000 | 384010 | 2.35 | 3.45 | 18.93 | 1637.79 | 0.000 | 0 | 5716→6260 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 86.92 µs, p99 154.18 µs (not on the hot path).
+
+### round=3 variant=B
+## Kernel in-memory (`scada-bench core --ops 300000`)
+
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 24 ns, p99 34 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 11393177 | 0.08 | 0.13 | 0.20 | 131.22 | 0.000 | 0 | 2748→5936 |
+| 32 | 300000 | 1383104 | 0.61 | 0.94 | 11.91 | 655.04 | 0.000 | 0 | 3600→5760 |
+| 128 | 300000 | 384366 | 2.35 | 3.57 | 18.78 | 1376.34 | 0.000 | 0 | 5764→6308 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 84.31 µs, p99 123.38 µs (not on the hot path).
+
+### round=3 variant=C
+## Kernel in-memory (`scada-bench core --ops 300000 --supervised`)
+
+VS-004: the source has liveness + freshness supervision (markers maintained, digest v2).
+Config: 1 source x 128 i64 channels. Every Delta changes every carried value (revision +1 each).
+Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).
+Inputs are pre-built in chunks of 10 000 outside the timed region.
+
+Timer overhead (empty `Instant` pair): p50 24 ns, p99 32 ns
+
+| batch size | ops | transitions/s | p50 µs | p99 µs | p99.9 µs | max µs | allocs/op in apply | live heap Δ (bytes) | RSS start→end KiB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 300000 | 11876799 | 0.08 | 0.11 | 0.16 | 81.44 | 0.000 | 0 | 2720→5908 |
+| 32 | 300000 | 1328609 | 0.71 | 1.00 | 12.49 | 363.02 | 0.000 | 0 | 3572→5732 |
+| 128 | 300000 | 342643 | 2.52 | 4.02 | 27.06 | 2736.31 | 0.000 | 0 | 5736→6280 |
+
+transitions/s = ops / sum of measured `apply` durations (excludes input construction).
+live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.
+
+`state_digest()` on demand, 1024 tags: p50 87.46 µs, p99 148.12 µs (not on the hot path).
+

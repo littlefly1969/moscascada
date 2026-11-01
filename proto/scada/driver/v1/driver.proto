@@ -15,6 +15,16 @@
 //
 // Evolution rules: never reuse or renumber a field or enum value; reserve removed
 // numbers; no protobuf map for order-sensitive data.
+//
+// Minor versions (feature negotiation inside major 1, VS-004 / ADR 0011):
+//   1.0  VS-001..VS-003.
+//   1.1  Heartbeat (DriverMessage.heartbeat). A driver announces the highest minor it
+//        implements in Hello.protocol_minor; the kernel answers
+//        Welcome.negotiated_protocol_minor = min(kernel minor, Hello.protocol_minor).
+//        A driver MUST NOT send a message of minor N unless the negotiated minor is >= N.
+//        A 1.0 kernel ignores the unknown Hello field and answers minor 0, so an updated
+//        driver falls back to 1.0 without any other change; a 1.0 driver never sets the
+//        field and keeps working unchanged with a 1.1 kernel.
 syntax = "proto3";
 
 package scada.driver.v1;
@@ -31,6 +41,8 @@ message Hello {
   fixed64 source_epoch = 3;
   // Protocol major versions the driver can speak.
   repeated uint32 supported_protocol_majors = 4;
+  // VS-004: highest minor version of major 1 the driver implements (absent = 0, i.e. 1.0).
+  uint32 protocol_minor = 5;
 }
 
 // Limits the kernel enforces on this connection.
@@ -89,10 +101,26 @@ message ObservationBatch {
   repeated Observation observations = 3;
 }
 
+// VS-004, minor 1.1: liveness evidence of the driver on this link. Not a measurement:
+// it never refreshes a tag and never changes a quality; it can only show that the
+// driver process and the link are alive (and end a SourceSilent state of the source).
+// The source is the one of the connection's Hello; a heartbeat carries no identity, no
+// timestamp and no proof of acquisition. The kernel sends no InputAck for it.
+// `sequence` MUST be >= 1 and strictly increasing on the link; otherwise the kernel
+// answers ProtocolError{ERROR_CODE_INVALID_HEARTBEAT} and closes the connection.
+// Sending heartbeats faster than the kernel needs them is harmless (they are coalesced)
+// but useless; a period of about a third of the configured liveness timeout is enough.
+message Heartbeat {
+  uint64 sequence = 1;
+}
+
 message DriverMessage {
   oneof body {
     Hello hello = 1;
     ObservationBatch batch = 2;
+    // VS-004: only after a Welcome with negotiated_protocol_minor >= 1; otherwise it is
+    // an unexpected message (ProtocolError, connection closed), as for a 1.0 kernel.
+    Heartbeat heartbeat = 3;
   }
 }
 
@@ -159,6 +187,8 @@ enum ErrorCode {
   ERROR_CODE_MALFORMED_MESSAGE = 12;
   ERROR_CODE_UNEXPECTED_MESSAGE = 13;
   ERROR_CODE_FRAME_TIMEOUT = 14;
+  // VS-004: heartbeat with sequence 0 or not greater than the previous one on the link.
+  ERROR_CODE_INVALID_HEARTBEAT = 15;
   // Batch validation (no state change)
   ERROR_CODE_INVALID_MODE = 20;
   ERROR_CODE_EMPTY_BATCH = 21;

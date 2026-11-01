@@ -74,11 +74,68 @@ impl Value {
     }
 }
 
-/// Why a value is uncertain.
+/// Why a value is uncertain: the cause of the loss of confirmation, kept until a new
+/// observation of the tag is applied (it is not the current link or liveness status of the
+/// source, which the source snapshot reports).
+///
+/// Precedence when causes combine (VS-004, ADR 0011): `SourceUnavailable` >
+/// `SourceSilent` > `StaleData`. A tag is moved only to a cause of strictly higher
+/// precedence than its current one; nothing but a new applied observation makes it `Good`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UncertainReason {
     /// The link of the owning source is down or was replaced; the value is the last known one.
     SourceUnavailable,
+    /// VS-004: the link stayed open but the source sent no liveness evidence (heartbeat or
+    /// applied batch) within its `liveness_timeout`. Only with liveness supervision.
+    SourceSilent,
+    /// VS-004: no new observation of this tag was applied within the source's
+    /// `freshness_timeout`. Only with freshness supervision.
+    StaleData,
+}
+
+impl UncertainReason {
+    /// Precedence rank: higher wins (`SourceUnavailable` > `SourceSilent` > `StaleData`).
+    pub fn rank(self) -> u8 {
+        match self {
+            UncertainReason::StaleData => 1,
+            UncertainReason::SourceSilent => 2,
+            UncertainReason::SourceUnavailable => 3,
+        }
+    }
+
+    /// Code in the canonical digest encoding (`SourceUnavailable` = 1 as in v1).
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            UncertainReason::SourceUnavailable => 1,
+            UncertainReason::SourceSilent => 2,
+            UncertainReason::StaleData => 3,
+        }
+    }
+}
+
+/// VS-004 (ADR 0011): which supervision the configuration enables for a source. Both off
+/// (the default) is exactly the VS-003 behaviour: no supervision marker is maintained, the
+/// supervision operations are refused and the digest / fingerprint keep encoding v1.
+///
+/// Only the *kinds* of supervision are part of the kernel configuration; the timeouts
+/// themselves belong to the runtime, which turns elapsed monotonic time into explicit
+/// sequenced operations. The kernel never reads a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Supervision {
+    /// Liveness: `SourceSilenceExpired` / `SourceLivenessRestored` are accepted.
+    pub liveness: bool,
+    /// Per-tag freshness: the operation sequence of the last applied observation of every
+    /// tag is kept and `FreshnessExpired` is accepted.
+    pub freshness: bool,
+}
+
+impl Supervision {
+    /// No supervision (VS-003 behaviour).
+    pub const NONE: Supervision = Supervision { liveness: false, freshness: false };
+
+    pub fn any(self) -> bool {
+        self.liveness || self.freshness
+    }
 }
 
 /// Communication quality of a tag (not the physical state of the plant).

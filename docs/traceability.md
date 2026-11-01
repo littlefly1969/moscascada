@@ -1,6 +1,6 @@
-# Matrice di tracciabilità VS-001 + VS-002 + VS-003
+# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004
 
-La parte VS-002 è in fondo ([§VS-002](#vs-002)); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
+La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003) e [§VS-004](#vs-004); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
 Legenda: **✅ verificato** = implementato e coperto da un test o da una misura eseguiti (risultati in questo repository); **🟡 parziale** = implementato, verifica incompleta (motivo indicato); **❌ non soddisfatto** = non implementato o non verificabile qui (motivo indicato).
 
@@ -346,3 +346,84 @@ Brief: `MoscaSCADA_VS003_Agent_Brief.md`. Base: VS-002 finale `d9502c1` (P1/P2, 
 4. Soak ≥ 60 min, dhat e `perf` non eseguiti per `source_fair`.
 5. Garanzie in **turni di servizio**, non in tempo: nessuna garanzia hard real-time.
 6. `source_fair` è un esperimento opt-in **non qualificato per produzione**: condizioni di promozione e criterio di rimozione in ADR 0010 §11.6–§11.7; latenza della rara da giudicare su `rare_sched_p99`/`rare_late` (`vs003.md` §4).
+
+## VS-004
+
+Brief: `MoscaSCADA_VS004_Agent_Brief.md`. Base: `main` `1071547` (merge della PR #3 dopo CI `stable` + `fuzz-smoke` verdi sull'HEAD `32f3858`). Branch dedicato, PR verso `main` senza merge. Decisioni: ADR 0011; misure: `docs/benchmarks/vs004.md`. Percorsi: `rt:sup` = test unitari con tempo controllato in `crates/scada-runtime/src/supervision.rs`, `sim/` = `apps/scada-sim-driver/tests/`.
+
+### Gate §0
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| CI dell'HEAD corrente di #3 verde, nessun blocker | ✅ | `32f3858`: `stable` e `fuzz-smoke` verdi; review senza blocker aperti |
+| Merge di #3 e baseline | ✅ | merge commit `1071547` in `main`; branch VS-004 creato da lì; binari `1071547` usati come baseline A/B e per la compatibilità |
+| FIFO default, `source_fair` sperimentale, profili invariati | ✅ | nessuna modifica all'ingresso salvo la corsia di controllo per il `Tick`; profili: solo commenti |
+| Nessun merge autonomo di VS-004 | ✅ | PR aperta per review |
+
+### Invarianti §2
+
+| # | Stato | Evidenza |
+|---|---|---|
+| 1 `apply` puro, single writer, nessun clock | ✅ | audit di purezza `check.sh`; tempo solo in `supervision.rs` (runtime) |
+| 2 tempo solo come operazioni sequenziate; replay | ✅ | `S`/`R`/`X` in cattura; `rt/vs004.rs::capture_replay_reproduces_supervised_state`; `core/supervision.rs::prop_supervision_invariants` (replay); fuzz `supervision_transitions` |
+| 3 memoria limitata, budget Micro/Server | ✅ | `core:kernel::supervised_apply_never_grows_internal_storage`; `rt:sup::sample_ring_is_bounded`; `rt/config_file.rs::shipped_profiles_fit_their_budget_with_vs004_supervision`; flood: `rt/vs004.rs::heartbeat_flood_is_bounded_and_does_not_starve` |
+| 4 `operation_sequence` solo su `Applied` | ✅ | proptest e fuzz: no-op ⇒ snapshot, digest e op seq invariati |
+| 5 default-off = VS-003 | ✅ | `rt/vs004.rs::default_off_is_the_vs003_contract`; `core/supervision.rs::unsupervised_config_keeps_v1_and_refuses_supervision_operations`; golden digest v1 invariato; A/B `vs004.md` |
+| 6 `ct`, `mt2`, `source_fair`; takeover/reconnect | ✅ | `rt/vs004.rs` sotto tutte le matrici di `check.sh`; suite VS-001..003 ripetuta con supervisione attiva (`SCADA_TEST_SUPERVISION`) |
+
+### Configurazione §3 e protocollo §4
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Chiavi per sorgente, `watchdog_poll_ms`, validazione `>= 3×poll`, overflow, incoerenze | ✅ | `rt/config_file.rs::invalid_supervision_settings_are_refused` |
+| Liveness sola / freschezza sola / entrambe / nessuna | ✅ | `rt/vs004.rs` (`supervised(Some, None)` ecc.), `core/supervision.rs`, fuzz (4 sorgenti con le 4 combinazioni) |
+| Heartbeat additivo, minor 1.1, `buf breaking` | ✅ | `proto/`, `scripts/check-proto.sh` verde |
+| Nessun heartbeat verso kernel 1.0; driver legacy invariato | ✅ | `sim/negotiation.rs` (4 test, Hello legacy byte-identico); binari reali `1071547` ↔ VS-004: `results/vs004/compat-vs003-binaries.log` |
+| Nessun ACK per heartbeat; invalidi fatali; flood coalescente | ✅ | `rt/vs004.rs::invalid_heartbeat_closes_the_link`, `heartbeat_flood_is_bounded_and_does_not_starve`; decoder: fuzz `decode_equivalence` (heartbeat incluso) |
+
+### Semantica §5
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Silent con socket aperto, nessun disconnect fittizio | ✅ | `rt/vs004.rs::silent_open_socket_is_silent_not_disconnected`; `core/supervision.rs::silence_degrades_values_and_keeps_the_link` |
+| Heartbeat ripristina comunicazione, mai `Good` | ✅ | `rt/vs004.rs::heartbeat_after_silence_restores_communication_only`, `heartbeats_keep_the_source_alive_but_never_refresh_data`; `core/supervision.rs::liveness_restoration_never_makes_a_tag_good` |
+| Nessuna revisione doppia su timeout ripetuto | ✅ | `Ignored(AlreadySilent)`; proptest |
+| Freschezza per tag; `Delta` parziale; `Unknown` resta `Unknown` | ✅ | `rt/vs004.rs::partial_deltas_refresh_only_their_tags`; `core/supervision.rs::freshness_is_per_tag`; `rt:sup::freshness_per_tag_with_partial_deltas` |
+| Identica con nuova sequenza rinnova; `Duplicate` no; scadenza resa obsoleta ignorata | ✅ | `rt/vs004.rs::identical_values_refresh_duplicates_do_not`; `core/supervision.rs::identical_observation_renews_the_marker_and_defeats_an_older_token`; `rt:sup::renewal_just_before_the_deadline_wins` |
+| Precedenza `SourceUnavailable > SourceSilent > StaleData` | ✅ | `core/supervision.rs::precedence_and_link_generations` |
+| Guardie anti-stale (generazione + marker), atomicità overflow | ✅ | idem; `core:kernel::supervision_revision_overflow_is_atomic`; `supervision_kind_and_token_are_validated` |
+| Takeover: timer/heartbeat vecchi innocui | ✅ | `rt/vs004.rs::takeover_old_link_cannot_keep_or_degrade_the_new_one`; `rt:sup::takeover_isolates_the_old_link` |
+| Un solo watchdog, tick non affamabile | ✅ | flag controllato dopo ogni richiesta; `heartbeat_flood_is_bounded_and_does_not_starve`; jitter misurato (`vs004.md`) |
+| Digest versionato; marker nel digest | ✅ | v1 invariato senza supervisione, v2 con supervisione (`core/supervision.rs::prop_digest_v2_tracks_the_snapshot`) |
+
+### Diagnostica §6
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Liveness per fonte, ragioni distinte, contatori bounded | ✅ | `introspect.proto` additivo; contatori usati da `rt/vs004.rs` e dal soak |
+| `--check-config` con sorgenti, soglie, bound | ✅ | riga `supervision:`; `READY ... supervision=off|N` |
+| Indicatori logici vs metriche operative | ✅ | ADR 0011 D8/D9 |
+
+### Test §7
+
+| # | Stato | Evidenza |
+|---|---|---|
+| 1 default-off = VS-003 | ✅ | vedi §2.5 |
+| 2–5 | ✅ | vedi §5 |
+| 6 confini `T−ε`/`T`/`T+ε`, tick in ritardo, raffiche, saturazione, overflow | ✅ / 🟡 | `rt:sup::liveness_boundaries_are_never_early`, `late_ticks_and_evidence_stamping`, `heartbeats_keep_alive_and_restore_without_good`; overflow revisione/token nel core; sequencer saturo solo E2E (flood) e campagna, non con tempo controllato; esaurimento di `operation_sequence` = percorso VS-002 invariato |
+| 7 reconnect stessa/nuova epoca, takeover | ✅ | `rt/vs004.rs::takeover_…`, `rt:sup::disconnection_stops_supervision`, fuzz `supervision_transitions` (connect con epoche 1 e 2, generazioni vecchie/future), soak (reconnect con stessa epoca) |
+| 8 capture/replay | ✅ | `capture_replay_reproduces_supervised_state` (con righe `S`/`R`/`X` presenti) |
+| 9 legacy ↔ nuovo | ✅ | `sim/negotiation.rs`, binari reali |
+| 10 E2E `ct`/`mt2`/`source_fair` | ✅ | `check.sh` |
+| 11 fuzz + input ostile | ✅ | `supervision_transitions` (nuovo), `decode_equivalence`, `frame_decode`, `batch_validation`: 60 s ciascuno, nessun crash (`results/vs004/fuzz-*.log`) |
+| 12 memoria / budget | ✅ | `budget.rs` (`supervision=`), profili con e senza chiavi VS-004 |
+
+### Limiti e rischi residui (VS-004)
+
+1. Nessuna garanzia hard real-time: rilevamento in `[T, T + poll + ritardo del tick]`; ritardo misurato solo su VM x86_64 (`vs004.md`).
+2. Freschezza = tempo dall'ultima osservazione accettata dal kernel, non età fisica della misura.
+3. ARM64 / Raspberry Pi: **NOT TESTED ON HARDWARE** (solo `cargo check`).
+4. Benchmark su VM con client co-residenti; ripetere su hardware dedicato prima di qualunque qualifica.
+5. Supervisione **non qualificata per produzione** e non attivata nei profili; il soak (31 min, `vs004.md` §4) copre una sola configurazione (`ct`, 4 sorgenti).
+6. Dopo un silenzio i tag non osservati restano `Uncertain(SourceSilent)` fino alla loro prossima osservazione (atteso; un driver dovrebbe inviare un `FullState` dopo un'interruzione).
+7. Review PR #4: P1 (scansione O(tag) per tick su impianto stale) corretto con la lista di freschezza ordinata per marker, misurato fino a 1M tag (`vs004.md` §9); P2 (`liveness_recoveries` senza i recuperi per batch) corretto con test.

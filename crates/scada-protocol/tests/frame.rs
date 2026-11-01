@@ -19,6 +19,7 @@ fn hello() -> DriverMessage {
             source_id: 1001,
             source_epoch: 0xDEAD_BEEF,
             supported_protocol_majors: vec![1],
+            protocol_minor: 0,
         })),
     }
 }

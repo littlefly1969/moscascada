@@ -5,6 +5,9 @@
 [runtime]
 scheduler = "current_thread"     # 2 thread: runtime I/O + sequencer
 memory_budget_bytes = 2097152   # 2 MiB; bound calcolato ~0,8 MiB; avvio rifiutato se superato (ADR 0009)
+# VS-004 (ADR 0011): supervisione sorgenti, DISABILITATA per default. Il watchdog unico esiste solo se
+#   almeno una sorgente imposta liveness_timeout_ms o freshness_timeout_ms (>= 3 x watchdog_poll_ms).
+# watchdog_poll_ms = 250
 
 [ipc]
 socket_path = "/run/moscascada/driver.sock"   # directory privata (0750, non scrivibile da altri)
@@ -47,6 +50,9 @@ type = "i64"
 id = 1001
 name = "sim-enclosure-1"
 # authorized_uids = [1000]   # optional: peer effective UIDs allowed for this source
+# VS-004: opzionali; assenti = nessuna supervisione (comportamento VS-003).
+# liveness_timeout_ms = 5000     # Silent se nessun heartbeat / batch applicato entro 5 s (link resta Connected)
+# freshness_timeout_ms = 12000   # StaleData per ogni tag non osservato da 12 s (timeout per tag, stesso valore)
 channels = [
   { channel = 1, tag = 101, type = "bool" },
   { channel = 2, tag = 102, type = "bool" },

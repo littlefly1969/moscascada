@@ -527,10 +527,15 @@ dependencies = [
  "prost",
  "scada-core",
  "scada-protocol",
+ "scada-sched",
  "serde",
  "tokio",
  "toml",
 ]
+
+[[package]]
+name = "scada-sched"
+version = "0.1.0"
 
 [[package]]
 name = "serde"

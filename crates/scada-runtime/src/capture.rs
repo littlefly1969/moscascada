@@ -13,7 +13,13 @@
 //! C <op> <source> <generation> <epoch>
 //! D <op> <source> <generation>
 //! B <op> <source> <generation> <F|D> <source_sequence> <obs>   obs = '-' | ch:b:0|1,ch:i:N,...
+//! S <op> <source> <generation>                       VS-004 SourceSilenceExpired
+//! R <op> <source> <generation>                       VS-004 SourceLivenessRestored
+//! X <op> <source> <generation> <observed_up_to>      VS-004 FreshnessExpired
 //! ```
+//!
+//! VS-004: the supervision operations the runtime watchdog derives from monotonic time
+//! are recorded like any other input, so a replay reproduces them without reading a clock.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -82,6 +88,15 @@ fn format_input(s: &mut String, input: &SequencedInput) {
         Operation::SourceDisconnected { source_id, link_generation } => {
             let _ = write!(s, "D {op} {} {link_generation}", source_id.0);
         }
+        Operation::SourceSilenceExpired { source_id, link_generation } => {
+            let _ = write!(s, "S {op} {} {link_generation}", source_id.0);
+        }
+        Operation::SourceLivenessRestored { source_id, link_generation } => {
+            let _ = write!(s, "R {op} {} {link_generation}", source_id.0);
+        }
+        Operation::FreshnessExpired { source_id, link_generation, observed_up_to } => {
+            let _ = write!(s, "X {op} {} {link_generation} {observed_up_to}", source_id.0);
+        }
         Operation::ObservationBatch(b) => {
             let mode = match b.mode {
                 BatchMode::FullState => 'F',
@@ -114,6 +129,9 @@ pub fn parse_line(line: &str) -> Option<SequencedInput> {
     let operation = match kind {
         "C" => Operation::SourceConnected { source_id, link_generation, source_epoch: f.next()?.parse().ok()? },
         "D" => Operation::SourceDisconnected { source_id, link_generation },
+        "S" => Operation::SourceSilenceExpired { source_id, link_generation },
+        "R" => Operation::SourceLivenessRestored { source_id, link_generation },
+        "X" => Operation::FreshnessExpired { source_id, link_generation, observed_up_to: f.next()?.parse().ok()? },
         "B" => {
             let mode = match f.next()? {
                 "F" => BatchMode::FullState,
@@ -203,6 +221,22 @@ mod tests {
             SequencedInput {
                 operation_sequence: 3,
                 operation: Operation::SourceDisconnected { source_id: SourceId(7), link_generation: 3 },
+            },
+            SequencedInput {
+                operation_sequence: 4,
+                operation: Operation::SourceSilenceExpired { source_id: SourceId(7), link_generation: 3 },
+            },
+            SequencedInput {
+                operation_sequence: 5,
+                operation: Operation::SourceLivenessRestored { source_id: SourceId(7), link_generation: 3 },
+            },
+            SequencedInput {
+                operation_sequence: 6,
+                operation: Operation::FreshnessExpired {
+                    source_id: SourceId(7),
+                    link_generation: 3,
+                    observed_up_to: u64::MAX,
+                },
             },
         ];
         for i in &inputs {

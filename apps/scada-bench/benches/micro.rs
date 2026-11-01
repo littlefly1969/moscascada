@@ -23,7 +23,7 @@ use std::sync::Arc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use scada_core::{
     BatchMode, ChannelId, ChannelSpec, ConfigSpec, CoreLimits, Kernel, Observation, ObservationBatch, Operation,
-    SequencedInput, SourceId, SourceSpec, TagId, TagSpec, ValidatedConfig, Value, ValueType,
+    SequencedInput, SourceId, SourceSpec, Supervision, TagId, TagSpec, ValidatedConfig, Value, ValueType,
 };
 use scada_protocol::Message;
 use scada_protocol::driver_v1 as pb;
@@ -100,7 +100,12 @@ fn config() -> Arc<ValidatedConfig> {
         ValidatedConfig::validate(ConfigSpec {
             limits: CoreLimits { max_observations_per_batch: CH },
             tags,
-            sources: vec![SourceSpec { source_id: SourceId(1), name: "s".into(), channels }],
+            sources: vec![SourceSpec {
+                source_id: SourceId(1),
+                name: "s".into(),
+                channels,
+                supervision: Supervision::NONE,
+            }],
         })
         .unwrap(),
     )

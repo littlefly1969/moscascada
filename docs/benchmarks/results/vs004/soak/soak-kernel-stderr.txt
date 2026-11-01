@@ -1,0 +1,2 @@
+memory bound (application allocations, not RSS): total=4033428 (connections=1401600 [175200 each], decode_workers=2359368, sequencer_queue=206440, ingress=0, kernel=5220, introspection=56832, diagnostics=0, supervision=3968)
+SIGTERM: shutting down (volatile state is discarded)

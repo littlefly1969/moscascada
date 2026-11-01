@@ -1,4 +1,4 @@
-# Architettura (VS-001 + VS-002 + VS-003)
+# Architettura (VS-001 + VS-002 + VS-003 + VS-004)
 
 ```text
  processi driver (invariati)               processo scada-kernel (scada-runtime)
@@ -22,10 +22,13 @@
                                             │    [--capture-inputs: registra gli input sequenziati (D5)]      │
                                             │  socket introspezione (opzionale, 0600, 4 sessioni, idle timeout)│
                                             │  [--diag: istogrammi limitati per stadio, fuori dal core]       │
+                                            │  [VS-004, solo se una sorgente è sorvegliata: thread            │
+                                            │   "scada-watchdog" → flag tick + Tick di risveglio; heartbeat    │
+                                            │   = contatore atomico per link, mai in coda]                   │
                                             └───────────────────────────────────────────────────────────────┘
 ```
 
-Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, clock, lock, thread, Tokio, Protobuf), `Kernel::apply` è l'unica funzione di transizione e un solo thread OS la chiama. VS-002 cambia solo il bordo I/O, il trasporto interno fra sessioni e sequencer e due dettagli algoritmici del core che non cambiano alcun risultato (indice canali denso; vedi `tests/equivalence.rs`).
+Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, clock, lock, thread, Tokio, Protobuf), `Kernel::apply` è l'unica funzione di transizione e un solo thread OS la chiama. VS-004 aggiunge solo operazioni sequenziate e marker di dimensione fissa al core; il tempo resta nel runtime. VS-002 cambia solo il bordo I/O, il trasporto interno fra sessioni e sequencer e due dettagli algoritmici del core che non cambiano alcun risultato (indice canali denso; vedi `tests/equivalence.rs`).
 
 ## Crate
 
@@ -57,10 +60,21 @@ Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, cloc
 
 I permessi viaggiano dentro la richiesta e sono rilasciati quando il sequencer la scarta dopo `apply`; ordine di acquisizione fisso (slot ACK → sorgente → globale → lock), nessun ciclo. Se il sequencer termina, il suo lato chiude i semafori e scarta le richieste in coda: nessuna sessione resta sospesa e nessun ACK viene inventato. `scada-sched` è un crate puro (nessun Tokio, clock, I/O, lock), verificato contro un oracle con proptest; contiene anche il simulatore a eventi discreti usato per progettare le varianti.
 
+## Supervisione di liveness e freschezza (VS-004, ADR 0011)
+
+Opzionale e **disabilitata per default**: senza `liveness_timeout_ms` / `freshness_timeout_ms` in nessuna sorgente non esistono `Supervisor`, thread watchdog, tick né marker mantenuti, e digest/fingerprint restano v1.
+
+- **Tempo solo nel runtime.** `scada-runtime::supervision` possiede il clock monotono. Il core riceve tre operazioni sequenziate senza tempo: `SourceSilenceExpired{source, gen}`, `SourceLivenessRestored{source, gen}`, `FreshnessExpired{source, gen, observed_up_to}`. Le guardie (generazione del link, token in operation sequence confrontato con il marker `observed` di ogni tag) sono verificabili dal core senza clock; quelle obsolete sono no-op.
+- **Un solo watchdog.** Il thread `scada-watchdog` alza un tick a cadenza fissa (`watchdog_poll_ms`): flag atomico + al più una richiesta `Tick` nella corsia di controllo dell'ingresso (+1 di capacità) per svegliare il sequencer inattivo; mai bloccante. Il sequencer controlla il flag dopo ogni richiesta: sotto flood il tick aspetta al più un `apply`.
+- **Al tick** (thread sequencer, un'unica lettura del clock): per ogni sorgente sorvegliata confronta `last_batch_operation` del kernel e il contatore heartbeat del link con quelli del tick precedente (evidenza datata con l'istante del tick, quindi mai in anticipo), decide silenzio / ripristino / scadenza e applica con lo stesso `apply` dei batch. La freschezza usa un anello preallocato `(istante, last_batch_operation)` per sorgente: il token è il valore più recente con età `>= T`.
+- **Heartbeat** (protocollo 1.1): la sessione valida la sequenza e incrementa un `AtomicU64` del link. Nessuna richiesta al sequencer, nessun ACK, nessuna allocazione: un flood costa solo decodifica nella sessione.
+- **Cattura/replay:** le tre operazioni sono righe `S`/`R`/`X` del file `--capture-inputs`; il replay non usa clock.
+
 ## Ordine e concorrenza
 
 - **Per sorgente**: una connessione = una sessione = un task. Reader e writer sono futures dello stesso task (`tokio::join!`), quindi **non** girano in parallelo fra loro nemmeno con `multi_thread`; il parallelismo multicore è **fra sessioni diverse**. L'ordine dei batch di una sorgente è quello del socket; la coda ACK è FIFO; il sequencer applica in ordine FIFO; nessun componente riordina. Test: `vs002.rs::ingestion_modes_preserve_order_and_give_the_same_normalized_state` (16 sorgenti, `current_thread` e `multi_thread(1/2/4)`).
 - **Fra sorgenti** (`fifo`; con `source_fair` è il round-robin fra lane, sezione precedente): l'ordine è quello di ammissione nella coda del sequencer, che dipende dallo scheduling dei task e **non** equivale all'ordine reale di acquisizione, né è riproducibile fra due processi. Ciò che è riproducibile è lo stream già sequenziato: catturato con `--capture-inputs` e riapplicato a un kernel nuovo dà lo stesso digest (`captured_streams_replay_to_the_live_digest_in_every_mode`).
+- **Scadenze VS-004 rispetto ai batch** (qualunque politica di ingresso): il tick decide sullo stato del kernel già prodotto dai batch applicati prima; un batch servito dopo il tick è applicato dopo le operazioni del tick. Le richieste ancora in coda non entrano mai nella decisione. Un batch che osserva un tag dopo il calcolo del token ha marker maggiore e il tag non scade.
 - `SourceDisconnected` di un link è sempre accodato dopo tutti i batch che quel link ha sottomesso (la sessione lo invia dopo la fine del reader e del writer). Un link superato (takeover) non muta lo stato: i suoi batch ricevono `LINK_SUPERSEDED`, la sua disconnessione è `Ignored(StaleLinkGeneration)`.
 
 ## Thread e memoria
@@ -69,6 +83,7 @@ I permessi viaggiano dentro la richiesta e sono rilasciati quando il sequencer l
 |---|---|---|
 | `current_thread` | 2: main (runtime Tokio) + `scada-sequencer` | default, profilo Micro |
 | `multi_thread(N)` | N+2: `scada-io` × N, main (accept + segnali, dentro `block_on`), `scada-sequencer` | `max_blocking_threads(1)`: il kernel non usa `spawn_blocking` |
+| + supervisione VS-004 | +1: `scada-watchdog` | solo se almeno una sorgente è sorvegliata; ~`1000 / watchdog_poll_ms` risvegli al secondo |
 
 Ogni struttura ha un limite configurato; il **bound configurativo** delle allocazioni applicative è calcolato all'avvio in `u128` (`budget.rs`), stampato da `--check-config` e su stderr, e confrontato con `[runtime] memory_budget_bytes` se presente (avvio rifiutato se superato). Non è un bound dell'RSS (stack, allocatore, Tokio, libc, buffer socket del kernel Linux non sono inclusi): vedi ADR 0009.
 
@@ -78,7 +93,10 @@ Ogni struttura ha un limite configurato; il **bound configurativo** delle alloca
 |---|---|
 | Driver ucciso (SIGKILL) | EOF → `SourceDisconnected` della generazione attiva → tag `Uncertain(SourceUnavailable)` con valore preservato. Il kernel continua. |
 | Driver che invia frame invalidi | `ProtocolError` e chiusura della sola connessione; slot liberato. |
-| Driver muto | `HANDSHAKE_TIMEOUT` o `FRAME_TIMEOUT` a metà frame, chiusura. |
+| Driver muto | `HANDSHAKE_TIMEOUT` o `FRAME_TIMEOUT` a metà frame, chiusura. Fra un frame e l'altro il link resta aperto: senza supervisione i tag restano `Good` (limite VS-001..003). |
+| Driver muto con socket aperto, sorgente con `liveness_timeout_ms` (VS-004) | `SourceSilenceExpired` → sorgente `Silent`, tag `Uncertain(SourceSilent)` con valore preservato, link ancora `Connected`. Un heartbeat ripristina la comunicazione, non la qualità. |
+| Driver che aggiorna solo alcuni canali, sorgente con `freshness_timeout_ms` (VS-004) | i tag non osservati da `>= T` passano a `Uncertain(StaleData)`, gli altri restano `Good`. |
+| Flood di heartbeat (VS-004) | coalescenti nel contatore del link; nessuna coda, op seq o memoria in più; le altre sorgenti sono servite (`heartbeat_flood_is_bounded_and_does_not_starve`). |
 | Driver che non legge gli ACK (VS-002) | dopo `ack_write_timeout_ms` la connessione è chiusa (`ack_write_timeouts`); gli input già applicati restano applicati; nessun ACK inventato; il driver riconcilia con reconnect (`last_accepted_source_sequence`). |
 | Takeover con vecchio link inattivo (VS-002) | il sequencer segnala il vecchio link al `Welcome` del nuovo: `ProtocolError LINK_SUPERSEDED` e chiusura, slot liberato (`links_superseded`). |
 | Flood di connessioni | oltre `max_driver_connections`: `TOO_MANY_CONNECTIONS` e chiusura immediata. |

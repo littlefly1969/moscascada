@@ -147,3 +147,64 @@ fn shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies() {
         budget::check(&c, &b).unwrap_or_else(|e| panic!("{policy}: {e}"));
     }
 }
+
+// VS-004: both shipped profiles keep supervision off (commented keys only) and still fit
+// their memory budget with liveness and freshness enabled on their source.
+#[test]
+fn shipped_profiles_fit_their_budget_with_vs004_supervision() {
+    use scada_runtime::budget;
+    for text in
+        [include_str!("../../../config/profiles/micro.toml"), include_str!("../../../config/profiles/server.toml")]
+    {
+        let c = config::parse(text).unwrap();
+        assert!(c.supervision.is_none(), "supervision must stay off by default");
+        assert_eq!(budget::compute(&c, false, false).supervision, 0);
+        let t = text
+            .replace("# watchdog_poll_ms = 250", "watchdog_poll_ms = 250")
+            .replace("# liveness_timeout_ms = 5000", "liveness_timeout_ms = 5000")
+            .replace("# freshness_timeout_ms = 12000", "freshness_timeout_ms = 12000");
+        for k in ["\nwatchdog_poll_ms = 250", "\nliveness_timeout_ms = 5000", "\nfreshness_timeout_ms = 12000"] {
+            assert!(t.contains(k), "profile lost its commented VS-004 key {k:?}");
+        }
+        let c = config::parse(&t).unwrap();
+        let sup = c.supervision.as_ref().unwrap();
+        assert_eq!((sup.watchdog_poll_ms, sup.sources.len()), (250, 1));
+        let b = budget::compute(&c, true, false);
+        assert!(b.supervision > 0);
+        budget::check(&c, &b).unwrap();
+    }
+}
+
+// VS-004: incoherent supervision settings refuse startup with a clear error (fail fast).
+#[test]
+fn invalid_supervision_settings_are_refused() {
+    let cfg = |runtime: &str, src: &str| {
+        format!(
+            "[ipc]\nsocket_path = \"/run/x/d.sock\"\n[runtime]\n{runtime}\n[[tags]]\nid = 1\nname = \"t\"\ntype = \"i64\"\n\
+             [[sources]]\nid = 1\nname = \"s\"\n{src}\nchannels = [{{ channel = 1, tag = 1, type = \"i64\" }}]\n"
+        )
+    };
+    let err = |r: &str, s: &str| config::parse(&cfg(r, s)).err().map(|e| e.to_string());
+    assert!(err("watchdog_poll_ms = 100", "").unwrap().contains("only valid when a source"));
+    assert!(err("", "liveness_timeout_ms = 749").unwrap().contains("at least 3 x watchdog_poll_ms=250"));
+    assert!(err("watchdog_poll_ms = 5", "liveness_timeout_ms = 1000").unwrap().contains("watchdog_poll_ms=5 outside"));
+    assert!(err("watchdog_poll_ms = 60001", "liveness_timeout_ms = 200000").is_some());
+    assert!(err("", "freshness_timeout_ms = 86400001").unwrap().contains("outside"));
+    assert!(err("", "freshness_timeout_ms = 1024251").unwrap().contains("bounded sample ring"));
+    assert!(err("", "liveness_timeout_ms = 0").is_some());
+    assert!(err("", "liveness_timeout_ms = -1").is_some(), "negative is a parse error");
+    assert!(err("", "heartbeat_timeout_ms = 1000").is_some(), "unknown keys are refused");
+    // Valid: each kind alone, both, none.
+    for s in [
+        "",
+        "liveness_timeout_ms = 750",
+        "freshness_timeout_ms = 1024000",
+        "liveness_timeout_ms = 5000\nfreshness_timeout_ms = 12000",
+    ] {
+        assert!(err("", s).is_none(), "{s}: {:?}", err("", s));
+    }
+    let c = config::parse(&cfg("watchdog_poll_ms = 100", "liveness_timeout_ms = 300")).unwrap();
+    let p = c.supervision.unwrap().sources[0];
+    assert_eq!((p.liveness_timeout_ms, p.freshness_timeout_ms), (Some(300), None));
+    assert_eq!(c.core.sources()[0].supervision, scada_core::Supervision { liveness: true, freshness: false });
+}

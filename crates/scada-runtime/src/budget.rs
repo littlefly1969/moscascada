@@ -28,7 +28,7 @@ pub const MAX_ACK_FRAME_BYTES: u128 = 96;
 /// Upper bound of the handshake messages the kernel encodes (Welcome / HandshakeRejected).
 pub const MAX_HANDSHAKE_FRAME_BYTES: u128 = 512;
 /// Diagnostic histograms when `--diag` is on.
-pub const DIAG_BYTES: u128 = 12 * 1184 * 8 + 12 * 64;
+pub const DIAG_BYTES: u128 = 13 * 1184 * 8 + 13 * 64;
 
 /// Itemized bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,6 +50,9 @@ pub struct Budget {
     /// the introspection socket is enabled.
     pub introspection: u128,
     pub diagnostics: u128,
+    /// VS-004: supervisor (watch table, preallocated freshness sample rings) and the
+    /// per-link heartbeat counters; 0 without supervision.
+    pub supervision: u128,
     pub total: u128,
 }
 
@@ -57,7 +60,7 @@ impl fmt::Display for Budget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "total={} (connections={} [{} each], decode_workers={}, sequencer_queue={}, ingress={}, kernel={}, introspection={}, diagnostics={})",
+            "total={} (connections={} [{} each], decode_workers={}, sequencer_queue={}, ingress={}, kernel={}, introspection={}, diagnostics={}, supervision={})",
             self.total,
             self.connections,
             self.per_connection,
@@ -66,7 +69,8 @@ impl fmt::Display for Budget {
             self.ingress,
             self.kernel,
             self.introspection,
-            self.diagnostics
+            self.diagnostics,
+            self.supervision
         )
     }
 }
@@ -129,7 +133,9 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     };
     let diagnostics = if diag { DIAG_BYTES } else { 0 };
     let ingress = ingress_bytes(cfg);
+    let supervision = supervision_bytes(cfg);
     let total = connections
+        .saturating_add(supervision)
         .saturating_add(ingress)
         .saturating_add(decode_workers)
         .saturating_add(sequencer_queue)
@@ -145,9 +151,28 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
         kernel,
         introspection,
         diagnostics,
+        supervision,
         total,
     }
 }
+
+/// VS-004 (ADR 0011 §8): bytes of the supervision state. The kernel's own markers (8 B per
+/// tag, 9 B per source) are already in `kernel` (`size_of` of its cells). Here: the
+/// sequencer's supervisor and one `Arc<AtomicU64>` heartbeat counter per connection (a
+/// superseded link's counter is dropped with its session). The watchdog is one OS thread
+/// with a fixed stack (not an application allocation, like every thread stack).
+fn supervision_bytes(cfg: &RuntimeConfig) -> u128 {
+    if cfg.supervision.is_none() {
+        return 0;
+    }
+    let counters = m(u128::from(cfg.limits.max_driver_connections), HEARTBEAT_COUNTER_BYTES);
+    crate::supervision::Supervisor::bound_bytes(cfg).saturating_add(counters).saturating_add(WATCHDOG_SHARED_BYTES)
+}
+
+/// `Arc<AtomicU64>`: two counters + the value, rounded up for the allocator.
+pub const HEARTBEAT_COUNTER_BYTES: u128 = 32;
+/// `Arc<WatchdogShared>`, rounded up.
+pub const WATCHDOG_SHARED_BYTES: u128 = 128;
 
 /// Estimated bytes of one Tokio `Semaphore` behind an `Arc` (state, waiter list head,
 /// `Arc` counters, slice pointer). An estimate, documented as such.
@@ -245,6 +270,7 @@ channels = [{{ channel = 1, tag = 1, type = "i64" }}]
                 + big.kernel
                 + big.introspection
                 + big.diagnostics
+                + big.supervision
         );
     }
 

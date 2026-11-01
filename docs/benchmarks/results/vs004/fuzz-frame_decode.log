@@ -1,0 +1,51 @@
+   Compiling scada-fuzz v0.0.0 (/home/claude/moscascada/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.54s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running `target/x86_64-unknown-linux-gnu/release/frame_decode -artifact_prefix=/home/claude/moscascada/fuzz/artifacts/frame_decode/ -max_total_time=60 corpus/frame_decode`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3198091354
+INFO: Loaded 1 modules   (1037 inline 8-bit counters): 1037 [0x556d48319d50, 0x556d4831a15d), 
+INFO: Loaded 1 PC tables (1037 PCs): 1037 [0x556d4831a160,0x556d4831e230), 
+INFO:        5 files found in corpus/frame_decode
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 5 min: 5b max: 223b total: 462b rss: 38Mb
+#6	INITED cov: 151 ft: 184 corp: 5/462b exec/s: 0 rss: 38Mb
+#13	NEW    cov: 151 ft: 188 corp: 6/471b lim: 223 exec/s: 0 rss: 38Mb L: 9/223 MS: 2 ChangeByte-ChangeBit-
+	NEW_FUNC[1/1]: 0x556d481985a0 in prost::encoding::skip_field::<&mut &[u8]> /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.14.4/src/encoding.rs:166
+#14	NEW    cov: 165 ft: 251 corp: 7/691b lim: 223 exec/s: 0 rss: 38Mb L: 220/223 MS: 1 ChangeBit-
+#15	NEW    cov: 165 ft: 253 corp: 8/914b lim: 223 exec/s: 0 rss: 38Mb L: 223/223 MS: 1 CopyPart-
+#17	NEW    cov: 171 ft: 273 corp: 9/1137b lim: 223 exec/s: 0 rss: 38Mb L: 223/223 MS: 2 ChangeByte-ChangeBit-
+#24	NEW    cov: 179 ft: 318 corp: 10/1360b lim: 223 exec/s: 0 rss: 38Mb L: 223/223 MS: 2 ChangeByte-ChangeBinInt-
+#25	NEW    cov: 179 ft: 341 corp: 11/1582b lim: 223 exec/s: 0 rss: 38Mb L: 222/223 MS: 1 CMP- DE: "\032\000"-
+#33	NEW    cov: 180 ft: 347 corp: 12/1764b lim: 223 exec/s: 0 rss: 38Mb L: 182/223 MS: 3 CMP-ChangeBit-EraseBytes- DE: "\000\000\000\001"-
+#36	NEW    cov: 181 ft: 351 corp: 13/1974b lim: 223 exec/s: 0 rss: 38Mb L: 210/223 MS: 3 ChangeBinInt-ChangeBinInt-InsertRepeatedBytes-
+#37	NEW    cov: 184 ft: 354 corp: 14/2164b lim: 223 exec/s: 0 rss: 38Mb L: 190/223 MS: 1 CrossOver-
+#39	NEW    cov: 185 ft: 363 corp: 15/2384b lim: 223 exec/s: 0 rss: 38Mb L: 220/223 MS: 2 CrossOver-ChangeByte-
+#50	NEW    cov: 185 ft: 364 corp: 16/2477b lim: 223 exec/s: 0 rss: 38Mb L: 93/223 MS: 1 EraseBytes-
+#53	NEW    cov: 187 ft: 383 corp: 17/2697b lim: 223 exec/s: 0 rss: 38Mb L: 220/223 MS: 3 ChangeBit-ChangeBit-CopyPart-
+[... 2619 righe NEW/REDUCE di libFuzzer omesse ...]
+"\002\000\000\000\000\000\000\000" # Uses: 4027
+"\001\006\351\020" # Uses: 3832
+"4\000\000\000\000\000\000\000" # Uses: 3910
+"\005\000\000\000" # Uses: 3876
+"\364\000\000\033" # Uses: 3670
+"\377[" # Uses: 3636
+"\377\021" # Uses: 3471
+"\027(\004\032" # Uses: 3425
+"\377\377\377\377\377\377\377\003" # Uses: 3438
+"\200\000\000\000\000\000\000\013" # Uses: 3296
+"\000\020\020\020" # Uses: 3114
+"\006\000\000\000" # Uses: 3037
+"\222\000" # Uses: 3120
+"\346\000\000\000" # Uses: 2606
+"\361r\000\000" # Uses: 2045
+"\001\000\000\001" # Uses: 2041
+"\027\000\000\000\000\000\000\000" # Uses: 1999
+"\000\000\000\000\000\000\000n" # Uses: 1799
+"\377\377\377\377\377\377\377\005" # Uses: 1714
+"\000\000\000\000\000\000\000\034" # Uses: 1696
+"\001\000\000:" # Uses: 1276
+"\001\000\000\000\000\000\000\012" # Uses: 516
+"\377\377\377\377\377\377\377\007" # Uses: 529
+###### End of recommended dictionary. ######
+Done 4168454 runs in 61 second(s)

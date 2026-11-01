@@ -110,7 +110,13 @@ impl RefKernel {
     pub fn source_status(&self, source_id: SourceId) -> Option<SourceStatus> {
         let i = self.config.source_index(source_id)?;
         let s = self.sources.get(i)?;
-        Some(SourceStatus { link: s.link, epoch: s.epoch, last_accepted_source_sequence: s.last_accepted })
+        Some(SourceStatus {
+            link: s.link,
+            epoch: s.epoch,
+            last_accepted_source_sequence: s.last_accepted,
+            silent: false,
+            last_batch_operation: 0,
+        })
     }
 
     /// Apply one sequenced input. Pure: no I/O, no clock, no randomness, no threads.
@@ -129,6 +135,14 @@ impl RefKernel {
                 self.disconnect(source_id, link_generation, expected)?
             }
             Operation::ObservationBatch(batch) => self.batch(&batch, expected)?,
+            // VS-004 operations do not exist in VS-001; for an unsupervised configuration
+            // (the only kind VS-001 knows) the current kernel refuses them without effect.
+            Operation::SourceSilenceExpired { source_id, .. }
+            | Operation::SourceLivenessRestored { source_id, .. }
+            | Operation::FreshnessExpired { source_id, .. } => {
+                self.source_index(source_id)?;
+                return Err(ApplyError::SupervisionNotConfigured(source_id));
+            }
         };
         if let TransitionOutcome::Applied { .. } = outcome {
             self.last_operation_sequence = expected;
@@ -392,6 +406,10 @@ impl RefKernel {
                         source_sequence: r.last_batch.source_sequence,
                         entries: r.last_batch.entries.iter().map(|&(t, v)| (tag_id(t), v)).collect(),
                     }),
+                    // VS-004 fields (not part of VS-001): neutral for unsupervised configs.
+                    supervision: m.supervision,
+                    silent: false,
+                    last_batch_operation: 0,
                 })
                 .collect(),
             tags: tags
@@ -403,6 +421,7 @@ impl RefKernel {
                     value: c.value,
                     quality: c.quality,
                     revision: c.revision,
+                    last_observed_operation: 0, // VS-004 field, neutral
                 })
                 .collect(),
         }
@@ -413,7 +432,14 @@ impl RefKernel {
         let i = self.config.tag_index(tag_id)?;
         let m = self.config.tags().get(i)?;
         let c = self.cells.get(i)?;
-        Some(TagSnapshot { tag_id, value_type: m.value_type, value: c.value, quality: c.quality, revision: c.revision })
+        Some(TagSnapshot {
+            tag_id,
+            value_type: m.value_type,
+            value: c.value,
+            quality: c.quality,
+            revision: c.revision,
+            last_observed_operation: 0,
+        })
     }
 }
 

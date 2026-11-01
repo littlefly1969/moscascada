@@ -1,10 +1,12 @@
 //! `scada-bench`: reproducible measurements for docs/benchmarks/vs001.md and vs002.md.
 //!
 //! ```text
-//! scada-bench core       [--ops N]                      in-memory Kernel::apply
+//! scada-bench core       [--ops N] [--supervised]       in-memory Kernel::apply (VS-004: supervised source)
 //! scada-bench e2e        [--secs S] [--warmup-secs W]   VS-001 table (stop-and-wait + pipelined)
 //! scada-bench saturation [--secs S] [--clients N]       producers faster than the sequencer
 //! scada-bench cell  --clients N --size S --pipeline P [--secs S] [--warmup-secs W]
+//! scada-bench stale --sources S --channels C [--poll-ms P] [--fresh-ms F] [--secs S]
+//!       VS-004 review P1: an entirely stale supervised plant, probe latency, CPU, RSS
 //! scada-bench mixed --hv N [--rare-interval-us U] [--secs S] [--warmup-secs W]
 //!       [--hv-size S] [--hv-pipeline P] [--rare-sources R] [--rare-mode stop|open]
 //!       [--rare-max-outstanding K] [--takeover-interval-ms T]
@@ -25,6 +27,12 @@
 //!   the Hello→Welcome latency is reported as `ctl_*`.
 //! * `--ipc-line 'key = value'` (repeatable): extra line appended to the generated `[ipc]`
 //!   section, to select a VS-003 ingress policy; an older kernel rejects unknown keys.
+//! * VS-004 `--supervise LIVE_MS:FRESH_MS:POLL_MS`: every generated source gets
+//!   `liveness_timeout_ms` / `freshness_timeout_ms` (0 = omitted) and `[runtime]
+//!   watchdog_poll_ms` is set; `--heartbeat-ms H`: `cell` and `mixed` clients send one
+//!   heartbeat each H ms (only on a link that negotiated protocol 1.1). The output line then
+//!   carries the kernel's VS-004 counters (`hb_valid=`, `live_exp=`, `wd_late_max_ns=`, ...,
+//!   cumulative since kernel start, warm-up included).
 //!
 //! Common options for `cell`, `mixed`, `saturation`:
 //! `--kernel PATH` (default: `scada-kernel` next to this binary), `--queue Q`,
@@ -45,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use scada_core::{
     BatchMode, ChannelId, ChannelSpec, ConfigSpec, CoreLimits, Kernel, Observation, ObservationBatch, Operation,
-    SequencedInput, SourceId, SourceSpec, TagId, TagSpec, ValidatedConfig, Value, ValueType,
+    SequencedInput, SourceId, SourceSpec, Supervision, TagId, TagSpec, ValidatedConfig, Value, ValueType,
 };
 use scada_protocol::driver_v1::{AckStatus, BatchMode as WireMode};
 use scada_protocol::frame;
@@ -94,6 +102,12 @@ struct KernelSpec {
     ipc_lines: Vec<String>,
     /// Load sources in the generated config.
     load_sources: u32,
+    /// VS-004 `--supervise LIVE_MS:FRESH_MS:POLL_MS`: every source of the generated config
+    /// gets both timeouts and `[runtime] watchdog_poll_ms` is set (0 = that timeout off).
+    supervise: Option<(u64, u64, u64)>,
+    /// VS-004 `--heartbeat-ms H`: every `cell` client sends a heartbeat each H ms (only
+    /// if the kernel negotiated protocol 1.1; nothing is sent to a VS-003 kernel).
+    heartbeat_ms: u64,
 }
 
 impl KernelSpec {
@@ -104,6 +118,12 @@ impl KernelSpec {
             args: args_multi("--kernel-arg"),
             ipc_lines: args_multi("--ipc-line"),
             load_sources: (arg("--hv", 0) as u32).clamp(LOAD_SOURCES, MAX_LOAD_SOURCES),
+            supervise: arg_str("--supervise").map(|v| {
+                let p: Vec<u64> = v.split(':').map(|x| x.parse().expect("--supervise LIVE:FRESH:POLL")).collect();
+                assert_eq!(p.len(), 3, "--supervise LIVE_MS:FRESH_MS:POLL_MS");
+                (p[0], p[1], p[2])
+            }),
+            heartbeat_ms: arg("--heartbeat-ms", 0),
         }
     }
 }
@@ -111,7 +131,7 @@ impl KernelSpec {
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     match mode.as_str() {
-        "core" => core_bench(arg("--ops", 1_000_000)),
+        "core" => core_bench(arg("--ops", 1_000_000), std::env::args().any(|a| a == "--supervised")),
         "e2e" => e2e_bench(&KernelSpec::from_args(), arg("--secs", 10), arg("--warmup-secs", 2)),
         "saturation" => saturation(&KernelSpec::from_args(), arg("--secs", 60), arg("--clients", 8) as u32),
         "cell" => {
@@ -125,6 +145,16 @@ fn main() {
             );
             println!("{}", r.line(&arg_str("--label").unwrap_or_default()));
         }
+        "stale" => stale(
+            &KernelSpec::from_args(),
+            arg("--sources", 64) as u32,
+            arg("--channels", 4096) as u32,
+            arg("--poll-ms", 10),
+            arg("--fresh-ms", 300),
+            arg("--rare-interval-us", 1000),
+            arg("--secs", 10),
+            &arg_str("--label").unwrap_or_default(),
+        ),
         "mixed" => mixed(
             &KernelSpec::from_args(),
             &MixedSpec {
@@ -142,7 +172,7 @@ fn main() {
             &arg_str("--label").unwrap_or_default(),
         ),
         _ => {
-            eprintln!("usage: scada-bench core|e2e|saturation|cell|mixed [options] (see module docs)");
+            eprintln!("usage: scada-bench core|e2e|saturation|cell|mixed|stale [options] (see module docs)");
             std::process::exit(2);
         }
     }
@@ -207,7 +237,7 @@ fn clk_tck() -> u64 {
 
 // ---------------------------------------------------------------- core benchmark
 
-fn bench_config(sources: u32) -> ConfigSpec {
+fn bench_config(sources: u32, supervision: Supervision) -> ConfigSpec {
     let mut tags = Vec::new();
     let mut srcs = Vec::new();
     for s in 0..sources {
@@ -217,13 +247,17 @@ fn bench_config(sources: u32) -> ConfigSpec {
             tags.push(TagSpec { tag_id, name: format!("s{s}_c{c}"), value_type: ValueType::I64 });
             channels.push(ChannelSpec { channel_id: ChannelId(c + 1), tag_id, value_type: ValueType::I64 });
         }
-        srcs.push(SourceSpec { source_id: SourceId(s + 1), name: format!("load-{s}"), channels });
+        srcs.push(SourceSpec { source_id: SourceId(s + 1), name: format!("load-{s}"), channels, supervision });
     }
     ConfigSpec { limits: CoreLimits { max_observations_per_batch: CHANNELS }, tags, sources: srcs }
 }
 
-fn core_bench(ops: u64) {
-    println!("## Kernel in-memory (`scada-bench core --ops {ops}`)\n");
+fn core_bench(ops: u64, supervised: bool) {
+    let flag = if supervised { " --supervised" } else { "" };
+    println!("## Kernel in-memory (`scada-bench core --ops {ops}{flag}`)\n");
+    if supervised {
+        println!("VS-004: the source has liveness + freshness supervision (markers maintained, digest v2).");
+    }
     println!("Config: 1 source x {CHANNELS} i64 channels. Every Delta changes every carried value (revision +1 each).");
     println!("Timing: `Instant::now()` around each single `apply` call (timer overhead included, measured below).");
     println!("Inputs are pre-built in chunks of 10 000 outside the timed region.\n");
@@ -241,7 +275,13 @@ fn core_bench(ops: u64) {
     );
     println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for size in [1u32, 32, 128] {
-        let cfg = Arc::new(ValidatedConfig::validate(bench_config(1)).expect("config"));
+        let cfg = Arc::new(
+            ValidatedConfig::validate(bench_config(
+                1,
+                if supervised { Supervision { liveness: true, freshness: true } } else { Supervision::NONE },
+            ))
+            .expect("config"),
+        );
         let mut k = Kernel::new(cfg);
         let src = SourceId(1);
         k.apply(SequencedInput {
@@ -331,7 +371,7 @@ fn core_bench(ops: u64) {
         "live heap Δ = allocator live bytes after the run minus before (inputs already consumed): ~0 means no growth.\n"
     );
     // Digest on demand, for reference.
-    let cfg = Arc::new(ValidatedConfig::validate(bench_config(SOURCES)).expect("config"));
+    let cfg = Arc::new(ValidatedConfig::validate(bench_config(SOURCES, Supervision::NONE)).expect("config"));
     let k = Kernel::new(cfg);
     let mut d = Vec::new();
     for _ in 0..10_000 {
@@ -356,7 +396,14 @@ fn kernel_bin() -> PathBuf {
 
 /// `load` sources x 128 i64 channels (16 -> 2048 tags) + the rare and control-probe
 /// sources 900..=908 (1 i64 channel each).
-fn write_config(dir: &Path, queue: u32, max_conn: u32, load: u32, ipc_lines: &[String]) -> PathBuf {
+fn write_config(
+    dir: &Path,
+    queue: u32,
+    max_conn: u32,
+    load: u32,
+    ipc_lines: &[String],
+    supervise: Option<(u64, u64, u64)>,
+) -> PathBuf {
     let mut s = format!(
         "[ipc]\nsocket_path = \"{}\"\nmax_frame_bytes = 65536\nmax_driver_connections = {max_conn}\ninput_queue_capacity = {queue}\nmax_inflight_per_connection = 32\nhandshake_timeout_ms = 2000\nframe_timeout_ms = 2000\n",
         dir.join("driver.sock").display()
@@ -364,6 +411,16 @@ fn write_config(dir: &Path, queue: u32, max_conn: u32, load: u32, ipc_lines: &[S
     for l in ipc_lines {
         s.push_str(l);
         s.push('\n');
+    }
+    let mut per_source = String::new();
+    if let Some((live, fresh, poll)) = supervise {
+        s.push_str(&format!("\n[runtime]\nwatchdog_poll_ms = {poll}\n"));
+        if live > 0 {
+            per_source.push_str(&format!("liveness_timeout_ms = {live}\n"));
+        }
+        if fresh > 0 {
+            per_source.push_str(&format!("freshness_timeout_ms = {fresh}\n"));
+        }
     }
     s.push_str(&format!("\n[core]\nmax_observations_per_batch = {CHANNELS}\n"));
     for src in 1..=load {
@@ -375,7 +432,7 @@ fn write_config(dir: &Path, queue: u32, max_conn: u32, load: u32, ipc_lines: &[S
         s.push_str(&format!("\n[[tags]]\nid = {}\nname = \"rare{r}\"\ntype = \"i64\"\n", r * 1000 + 1));
     }
     for src in 1..=load {
-        s.push_str(&format!("\n[[sources]]\nid = {src}\nname = \"load-{src}\"\nchannels = [\n"));
+        s.push_str(&format!("\n[[sources]]\nid = {src}\nname = \"load-{src}\"\n{per_source}channels = [\n"));
         for c in 1..=CHANNELS {
             s.push_str(&format!("  {{ channel = {c}, tag = {}, type = \"i64\" }},\n", src * 1000 + c));
         }
@@ -383,7 +440,7 @@ fn write_config(dir: &Path, queue: u32, max_conn: u32, load: u32, ipc_lines: &[S
     }
     for r in RARE_SOURCE..=CTL_SOURCE {
         s.push_str(&format!(
-            "\n[[sources]]\nid = {r}\nname = \"rare{r}\"\nchannels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
+            "\n[[sources]]\nid = {r}\nname = \"rare{r}\"\n{per_source}channels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
             r * 1000 + 1
         ));
     }
@@ -400,6 +457,12 @@ struct KernelProc {
 
 impl KernelProc {
     fn start(spec: &KernelSpec, tag: &str, extra: &[&str]) -> KernelProc {
+        Self::start_cfg(spec, tag, extra, None)
+    }
+
+    /// `config`: a complete configuration text (`{SOCKET}` is replaced by the socket path)
+    /// instead of the generated one.
+    fn start_cfg(spec: &KernelSpec, tag: &str, extra: &[&str], config: Option<&str>) -> KernelProc {
         let dir = std::env::temp_dir().join(format!("scada-bench-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
@@ -407,7 +470,22 @@ impl KernelProc {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         // Room for every load source, the rare sources and the takeover probe's two links.
-        let cfg = write_config(&dir, spec.queue, spec.load_sources + 16, spec.load_sources, &spec.ipc_lines);
+        let cfg = match config {
+            Some(text) => {
+                let p = dir.join("bench.toml");
+                std::fs::write(&p, text.replace("{SOCKET}", &dir.join("driver.sock").display().to_string()))
+                    .expect("write config");
+                p
+            }
+            None => write_config(
+                &dir,
+                spec.queue,
+                spec.load_sources + 16,
+                spec.load_sources,
+                &spec.ipc_lines,
+                spec.supervise,
+            ),
+        };
         let mut child = Command::new(&spec.bin)
             .arg("--config")
             .arg(&cfg)
@@ -469,6 +547,8 @@ fn thread_group(comm: &str) -> String {
         "io".into()
     } else if comm.starts_with("scada-sequencer") {
         "seq".into()
+    } else if comm.starts_with("scada-watchdog") {
+        "wd".into()
     } else {
         "main".into()
     }
@@ -544,8 +624,19 @@ fn run_client(
     dur: Duration,
     pipeline: u64,
     interval: Option<Duration>,
+    heartbeat: Option<Duration>,
 ) -> ClientResult {
     let (mut s, mut seq) = open(&socket, source, epoch_for(source), channels);
+    // VS-004: heartbeat schedule (a no-op against a kernel that negotiated 1.0).
+    let mut next_beat = heartbeat.map(|h| Instant::now() + h);
+    let mut beat = |s: &mut Session| {
+        if let (Some(h), Some(at)) = (heartbeat, next_beat.as_mut())
+            && Instant::now() >= *at
+        {
+            s.heartbeat().expect("heartbeat");
+            *at += h;
+        }
+    };
     let mut lat = Vec::new();
     let mut batches = 0u64;
     let start = Instant::now();
@@ -556,6 +647,7 @@ fn run_client(
             if el >= warmup + dur {
                 break;
             }
+            beat(&mut s);
             let msg = delta(seq, size, v);
             let t0 = Instant::now();
             let a = s.request(&msg).expect("request");
@@ -583,6 +675,9 @@ fn run_client(
                 counted = 0;
             }
             let done = el >= warmup + dur;
+            if !done {
+                beat(&mut s);
+            }
             let mut queued = false;
             while !done && sent - acked < pipeline {
                 s.send(&delta(seq + sent, size, v)).expect("send");
@@ -678,6 +773,28 @@ fn stages_kv(r: &IntrospectResponse) -> String {
         .collect()
 }
 
+/// VS-004 counters (all zero with supervision off; absent from a VS-003 kernel's reply).
+fn supervision_kv(r: &IntrospectResponse) -> String {
+    let Some(c) = r.counters.as_ref() else { return String::new() };
+    if c.watchdog_ticks == 0 && c.heartbeats_valid == 0 {
+        return String::new();
+    }
+    format!(
+        " hb_valid={} hb_coalesced={} live_exp={} live_rec={} live_rec_batch={} fresh_exp={} fresh_tags={} wd_ticks={} wd_coalesced={} wd_late={} wd_late_max_ns={}",
+        c.heartbeats_valid,
+        c.heartbeats_coalesced,
+        c.liveness_expiries,
+        c.liveness_recoveries,
+        c.liveness_recoveries_by_batch,
+        c.freshness_expiries,
+        c.freshness_tags_expired,
+        c.watchdog_ticks,
+        c.watchdog_ticks_coalesced,
+        c.watchdog_ticks_late,
+        c.watchdog_max_late_ns
+    )
+}
+
 struct CellResult {
     clients: u32,
     size: u32,
@@ -725,10 +842,11 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
     let rss_idle = proc_status(k.pid(), "VmRSS:");
     let warm = Duration::from_secs(warmup_secs);
     let dur = Duration::from_secs(secs);
+    let hb = (spec.heartbeat_ms > 0).then(|| Duration::from_millis(spec.heartbeat_ms));
     let handles: Vec<_> = (1..=clients)
         .map(|c| {
             let sock = k.socket();
-            std::thread::spawn(move || run_client(sock, c, size, CHANNELS, warm, dur, pipeline, None))
+            std::thread::spawn(move || run_client(sock, c, size, CHANNELS, warm, dur, pipeline, None, hb))
         })
         .collect();
     std::thread::sleep(warm);
@@ -748,7 +866,7 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
         lat: (!lat.is_empty()).then(|| stats(lat)),
         usage,
         scheduler: scheduler_of(&k.ready),
-        diag: stages_kv(&intro),
+        diag: stages_kv(&intro) + &supervision_kv(&intro),
     }
 }
 
@@ -949,11 +1067,12 @@ fn mixed(spec: &KernelSpec, m: &MixedSpec, secs: u64, warmup_secs: u64, label: &
     let rss_idle = proc_status(k.pid(), "VmRSS:");
     let warm = Duration::from_secs(warmup_secs);
     let dur = Duration::from_secs(secs);
+    let hb = (spec.heartbeat_ms > 0).then(|| Duration::from_millis(spec.heartbeat_ms));
     let (hv_size, hv_pipeline) = (m.hv_size, m.hv_pipeline);
     let hv_handles: Vec<_> = (1..=hv)
         .map(|c| {
             let sock = k.socket();
-            std::thread::spawn(move || run_client(sock, c, hv_size, CHANNELS, warm, dur, hv_pipeline, None))
+            std::thread::spawn(move || run_client(sock, c, hv_size, CHANNELS, warm, dur, hv_pipeline, None, hb))
         })
         .collect();
     let interval = Duration::from_micros(interval_us);
@@ -965,7 +1084,7 @@ fn mixed(spec: &KernelSpec, m: &MixedSpec, secs: u64, warmup_secs: u64, label: &
                 if open_loop {
                     run_open_rare(sock, RARE_SOURCE + r, warm, dur, interval, max_out)
                 } else {
-                    let c = run_client(sock, RARE_SOURCE + r, 1, 1, warm, dur, 1, Some(interval));
+                    let c = run_client(sock, RARE_SOURCE + r, 1, 1, warm, dur, 1, Some(interval), hb);
                     OpenResult { sched_lat: Vec::new(), send_lat: c.lat, late: 0, max_outstanding: 1 }
                 }
             })
@@ -1030,7 +1149,7 @@ fn mixed(spec: &KernelSpec, m: &MixedSpec, secs: u64, warmup_secs: u64, label: &
         usage.threads,
         c.input_queue_full_waits,
         c.batches_rejected,
-        stages_kv(&intro)
+        stages_kv(&intro) + &supervision_kv(&intro)
     );
 }
 
@@ -1054,7 +1173,7 @@ fn saturation(spec: &KernelSpec, secs: u64, clients: u32) {
     let handles: Vec<_> = (1..=clients)
         .map(|c| {
             let sock = k.socket();
-            std::thread::spawn(move || run_client(sock, c, CHANNELS, CHANNELS, Duration::ZERO, dur, 32, None))
+            std::thread::spawn(move || run_client(sock, c, CHANNELS, CHANNELS, Duration::ZERO, dur, 32, None, None))
         })
         .collect();
     let t0 = Instant::now();
@@ -1099,5 +1218,113 @@ fn saturation(spec: &KernelSpec, secs: u64, clients: u32) {
         "- Theoretical consumer ceiling with the throttle: {:.0} requests/s; observed {:.0} batches/s.\n",
         1e6 / throttle_us as f64,
         c.batches_applied as f64 / secs as f64
+    );
+}
+
+// ---------------------------------------------------------------- VS-004 review P1
+
+/// VS-004 review P1: a large plant that has gone **entirely stale**. `sources` sources of
+/// `channels` i64 channels each (freshness `fresh_ms`, `watchdog_poll_ms = poll_ms`, no
+/// liveness), each connected once with a FullState and then silent on its open link: after
+/// `fresh_ms` every tag is `Uncertain(StaleData)` and stays so. Measured over `secs` once
+/// every tag has expired: the send→ACK latency of an unsupervised probe source (900, one
+/// observation every `interval_us`, stop-and-wait), kernel CPU (per thread) and RSS, and
+/// with `--kernel-arg --diag` the sequencer stages, among them `watchdog_lateness`.
+#[allow(clippy::too_many_arguments)]
+fn stale(
+    spec: &KernelSpec,
+    sources: u32,
+    channels: u32,
+    poll_ms: u64,
+    fresh_ms: u64,
+    interval_us: u64,
+    secs: u64,
+    label: &str,
+) {
+    assert!((1..RARE_SOURCE).contains(&sources) && (1..=4096).contains(&channels));
+    let mut c = format!(
+        "[ipc]\nsocket_path = \"{{SOCKET}}\"\nmax_frame_bytes = 131072\nmax_driver_connections = {}\ninput_queue_capacity = {}\n\
+         max_inflight_per_connection = 32\nhandshake_timeout_ms = 5000\nframe_timeout_ms = 5000\n\n\
+         [runtime]\nwatchdog_poll_ms = {poll_ms}\n\n[core]\nmax_observations_per_batch = {channels}\n",
+        sources + 4,
+        spec.queue
+    );
+    use std::fmt::Write as _;
+    for src in 1..=sources {
+        for ch in 1..=channels {
+            let _ = write!(c, "\n[[tags]]\nid = {}\nname = \"s{src}c{ch}\"\ntype = \"i64\"\n", src * 10_000 + ch);
+        }
+    }
+    let _ = write!(c, "\n[[tags]]\nid = {}\nname = \"probe\"\ntype = \"i64\"\n", RARE_SOURCE * 10_000 + 1);
+    for src in 1..=sources {
+        let _ = write!(
+            c,
+            "\n[[sources]]\nid = {src}\nname = \"stale-{src}\"\nfreshness_timeout_ms = {fresh_ms}\nchannels = [\n"
+        );
+        for ch in 1..=channels {
+            let _ = writeln!(c, "  {{ channel = {ch}, tag = {}, type = \"i64\" }},", src * 10_000 + ch);
+        }
+        c.push_str("]\n");
+    }
+    let _ = write!(
+        c,
+        "\n[[sources]]\nid = {RARE_SOURCE}\nname = \"probe\"\nchannels = [ {{ channel = 1, tag = {}, type = \"i64\" }} ]\n",
+        RARE_SOURCE * 10_000 + 1
+    );
+    let probe = RARE_SOURCE.to_string();
+    let extra: Vec<&str> =
+        if spec.args.iter().any(|a| a == "--diag") { vec!["--diag-probe-source", &probe] } else { vec![] };
+    let k = KernelProc::start_cfg(spec, &format!("stale-{sources}x{channels}"), &extra, Some(&c));
+    // Every source: FullState once, then an open, silent link (kept until the end).
+    let t0 = Instant::now();
+    let held: Vec<(Session, u64)> = (1..=sources).map(|src| open(&k.socket(), src, epoch_for(src), channels)).collect();
+    let loaded_s = t0.elapsed().as_secs_f64();
+    let total = u64::from(sources) * u64::from(channels);
+    let deadline = Instant::now() + Duration::from_millis(fresh_ms) + Duration::from_secs(60);
+    loop {
+        let expired = k.introspect().counters.as_ref().map_or(0, |c| c.freshness_tags_expired);
+        if expired >= total {
+            break;
+        }
+        assert!(Instant::now() < deadline, "only {expired}/{total} tags expired");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Everything is stale: from now on no tag is eligible any more.
+    std::thread::sleep(Duration::from_millis(200));
+    let rss_idle = proc_status(k.pid(), "VmRSS:");
+    let before = k.introspect_with(true); // reset diagnostics
+    let dur = Duration::from_secs(secs);
+    let sock = k.socket();
+    let probe_h = std::thread::spawn(move || {
+        run_client(sock, RARE_SOURCE, 1, 1, Duration::ZERO, dur, 1, Some(Duration::from_micros(interval_us)), None)
+    });
+    let usage = measure_window(k.pid(), dur, rss_idle);
+    let intro = k.introspect();
+    let r = probe_h.join().expect("probe");
+    let lat = stats(r.lat);
+    let ctr = |f: fn(&scada_protocol::introspect_v1::RuntimeCounters) -> u64, x: &IntrospectResponse| {
+        x.counters.as_ref().map_or(0, f)
+    };
+    let ticks = ctr(|c| c.watchdog_ticks, &intro) - ctr(|c| c.watchdog_ticks, &before);
+    let expiries = ctr(|c| c.freshness_expiries, &intro) - ctr(|c| c.freshness_expiries, &before);
+    drop(held);
+    println!(
+        "kind=stale label={label} scheduler={} sources={sources} channels={channels} tags={total} poll_ms={poll_ms} fresh_ms={fresh_ms} load_s={loaded_s:.1} window_ticks={ticks} window_expiries={expiries} probe_n={} probe_p50_ns={} probe_p99_ns={} probe_p999_ns={} probe_max_ns={} cpu_pct={:.1} cpu_threads={} ctx_vol_s={:.0} ctx_invol_s={:.0} rss_idle_kib={} rss_steady_kib={} rss_peak_kib={} threads={}{}{}",
+        scheduler_of(&k.ready),
+        lat.n,
+        lat.p50,
+        lat.p99,
+        lat.p999,
+        lat.max,
+        usage.cpu_pct,
+        usage.cpu_by_thread,
+        usage.ctx_vol_per_s,
+        usage.ctx_invol_per_s,
+        usage.rss_idle,
+        usage.rss_steady,
+        usage.peak,
+        usage.threads,
+        stages_kv(&intro),
+        supervision_kv(&intro)
     );
 }

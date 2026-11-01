@@ -4,8 +4,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use scada_core::{
-    ChannelId, ChannelSpec, ConfigError, ConfigSpec, CoreLimits, SourceId, SourceSpec, TagId, TagSpec, ValidatedConfig,
-    ValueType,
+    ChannelId, ChannelSpec, ConfigError, ConfigSpec, CoreLimits, SourceId, SourceSpec, Supervision, TagId, TagSpec,
+    ValidatedConfig, ValueType,
 };
 use scada_protocol::frame::MAX_FRAME_BYTES_CEILING;
 use serde::Deserialize;
@@ -110,6 +110,9 @@ struct FileRuntime {
     worker_threads: Option<u32>,
     /// E1: refuse startup if the configured worst-case allocation bound exceeds this.
     memory_budget_bytes: Option<u64>,
+    /// VS-004 (ADR 0011): period of the single watchdog. Used only when at least one source
+    /// sets a liveness or freshness timeout (forbidden otherwise). Default 250 ms.
+    watchdog_poll_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -155,6 +158,10 @@ struct FileSource {
     /// source. If absent, access control relies on the socket file permissions only.
     authorized_uids: Option<Vec<u32>>,
     channels: Vec<FileChannel>,
+    /// VS-004: optional liveness supervision (absent = none).
+    liveness_timeout_ms: Option<u64>,
+    /// VS-004: optional per-tag freshness supervision (absent = none).
+    freshness_timeout_ms: Option<u64>,
 }
 
 /// IPC limits. Guardrails, not performance results.
@@ -274,6 +281,117 @@ impl Default for RuntimeSettings {
     }
 }
 
+/// VS-004: default `[runtime] watchdog_poll_ms`.
+pub const DEFAULT_WATCHDOG_POLL_MS: u64 = 250;
+/// VS-004: accepted range of `watchdog_poll_ms`.
+pub const WATCHDOG_POLL_RANGE_MS: (u64, u64) = (10, 60_000);
+/// VS-004: an enabled timeout must be at least this many watchdog periods (granularity:
+/// a timeout is detected up to one period late, ADR 0011 §6).
+pub const MIN_TIMEOUT_POLLS: u64 = 3;
+/// VS-004: largest accepted timeout (24 h): beyond it a timeout is a configuration error.
+pub const MAX_TIMEOUT_MS: u64 = 86_400_000;
+/// VS-004: largest `freshness_timeout_ms / watchdog_poll_ms`: bounds the freshness sample
+/// ring of a source to `MAX_FRESHNESS_POLLS + 2` entries (24 B each). A longer timeout
+/// needs a longer poll period.
+pub const MAX_FRESHNESS_POLLS: u64 = 4096;
+
+/// VS-004: timeouts of one supervised source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePolicy {
+    pub source_id: SourceId,
+    pub liveness_timeout_ms: Option<u64>,
+    pub freshness_timeout_ms: Option<u64>,
+}
+
+/// VS-004: watchdog settings, present only when at least one source is supervised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisionConfig {
+    pub watchdog_poll_ms: u64,
+    /// Supervised sources only, sorted by source id.
+    pub sources: Vec<SourcePolicy>,
+}
+
+impl SupervisionConfig {
+    pub fn policy(&self, source: SourceId) -> Option<&SourcePolicy> {
+        self.sources.binary_search_by_key(&source, |p| p.source_id).ok().and_then(|i| self.sources.get(i))
+    }
+}
+
+impl fmt::Display for SupervisionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let live = self.sources.iter().filter(|p| p.liveness_timeout_ms.is_some()).count();
+        let fresh = self.sources.iter().filter(|p| p.freshness_timeout_ms.is_some()).count();
+        write!(
+            f,
+            "watchdog_poll_ms={} supervised_sources={} liveness={live} freshness={fresh} [",
+            self.watchdog_poll_ms,
+            self.sources.len()
+        )?;
+        for (i, p) in self.sources.iter().enumerate() {
+            let ms = |v: Option<u64>| v.map_or_else(|| "-".to_owned(), |x| x.to_string());
+            write!(
+                f,
+                "{}{}:live={}ms,fresh={}ms",
+                if i > 0 { " " } else { "" },
+                p.source_id,
+                ms(p.liveness_timeout_ms),
+                ms(p.freshness_timeout_ms)
+            )?;
+        }
+        f.write_str("]")
+    }
+}
+
+/// VS-004: validate the supervision settings (fail fast, clear errors).
+fn parse_supervision(poll: Option<u64>, sources: &[FileSource]) -> Result<Option<SupervisionConfig>, LoadError> {
+    let any = sources.iter().any(|s| s.liveness_timeout_ms.is_some() || s.freshness_timeout_ms.is_some());
+    if !any {
+        return match poll {
+            Some(_) => Err(LoadError::Runtime(
+                "watchdog_poll_ms is only valid when a source sets liveness_timeout_ms or freshness_timeout_ms".into(),
+            )),
+            None => Ok(None),
+        };
+    }
+    let poll = poll.unwrap_or(DEFAULT_WATCHDOG_POLL_MS);
+    let (lo, hi) = WATCHDOG_POLL_RANGE_MS;
+    if !(lo..=hi).contains(&poll) {
+        return Err(LoadError::Runtime(format!("watchdog_poll_ms={poll} outside {lo}..={hi}")));
+    }
+    let min = poll.saturating_mul(MIN_TIMEOUT_POLLS);
+    let check = |id: u32, name: &str, v: Option<u64>| -> Result<(), LoadError> {
+        match v {
+            Some(t) if t < min || t > MAX_TIMEOUT_MS => Err(LoadError::Runtime(format!(
+                "source {id}: {name}={t} outside {min}..={MAX_TIMEOUT_MS} (at least {MIN_TIMEOUT_POLLS} x watchdog_poll_ms={poll})"
+            ))),
+            _ => Ok(()),
+        }
+    };
+    let mut out = Vec::new();
+    for s in sources {
+        check(s.id, "liveness_timeout_ms", s.liveness_timeout_ms)?;
+        check(s.id, "freshness_timeout_ms", s.freshness_timeout_ms)?;
+        if let Some(t) = s.freshness_timeout_ms
+            && t.div_ceil(poll) > MAX_FRESHNESS_POLLS
+        {
+            return Err(LoadError::Runtime(format!(
+                "source {}: freshness_timeout_ms={t} is more than {MAX_FRESHNESS_POLLS} x watchdog_poll_ms={poll} \
+                 (bounded sample ring); raise watchdog_poll_ms",
+                s.id
+            )));
+        }
+        if s.liveness_timeout_ms.is_some() || s.freshness_timeout_ms.is_some() {
+            out.push(SourcePolicy {
+                source_id: SourceId(s.id),
+                liveness_timeout_ms: s.liveness_timeout_ms,
+                freshness_timeout_ms: s.freshness_timeout_ms,
+            });
+        }
+    }
+    out.sort_by_key(|p| p.source_id);
+    Ok(Some(SupervisionConfig { watchdog_poll_ms: poll, sources: out }))
+}
+
 /// Validated runtime configuration.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -284,6 +402,8 @@ pub struct RuntimeConfig {
     pub core: ValidatedConfig,
     /// (source, authorized uids) sorted by source; `None` = socket permissions only.
     pub authorization: Vec<(SourceId, Option<Vec<u32>>)>,
+    /// VS-004: `None` unless at least one source is supervised (default: none).
+    pub supervision: Option<SupervisionConfig>,
 }
 
 impl RuntimeConfig {
@@ -380,6 +500,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         Scheduler::parse(f.runtime.scheduler.as_deref().unwrap_or("current_thread"), f.runtime.worker_threads)
             .map_err(LoadError::Runtime)?;
     let runtime = RuntimeSettings { scheduler, memory_budget_bytes: f.runtime.memory_budget_bytes };
+    let supervision = parse_supervision(f.runtime.watchdog_poll_ms, &f.sources)?;
 
     let spec = ConfigSpec {
         limits: CoreLimits { max_observations_per_batch: f.core.max_observations_per_batch },
@@ -403,6 +524,10 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
                         value_type: c.value_type.into(),
                     })
                     .collect(),
+                supervision: Supervision {
+                    liveness: s.liveness_timeout_ms.is_some(),
+                    freshness: s.freshness_timeout_ms.is_some(),
+                },
             })
             .collect(),
     };
@@ -420,5 +545,6 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         runtime,
         core,
         authorization,
+        supervision,
     })
 }

@@ -1,4 +1,4 @@
-# moscascada — SCADA Engine, vertical slices VS-001 + VS-002 + VS-003
+# moscascada — SCADA Engine, vertical slices VS-001 + VS-002 + VS-003 + VS-004
 
 Percorso `driver esterno → IPC → validazione → sequencer → state machine deterministica → RTDB in RAM`, in Rust stable, Linux-first.
 
@@ -6,10 +6,12 @@ Percorso `driver esterno → IPC → validazione → sequencer → state machine
 
 **VS-003** (ADR 0010, [vs003.md](docs/benchmarks/vs003.md)): politica di ingresso esplicita verso l'unico writer, `[ipc] ingress_policy = "fifo"` (default, VS-002, invariato) | `"source_fair"` (sperimentale: lane per sorgente servite round-robin), con modello puro dello scheduler (`crates/scada-sched`), test di ordine/barriera/cancellazione/fair progress sotto entrambe le politiche e campagna A/B/C misurata prima della scelta. **Decisione:** l'obiettivo del brief (p99 rara ~2× a throughput −10 %) non è raggiunto da nessuna variante sul profilo Server; FIFO resta il default; `source_fair` è un esperimento opt-in, **non qualificato per produzione** (beneficio solo nel caso Micro saturo, con costo di throughput dichiarato). Condizioni per promuoverlo e criterio di rimozione: ADR 0010 §11.
 
+**VS-004** (ADR 0011, [vs004.md](docs/benchmarks/vs004.md)): supervisione **opzionale, disabilitata per default** delle sorgenti. Per sorgente `liveness_timeout_ms` (driver muto con socket aperto → sorgente `Silent`, tag `Uncertain(SourceSilent)`, link ancora `Connected`) e `freshness_timeout_ms` (ogni tag non osservato da `T` → `Uncertain(StaleData)`, valutato **per tag**); un solo thread watchdog (`[runtime] watchdog_poll_ms`). Le scadenze entrano nel core come **operazioni sequenziate** con guardie senza tempo (generazione del link, token in operation sequence), catturate e riprodotte senza clock; nessun clock in `Kernel::apply`. Protocollo **1.1** additivo: `Heartbeat` (nessun ACK, coalescente, mai in coda), negoziato col minor: un driver aggiornato non invia heartbeat a un kernel 1.0, un driver legacy funziona invariato. Un heartbeat ripristina la comunicazione, **mai la qualità**: solo un'osservazione applicata porta un tag a `Good`. A supervisione disattivata contratto, digest (v1) e prestazioni sono quelli di VS-003 (A/B in vs004.md). ARM64: **NOT TESTED ON HARDWARE**.
+
 Documenti:
 - [Contratto semantico](docs/contract.md) · [Architettura](docs/architecture.md)
-- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md) · [0010 ingresso fair (VS-003)](docs/adr/0010-fair-ingress.md)
-- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md) · [VS-003 (politiche di ingresso)](docs/benchmarks/vs003.md)
+- ADR: [0001 IPC](docs/adr/0001-ipc.md) · [0002 stato del kernel e digest](docs/adr/0002-kernel-state.md) · [0003 eccezione `unsafe` nel benchmark](docs/adr/0003-bench-allocator-unsafe.md) · [0004 runtime Tokio](docs/adr/0004-tokio-runtime.md) · [0005 drain del sequencer (misurato, non adottato)](docs/adr/0005-sequencer-drain.md) · [0006 allocazioni e IPC](docs/adr/0006-allocations-ipc-path.md) · [0007 lookup/sort nel core](docs/adr/0007-core-lookup-sort.md) · [0008 liveness, takeover, ripresa](docs/adr/0008-liveness-takeover-reconnect.md) · [0009 memoria e sicurezza UDS](docs/adr/0009-memory-budget-uds-security.md) · [0010 ingresso fair (VS-003)](docs/adr/0010-fair-ingress.md) · [0011 liveness e freschezza (VS-004)](docs/adr/0011-source-liveness-and-data-freshness.md)
+- Benchmark: [VS-001](docs/benchmarks/vs001.md) · [VS-002 (confronti, campagne, analisi critica)](docs/benchmarks/vs002.md) · [VS-003 (politiche di ingresso)](docs/benchmarks/vs003.md) · [VS-004 (supervisione: default-off vs attiva)](docs/benchmarks/vs004.md)
 - [Matrice di tracciabilità dei requisiti, limiti noti e valutazione critica](docs/traceability.md)
 
 ## Struttura
@@ -58,12 +60,13 @@ cd fuzz
 mkdir -p corpus && cp -r seeds/* corpus/
 cargo +nightly fuzz run -O frame_decode     corpus/frame_decode     -- -max_total_time=300
 cargo +nightly fuzz run -O batch_validation corpus/batch_validation -- -max_total_time=300
-cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=300   # VS-002 C3
+cargo +nightly fuzz run -O decode_equivalence corpus/decode_equivalence -- -max_total_time=300   # VS-002 C3 (+ heartbeat VS-004)
+cargo +nightly fuzz run -O supervision_transitions corpus/supervision_transitions -- -max_total_time=300   # VS-004
 ```
 
 Test runtime con lo scheduler multi-thread (la CI esegue entrambi): `cargo build --release -p scada-sim-driver && SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime`.
 
-Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4` e `source_fair:1`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
+Test runtime sotto una politica di ingresso VS-003 (la CI esegue `source_fair:4` e `source_fair:1`): `SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime`. Suite runtime con la supervisione VS-004 attiva sulla sorgente 1001 (la CI la esegue con timeout larghi): `SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime` (`LIVENESS_MS:FRESHNESS_MS`, `0` = disattivato). Modello dello scheduler: `cargo test -p scada-sched`; simulatore delle politiche: `cargo run --release -p scada-sched --example policy_model`.
 
 ## Esecuzione della demo
 
@@ -100,6 +103,15 @@ mkdir -m 700 -p /tmp/moscascada-demo
 
 Il kernel termina con `SIGTERM`/`SIGINT`; lo stato volatile viene scartato.
 
+Supervisione VS-004 (opzionale): aggiungere `[runtime] watchdog_poll_ms = 250` e, nella sorgente, `liveness_timeout_ms` / `freshness_timeout_ms` (chiavi commentate nei profili); `--check-config` stampa sorgenti sorvegliate, soglie e bound di memoria. Simulatore:
+
+```bash
+./target/release/scada-sim-driver --socket S --heartbeat-ms 1000 hold        # FullState, poi solo heartbeat
+./target/release/scada-sim-driver --socket S heartbeat --count 20 --heartbeat-ms 500
+./target/release/scada-sim-driver --socket S --heartbeat-ms 1000 soak --duration-ms 600000 --cycle-ms 200 --pause-ms 8000
+./target/release/scada-sim-driver --socket S --legacy-hello demo            # Hello 1.0 byte-identico a VS-003
+```
+
 ## Benchmark
 
 ```bash
@@ -114,7 +126,7 @@ Metodologia e risultati misurati: [docs/benchmarks/vs001.md](docs/benchmarks/vs0
 |---|---|
 | rustc / cargo | 1.97.0 (2d8144b78 2026-07-07) / 1.97.0 |
 | rustc nightly (solo fuzz) | cargo 1.101.0-nightly (31d3246e0 2026-10-27) |
-| cargo-fuzz | 0.13.2 |
+| cargo-fuzz | 0.13.2 (VS-004: stesso nightly `cargo 1.101.0-nightly (31d3246e0 2026-10-27)`) |
 | protoc | non usato (compilatore `protox` 0.10.0, `prost-build` 0.14.4) |
 | Buf | 1.75.0 |
 | Benchmark | harness proprio `scada-bench` (nessun Criterion: servono percentili p99.9 esatti e conteggio allocazioni) |

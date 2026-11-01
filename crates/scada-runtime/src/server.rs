@@ -14,7 +14,9 @@ use scada_protocol::driver_v1::{
 };
 use scada_protocol::frame::{self, FrameError, HEADER_LEN};
 use scada_protocol::introspect_v1 as ipb;
-use scada_protocol::{KERNEL_INSTANCE_ID_LEN, MAX_DRIVER_ID_BYTES, Message, PROTOCOL_MAJOR, PROTOCOL_MINOR};
+use scada_protocol::{
+    KERNEL_INSTANCE_ID_LEN, MAX_DRIVER_ID_BYTES, MINOR_HEARTBEAT, Message, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -364,10 +366,25 @@ async fn session(server: &Server, stream: UnixStream) {
         }
         Some(true) => {}
     }
+    // VS-004: feature negotiation inside major 1 (a 1.0 driver sends no protocol_minor).
+    let negotiated_minor = PROTOCOL_MINOR.min(hello.protocol_minor);
+    // VS-004: a per-link heartbeat counter, only for a liveness-supervised source.
+    let heartbeats = server
+        .config
+        .supervision
+        .as_ref()
+        .and_then(|s| s.policy(source_id))
+        .is_some_and(|p| p.liveness_timeout_ms.is_some())
+        .then(|| Arc::new(std::sync::atomic::AtomicU64::new(0)));
     let (tx, rx) = oneshot::channel();
     let (superseded_tx, superseded_rx) = oneshot::channel();
-    let connect =
-        Request::Connect { source_id, source_epoch: hello.source_epoch, reply: tx, superseded: superseded_tx };
+    let connect = Request::Connect {
+        source_id,
+        source_epoch: hello.source_epoch,
+        reply: tx,
+        superseded: superseded_tx,
+        heartbeats: heartbeats.clone(),
+    };
     if submit(server, connect).await.is_err() {
         reject(server, &mut wr, ErrorCode::KernelShuttingDown, "sequencer stopped", &mut scratch).await;
         return;
@@ -389,7 +406,7 @@ async fn session(server: &Server, stream: UnixStream) {
         body: Some(kernel_message::Body::Welcome(pb::Welcome {
             kernel_instance_id: id.to_vec(),
             negotiated_protocol_major: PROTOCOL_MAJOR,
-            negotiated_protocol_minor: PROTOCOL_MINOR,
+            negotiated_protocol_minor: negotiated_minor,
             link_generation,
             limits: Some(pb::SessionLimits {
                 max_frame_bytes: max,
@@ -403,7 +420,8 @@ async fn session(server: &Server, stream: UnixStream) {
     let write_timeout = Duration::from_millis(limits.ack_write_timeout_ms);
     if matches!(timeout(write_timeout, write_msg(&mut wr, &welcome, max, &mut scratch)).await, Ok(Ok(()))) {
         // ---- Data phase ----
-        data_phase(server, rd, wr, source_id, link_generation, buf, superseded_rx).await;
+        let link = Link { source_id, link_generation, negotiated_minor, heartbeats };
+        data_phase(server, rd, wr, link, buf, superseded_rx).await;
     }
     // Every Connected link gets exactly one Disconnected, queued after all of its batches.
     let _ = submit(server, Request::Disconnect { source_id, link_generation }).await;
@@ -419,15 +437,48 @@ async fn reject(server: &Server, wr: &mut OwnedWriteHalf, code: ErrorCode, detai
     .await;
 }
 
+/// Identity and negotiated features of one welcomed link.
+struct Link {
+    source_id: SourceId,
+    link_generation: u64,
+    /// VS-004: negotiated minor of major 1.
+    negotiated_minor: u32,
+    /// VS-004: per-link heartbeat counter read by the watchdog (liveness supervision only).
+    heartbeats: Option<crate::supervision::HeartbeatCounter>,
+}
+
+/// VS-004: validate one heartbeat of the link. `Err` is the fatal answer. A valid one only
+/// bumps the per-link counter (no request to the sequencer, no ACK): a flood cannot grow
+/// any queue or consume operation sequences; the watchdog sees at most one piece of
+/// evidence per tick.
+fn heartbeat(server: &Server, link: &Link, last: &mut u64, sequence: u64) -> Result<(), KernelMessage> {
+    let counters = &server.counters;
+    if link.negotiated_minor < MINOR_HEARTBEAT {
+        Counters::inc(&counters.heartbeats_invalid);
+        return Err(protocol_error(ErrorCode::UnexpectedMessage, "heartbeat requires protocol 1.1 (negotiated 1.0)"));
+    }
+    if sequence == 0 || sequence <= *last {
+        Counters::inc(&counters.heartbeats_invalid);
+        return Err(protocol_error(ErrorCode::InvalidHeartbeat, "heartbeat sequence must be >= 1 and increasing"));
+    }
+    *last = sequence;
+    Counters::inc(&counters.heartbeats_valid);
+    if let Some(c) = &link.heartbeats {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
 async fn data_phase(
     server: &Server,
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
-    source_id: SourceId,
-    link_generation: u64,
+    link: Link,
     mut buf: Vec<u8>,
     mut superseded: oneshot::Receiver<()>,
 ) {
+    let (source_id, link_generation) = (link.source_id, link.link_generation);
+    let mut last_heartbeat = 0u64;
     let limits = server.config.limits;
     let max = limits.max_frame_bytes;
     let max_obs = server.config.core.limits().max_observations_per_batch;
@@ -531,6 +582,24 @@ async fn data_phase(
                                 }
                                 continue;
                             }
+                            convert::Decoded::Heartbeat { sequence } => {
+                                match heartbeat(server, &link, &mut last_heartbeat, *sequence) {
+                                    Ok(()) => continue,
+                                    Err(msg) => {
+                                        let _ = or_superseded!(pending_tx.send(Pending::Fatal(msg)));
+                                        return;
+                                    }
+                                }
+                            }
+                            convert::Decoded::Other(pb::DriverMessage {
+                                body: Some(driver_message::Body::Heartbeat(h)),
+                            }) => match heartbeat(server, &link, &mut last_heartbeat, h.sequence) {
+                                Ok(()) => continue,
+                                Err(msg) => {
+                                    let _ = or_superseded!(pending_tx.send(Pending::Fatal(msg)));
+                                    return;
+                                }
+                            },
                             convert::Decoded::NotBatch => {
                                 Counters::inc(&server.counters.protocol_errors);
                                 let msg =
@@ -544,7 +613,7 @@ async fn data_phase(
                                     Counters::inc(&server.counters.protocol_errors);
                                     let msg = protocol_error(
                                         ErrorCode::UnexpectedMessage,
-                                        "only ObservationBatch after Welcome",
+                                        "only ObservationBatch (or Heartbeat with 1.1) after Welcome",
                                     );
                                     let _ = or_superseded!(pending_tx.send(Pending::Fatal(msg)));
                                     return;

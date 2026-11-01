@@ -366,7 +366,17 @@ fn replay(capture: &std::path::Path, cfg_path: &std::path::Path) -> ([u8; 32], s
         let b = r.apply(i);
         assert_eq!(a, b, "optimized and VS-001 kernels disagree on a captured input");
     }
-    assert_eq!(k.logical_snapshot(), r.logical_snapshot());
+    // VS-004 markers are not part of VS-001: neutral unless the suite runs with
+    // `SCADA_TEST_SUPERVISION` (then only the markers may differ).
+    let neutral = |mut s: scada_core::LogicalSnapshot| {
+        s.tags.iter_mut().for_each(|t| t.last_observed_operation = 0);
+        s.sources.iter_mut().for_each(|x| {
+            x.last_batch_operation = 0;
+            x.silent = false;
+        });
+        s
+    };
+    assert_eq!(neutral(k.logical_snapshot()), neutral(r.logical_snapshot()));
     (k.state_digest(), k.logical_snapshot())
 }
 
