@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 
 use scada_core::{
     BatchMode, ChannelId, ChannelSpec, ConfigSpec, CoreLimits, Kernel, Observation, ObservationBatch, Operation,
-    SequencedInput, SourceId, SourceSpec, TagId, TagSpec, ValidatedConfig, Value, ValueType,
+    SequencedInput, SourceId, SourceSpec, Supervision, TagId, TagSpec, ValidatedConfig, Value, ValueType,
 };
 use scada_protocol::driver_v1::{AckStatus, BatchMode as WireMode};
 use scada_protocol::frame;
@@ -217,7 +217,12 @@ fn bench_config(sources: u32) -> ConfigSpec {
             tags.push(TagSpec { tag_id, name: format!("s{s}_c{c}"), value_type: ValueType::I64 });
             channels.push(ChannelSpec { channel_id: ChannelId(c + 1), tag_id, value_type: ValueType::I64 });
         }
-        srcs.push(SourceSpec { source_id: SourceId(s + 1), name: format!("load-{s}"), channels });
+        srcs.push(SourceSpec {
+            source_id: SourceId(s + 1),
+            name: format!("load-{s}"),
+            channels,
+            supervision: Supervision::NONE,
+        });
     }
     ConfigSpec { limits: CoreLimits { max_observations_per_batch: CHANNELS }, tags, sources: srcs }
 }

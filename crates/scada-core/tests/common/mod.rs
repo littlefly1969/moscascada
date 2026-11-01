@@ -26,6 +26,7 @@ pub fn demo_spec() -> ConfigSpec {
                 ChannelSpec { channel_id: ChannelId(2), tag_id: TAMPER, value_type: ValueType::Bool },
                 ChannelSpec { channel_id: ChannelId(3), tag_id: TEMP, value_type: ValueType::I64 },
             ],
+            supervision: Supervision::NONE,
         }],
     }
 }

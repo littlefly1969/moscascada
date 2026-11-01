@@ -31,9 +31,18 @@ pub use kernel::{
     AppliedKind, ApplyError, IgnoredReason, Kernel, LastBatchSnapshot, LinkState, LogicalSnapshot, Observation,
     ObservationBatch, Operation, SequencedInput, SourceSnapshot, SourceStatus, TagSnapshot, TransitionOutcome,
 };
-pub use types::{BatchMode, ChannelId, Continuity, Quality, SourceId, TagId, UncertainReason, Value, ValueType};
+pub use types::{
+    BatchMode, ChannelId, Continuity, Quality, SourceId, Supervision, TagId, UncertainReason, Value, ValueType,
+};
 
-/// Version of the canonical encoding used by [`Kernel::state_digest`].
+/// Version of the canonical encoding used by [`Kernel::state_digest`] when no source is
+/// supervised (VS-001..VS-003 encoding, unchanged).
 pub const STATE_DIGEST_VERSION: u16 = 1;
-/// Version of the canonical encoding used by [`ValidatedConfig::fingerprint`].
+/// VS-004: encoding used when at least one source is supervised (ADR 0011 §7): v1 plus the
+/// supervision markers. Never used for an unsupervised configuration.
+pub const STATE_DIGEST_VERSION_SUPERVISED: u16 = 2;
+/// Version of the canonical encoding used by [`ValidatedConfig::fingerprint`] when no
+/// source is supervised.
 pub const CONFIG_FINGERPRINT_VERSION: u16 = 1;
+/// VS-004: fingerprint encoding with the per-source supervision flags.
+pub const CONFIG_FINGERPRINT_VERSION_SUPERVISED: u16 = 2;

@@ -20,7 +20,12 @@ fn multi_config() -> Arc<ValidatedConfig> {
             tags.push(TagSpec { tag_id, name: format!("t{}", tag_id.0), value_type });
             channels.push(ChannelSpec { channel_id: ChannelId(c + 1), tag_id, value_type });
         }
-        sources.push(SourceSpec { source_id: SourceId(10 + s), name: format!("s{s}"), channels });
+        sources.push(SourceSpec {
+            source_id: SourceId(10 + s),
+            name: format!("s{s}"),
+            channels,
+            supervision: Supervision::NONE,
+        });
     }
     Arc::new(
         ValidatedConfig::validate(ConfigSpec { limits: CoreLimits { max_observations_per_batch: 6 }, tags, sources })

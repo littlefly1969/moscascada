@@ -403,6 +403,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
                         value_type: c.value_type.into(),
                     })
                     .collect(),
+                supervision: scada_core::Supervision::NONE,
             })
             .collect(),
     };

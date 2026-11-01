@@ -25,6 +25,7 @@ fn base() -> &'static Kernel {
                 source_id: SourceId(1001),
                 name: "sim".into(),
                 channels: vec![ch(1, 101, ValueType::Bool), ch(2, 102, ValueType::Bool), ch(3, 103, ValueType::I64)],
+                supervision: Supervision::NONE,
             }],
         };
         let mut k = Kernel::new(Arc::new(ValidatedConfig::validate(spec).unwrap()));

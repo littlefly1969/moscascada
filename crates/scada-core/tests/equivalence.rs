@@ -28,7 +28,12 @@ fn config() -> Arc<ValidatedConfig> {
             tags.push(TagSpec { tag_id, name: format!("t{}", tag_id.0), value_type });
             channels.push(ChannelSpec { channel_id: ChannelId(*c), tag_id, value_type });
         }
-        sources.push(SourceSpec { source_id: SourceId(*s), name: format!("s{s}"), channels });
+        sources.push(SourceSpec {
+            source_id: SourceId(*s),
+            name: format!("s{s}"),
+            channels,
+            supervision: Supervision::NONE,
+        });
     }
     Arc::new(
         ValidatedConfig::validate(ConfigSpec { limits: CoreLimits { max_observations_per_batch: 16 }, tags, sources })
@@ -205,6 +210,7 @@ fn dense_index_only_for_compact_numbering_and_lookup_matches_binary_search() {
                 .zip(1..)
                 .map(|(&c, t)| ChannelSpec { channel_id: ChannelId(c), tag_id: TagId(t), value_type: ValueType::I64 })
                 .collect(),
+            supervision: Supervision::NONE,
         }],
     };
     let cfg = ValidatedConfig::validate(spec).unwrap();

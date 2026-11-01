@@ -3,9 +3,9 @@
 
 use std::fmt;
 
-use crate::CONFIG_FINGERPRINT_VERSION;
 use crate::digest::CanonicalHasher;
-use crate::types::{ChannelId, SourceId, TagId, ValueType};
+use crate::types::{ChannelId, SourceId, Supervision, TagId, ValueType};
+use crate::{CONFIG_FINGERPRINT_VERSION, CONFIG_FINGERPRINT_VERSION_SUPERVISED};
 
 /// Upper bound for `max_observations_per_batch` (protects the preallocation).
 pub const MAX_OBSERVATIONS_PER_BATCH_CEILING: u32 = 4096;
@@ -54,6 +54,8 @@ pub struct SourceSpec {
     pub source_id: SourceId,
     pub name: String,
     pub channels: Vec<ChannelSpec>,
+    /// VS-004: supervision kinds enabled for this source ([`Supervision::NONE`] = VS-003).
+    pub supervision: Supervision,
 }
 
 /// Configuration as written by the operator (order of entries is irrelevant).
@@ -143,6 +145,8 @@ pub struct TagMeta {
 pub struct SourceMeta {
     pub source_id: SourceId,
     pub name: String,
+    /// VS-004: supervision kinds enabled for this source.
+    pub supervision: Supervision,
     channels: Vec<(ChannelId, u32)>,
     /// C4: direct table `channel_id - dense_base -> tag index` (`NO_TAG` for holes), built
     /// only when the channel numbering is compact (span <= 2 x count), so it costs at most
@@ -371,7 +375,14 @@ impl ValidatedConfig {
                 channels.push((c.channel_id, idx32));
             }
             let (dense_base, dense) = dense_table(&channels);
-            sources.push(SourceMeta { source_id: s.source_id, name: s.name, channels, dense_base, dense });
+            sources.push(SourceMeta {
+                source_id: s.source_id,
+                name: s.name,
+                supervision: s.supervision,
+                channels,
+                dense_base,
+                dense,
+            });
         }
         if let Some(pos) = bound.iter().position(|b| !*b) {
             let tag_id = tags.get(pos).map_or(TagId(0), |t| t.tag_id);
@@ -383,8 +394,20 @@ impl ValidatedConfig {
         Ok(cfg)
     }
 
+    /// Version of the fingerprint encoding: 1 (VS-001..VS-003, byte-identical) when no
+    /// source is supervised, 2 when at least one is (the v1 fields followed by the
+    /// supervision flags of every source).
+    pub fn fingerprint_version(&self) -> u16 {
+        if self.any_supervision() { CONFIG_FINGERPRINT_VERSION_SUPERVISED } else { CONFIG_FINGERPRINT_VERSION }
+    }
+
+    /// Whether at least one source has a supervision kind enabled (VS-004).
+    pub fn any_supervision(&self) -> bool {
+        self.sources.iter().any(|s| s.supervision.any())
+    }
+
     fn compute_fingerprint(&self) -> [u8; 32] {
-        let mut h = CanonicalHasher::new(b"scada.kernel.config", CONFIG_FINGERPRINT_VERSION);
+        let mut h = CanonicalHasher::new(b"scada.kernel.config", self.fingerprint_version());
         h.u32(self.limits.max_observations_per_batch);
         h.len(self.tags.len());
         for t in &self.tags {
@@ -400,6 +423,12 @@ impl ValidatedConfig {
             for &(c, t) in &s.channels {
                 h.u32(c.0);
                 h.u32(self.tags.get(t as usize).map_or(0, |m| m.tag_id.0));
+            }
+        }
+        if self.any_supervision() {
+            // v2 only: appended after the complete v1 field list.
+            for s in &self.sources {
+                h.u8(u8::from(s.supervision.liveness) | (u8::from(s.supervision.freshness) << 1));
             }
         }
         h.finish()

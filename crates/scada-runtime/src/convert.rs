@@ -332,6 +332,8 @@ pub fn error_code(e: &ApplyError) -> ErrorCode {
         ApplyError::SequenceConflict { .. } => ErrorCode::SequenceConflict,
         ApplyError::SequenceOverflow => ErrorCode::SequenceOverflow,
         ApplyError::RevisionOverflow(_) => ErrorCode::RevisionOverflow,
+        // VS-004: produced only by the runtime watchdog, never by a driver message.
+        ApplyError::SupervisionNotConfigured(_) | ApplyError::InvalidFreshnessToken { .. } => ErrorCode::Internal,
     }
 }
 
