@@ -675,6 +675,7 @@ pub(crate) struct AlarmEngine {
 }
 
 /// Result of evaluating one rule against a predicted input.
+#[inline]
 fn evaluate(
     rule: &CompiledRule,
     st: AlarmState,

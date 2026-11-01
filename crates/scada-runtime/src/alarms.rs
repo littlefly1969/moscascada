@@ -115,6 +115,7 @@ pub struct AlarmRuntime {
     pub high_percent: u32,
     pub memory_bound: u64,
     last_overload: Overload,
+    last_pending: u64,
 }
 
 impl AlarmRuntime {
@@ -127,6 +128,7 @@ impl AlarmRuntime {
             high_percent,
             memory_bound,
             last_overload: Overload::Normal,
+            last_pending: 0,
         }
     }
 
@@ -178,10 +180,17 @@ impl AlarmRuntime {
                     if self.simulated_sink { "" } else { " [no durable sink in VS-005: slots are never released]" }
                 );
                 self.last_overload = o;
+                c.outbox_overload.store(o as u64, Ordering::Relaxed);
             }
-            c.outbox_overload.store(o as u64, Ordering::Relaxed);
         }
-        c.pending_link_transitions.store(self.pending_disconnects.len() as u64, Ordering::Relaxed);
+        // Shared counters are written only on change: an unconditional store per apply
+        // makes the sequencer bounce the counters' cache line with the I/O threads that
+        // increment their own counters (measured: -20 % batches/s under multi_thread(2)).
+        let pending = self.pending_disconnects.len() as u64;
+        if pending != self.last_pending {
+            self.last_pending = pending;
+            c.pending_link_transitions.store(pending, Ordering::Relaxed);
+        }
     }
 
     /// Remember a refused disconnection (keep only the newest generation per source).
