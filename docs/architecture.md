@@ -1,4 +1,4 @@
-# Architettura (VS-001 + VS-002 + VS-003 + VS-004)
+# Architettura (VS-001 + VS-002 + VS-003 + VS-004 + VS-005)
 
 ```text
  processi driver (invariati)               processo scada-kernel (scada-runtime)
@@ -25,6 +25,9 @@
                                             │  [VS-004, solo se una sorgente è sorvegliata: thread            │
                                             │   "scada-watchdog" → flag tick + Tick di risveglio; heartbeat    │
                                             │   = contatore atomico per link, mai in coda]                   │
+                                            │  [VS-005, solo con [alarms]: AlarmEngine dentro Kernel::apply;  │
+                                            │   socket di controllo scada.alarm.v1 (allowlist uid, limiti);   │
+                                            │   le richieste passano dal sequencer (corsia di controllo)]     │
                                             └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,6 +73,35 @@ Opzionale e **disabilitata per default**: senza `liveness_timeout_ms` / `freshne
 - **Heartbeat** (protocollo 1.1): la sessione valida la sequenza e incrementa un `AtomicU64` del link. Nessuna richiesta al sequencer, nessun ACK, nessuna allocazione: un flood costa solo decodifica nella sessione.
 - **Cattura/replay:** le tre operazioni sono righe `S`/`R`/`X` del file `--capture-inputs`; il replay non usa clock.
 
+## Motore allarmi e Event Outbox (VS-005, ADR 0012)
+
+Opzionale e **disabilitato per default**: senza `[alarms]` il campo `Kernel::alarms` è `None`, non esistono outbox, staging, socket di controllo né lavoro per tag, e digest/fingerprint restano v1/v2.
+
+```text
+ operazione sequenziata (batch, link, scadenza VS-004, ACK, watermark)
+        │
+        ▼  Kernel::apply  (un solo thread, nessuna allocazione)
+   validazione VS-001..004 ──Err──▶ nulla cambia
+        │
+   preflight allarmi: per ogni tag il cui (valore, qualità) cambierebbe,
+   regole del tag via CSR → nuovo stato in staging preallocato (worst fan-out)
+        │
+   check: staged ≤ free slot, event_seq/occurrence senza overflow ──Err──▶ nulla cambia
+        │
+   commit infallibile: RTDB → stati allarme → eventi contigui nel ring → indice active|unacked
+        │
+        ▼
+   ring di C eventi (48 B)  ── ReadEvents / snapshot (pagine, cursori, gap) ──▶ HMI (non durevole)
+        ▲
+   AdvanceDurableWatermark (sequenziato; VS-006 journal, in VS-005 solo sink simulato di test)
+```
+
+- **Core** (`scada-core::alarm`): `AlarmTable` (regole compilate 24 B, ordinate per id, CSR tag → regole, worst fan-out per sorgente) costruita da `ValidatedConfig::validate_with_alarms`; `AlarmEngine` (stati 32 B per regola, bitset a due livelli degli allarmi `active || unacked`, ring prefillato, staging) creato da `Kernel::new`. Nessuna stringa nella parte dinamica; nomi solo nel table.
+- **Runtime** (`scada-runtime::alarms`): `AlarmRuntime` del sequencer (contatori di rifiuto per origine, overload `Normal/High/Critical`, disconnessioni differite e ritentate dopo ogni rilascio), accept loop e sessioni del socket di controllo. ACK, snapshot, letture e capacità sono `Request::Alarm` nella corsia di controllo dell'ingresso: il sequencer risponde con lo stato al proprio `operation_sequence`, le pagine sono riempite in buffer riusati della sessione.
+- **Backpressure**: un batch con transizioni che non entrano è `REJECTED/OUTBOX_CAPACITY_EXCEEDED` (nulla applicato); un `Hello` analogo riceve `HandshakeRejected`; disconnessioni e scadenze restano pendenti e sono ritentate. La saturazione è visibile in `GetCapacityStatus`, nell'introspezione (`AlarmSummary`) e su stderr, mai come evento nel ring pieno.
+- **Cattura/replay**: ACK e watermark sono righe `A` / `W`; gli eventi si ricavano deterministicamente.
+- **Catalogo operatore** fuori dal kernel: `docs/alarm-catalog.md`.
+
 ## Ordine e concorrenza
 
 - **Per sorgente**: una connessione = una sessione = un task. Reader e writer sono futures dello stesso task (`tokio::join!`), quindi **non** girano in parallelo fra loro nemmeno con `multi_thread`; il parallelismo multicore è **fra sessioni diverse**. L'ordine dei batch di una sorgente è quello del socket; la coda ACK è FIFO; il sequencer applica in ordine FIFO; nessun componente riordina. Test: `vs002.rs::ingestion_modes_preserve_order_and_give_the_same_normalized_state` (16 sorgenti, `current_thread` e `multi_thread(1/2/4)`).
@@ -84,6 +116,7 @@ Opzionale e **disabilitata per default**: senza `liveness_timeout_ms` / `freshne
 | `current_thread` | 2: main (runtime Tokio) + `scada-sequencer` | default, profilo Micro |
 | `multi_thread(N)` | N+2: `scada-io` × N, main (accept + segnali, dentro `block_on`), `scada-sequencer` | `max_blocking_threads(1)`: il kernel non usa `spawn_blocking` |
 | + supervisione VS-004 | +1: `scada-watchdog` | solo se almeno una sorgente è sorvegliata; ~`1000 / watchdog_poll_ms` risvegli al secondo |
+| + allarmi VS-005 | +0 | il motore è nel thread sequencer; le sessioni del socket di controllo sono task del runtime |
 
 Ogni struttura ha un limite configurato; il **bound configurativo** delle allocazioni applicative è calcolato all'avvio in `u128` (`budget.rs`), stampato da `--check-config` e su stderr, e confrontato con `[runtime] memory_budget_bytes` se presente (avvio rifiutato se superato). Non è un bound dell'RSS (stack, allocatore, Tokio, libc, buffer socket del kernel Linux non sono inclusi): vedi ADR 0009.
 
@@ -101,4 +134,6 @@ Ogni struttura ha un limite configurato; il **bound configurativo** delle alloca
 | Takeover con vecchio link inattivo (VS-002) | il sequencer segnala il vecchio link al `Welcome` del nuovo: `ProtocolError LINK_SUPERSEDED` e chiusura, slot liberato (`links_superseded`). |
 | Flood di connessioni | oltre `max_driver_connections`: `TOO_MANY_CONNECTIONS` e chiusura immediata. |
 | Thread sequencer terminato (panic) | il processo termina con errore (`sequencer thread stopped unexpectedly`) invece di accettare input non applicabili (test `sequencer_failure_stops_the_host`). |
-| Kernel riavviato | Nuovo `kernel_instance_id`, tutti i tag `Unknown`, `full_state_required = true`. |
+| Kernel riavviato | Nuovo `kernel_instance_id`, tutti i tag `Unknown`, `full_state_required = true`. Con allarmi (VS-005): stati, eventi e ACK persi; richieste con il vecchio instance id ⇒ `INSTANCE_MISMATCH`. |
+| Outbox allarmi pieno (VS-005) | batch con transizioni rifiutati (`OUTBOX_CAPACITY_EXCEEDED`), disconnessioni differite, ACK rifiutati; stato `CRITICAL` interrogabile; batch senza transizioni applicati. Senza journal (VS-006) la condizione dura fino al riavvio. |
+| Client HMI ostile sul socket allarmi (VS-005) | uid non autorizzato ⇒ `UNAUTHORIZED` e chiusura; frame > 1024 B, protobuf malformato, versione errata ⇒ errore e chiusura; oltre `max_control_connections` ⇒ `TOO_MANY_CONNECTIONS`; l'actor dell'ACK è sempre l'uid del peer. |

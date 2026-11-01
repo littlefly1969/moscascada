@@ -25,6 +25,12 @@ SCADA_TEST_ALARMS=1 SCADA_TEST_INGRESS=source_fair:1 SCADA_TEST_SUPERVISION=6000
 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
 echo "== alarm capacity model (VS-005 T15)"
 python3 scripts/test_alarm_capacity.py
+echo "== alarm catalog example (VS-005, docs/alarm-catalog.md)"
+python3 scripts/check_alarm_catalog.py docs/catalog/alarm-catalog.example.json config/examples/alarms.toml
+if sed 's/"alarm_id": 5,/"alarm_id": 55,/' docs/catalog/alarm-catalog.example.json > target/bad-catalog.json \
+   && python3 scripts/check_alarm_catalog.py target/bad-catalog.json config/examples/alarms.toml >/dev/null; then
+  echo "catalog checker accepted an unknown alarm_id" >&2; exit 1
+fi
 echo "== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)"
 hits=$(grep -rln --include=*.rs -E '\bunsafe\b *(\{|fn|impl)' crates apps | grep -v '^apps/scada-bench/src/alloc.rs$' || true)
 if [ -n "$hits" ]; then echo "unexpected unsafe in: $hits" >&2; exit 1; fi

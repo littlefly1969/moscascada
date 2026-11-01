@@ -1,6 +1,6 @@
-# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004
+# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004 + VS-005
 
-La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003) e [§VS-004](#vs-004); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
+La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003), [§VS-004](#vs-004) e [§VS-005](#vs-005); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
 Legenda: **✅ verificato** = implementato e coperto da un test o da una misura eseguiti (risultati in questo repository); **🟡 parziale** = implementato, verifica incompleta (motivo indicato); **❌ non soddisfatto** = non implementato o non verificabile qui (motivo indicato).
 
@@ -427,3 +427,81 @@ Brief: `MoscaSCADA_VS004_Agent_Brief.md`. Base: `main` `1071547` (merge della PR
 5. Supervisione **non qualificata per produzione** e non attivata nei profili; il soak (31 min, `vs004.md` §4) copre una sola configurazione (`ct`, 4 sorgenti).
 6. Dopo un silenzio i tag non osservati restano `Uncertain(SourceSilent)` fino alla loro prossima osservazione (atteso; un driver dovrebbe inviare un `FullState` dopo un'interruzione).
 7. Review PR #4: P1 (scansione O(tag) per tick su impianto stale) corretto con la lista di freschezza ordinata per marker, misurato fino a 1M tag (`vs004.md` §9); P2 (`liveness_recoveries` senza i recuperi per batch) corretto con test.
+
+## VS-005
+
+Brief: `MoscaSCADA_VS005_Alarm_Engine_Agent_Brief_v2.md`. Base: `main` `b762242` (merge commit della PR #4, HEAD `f80d900` con `stable` e `fuzz-smoke` verdi, thread P1/P2 risolti). Branch `claude/project-thread-6p8945`, PR verso `main` **senza merge** (review indipendente, G9). Decisioni: ADR 0012; misure: `docs/benchmarks/vs005.md`; catalogo: `docs/alarm-catalog.md`. Percorsi: `core/alarms.rs`, `core:kernel` (test unitari del kernel), `core:alarm` (test unitari di `alarm.rs`), `rt/vs005.rs`, `rt/config_file.rs`.
+
+### Gate §0 / G1
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| PR #4: HEAD, CI, mergeability, nessun blocker | ✅ | HEAD `f80d900`, `stable` + `fuzz-smoke` verdi sullo SHA, mergeable, thread risolti |
+| Merge di #4 (merge commit) e base registrata | ✅ | `b762242`; binario `b762242` usato come baseline A/B (`results/vs005/c1-ab.txt`) |
+| Nessun merge autonomo di VS-005 | ✅ | PR aperta per review |
+
+### Invarianti §2
+
+| # | Stato | Evidenza |
+|---|---|---|
+| I1 purezza, ordine totale (ACK incluso) | ✅ | audit di purezza `check.sh`; ACK/watermark = `Operation` catturate (`A`/`W`); `core/alarms.rs::t11_replay_reproduces_events_and_digest`; `rt/vs005.rs::episode_and_ack_over_ipc_and_replay`; fuzz `alarm_transitions` (replay) |
+| I2 atomicità integrale | ✅ | `core/alarms.rs::t07_*` (20 000 eventi in una disconnessione, tutto o niente), `t12_model_atomicity_and_replay` (proptest), `core:kernel::event_sequence_exhaustion_is_atomic`; fuzz: snapshot/digest/outbox identici dopo ogni non-`Applied` |
+| I3 nessuna perdita silenziosa | ✅ | `t08_ring_wraps_physically_never_logically_and_never_overwrites_undurable_events`; fuzz «ogni evento sopra il watermark leggibile e identico»; `rt/vs005.rs::full_outbox_refuses_whole_batch_then_recovers`, `disconnection_is_deferred_until_slots_are_released` |
+| I4 bounded, zero allocazioni | ✅ | `core:kernel::alarm_apply_never_grows_internal_storage`; counting allocator: 0,000 allocazioni/op in ogni caso di `alarms-core` (`results/vs005/alarms-core.*`) |
+| I5 qualità ortogonale | ✅ | `t04_quality_is_orthogonal_and_never_returns_to_normal`, `t04_bad_quality_arms_only_after_first_good`; fuzz; `rt/vs005.rs::supervision_silence_drives_bad_quality_but_never_auto_normal` |
+| I6 ACK sicuro | ✅ | `t05_episode_automaton_tokens_and_stale_acks`; `rt/vs005.rs::episode_and_ack_over_ipc_and_replay` (actor = uid del peer, ACK senza instance id rifiutato), `control_plane_security`, `restart_is_a_new_instance` |
+| I7 default-off | ✅ | `t01_no_alarms_keeps_v1_v2_encodings` (golden v1/v2 invariati); `rt/vs005.rs::default_off_has_no_alarm_surface`; A/B `vs005.md` §2 |
+| I8 durabilità solo da watermark | ✅ | watermark sequenziato e monotono (`t08`, fuzz); sink simulato solo con flag di test (`Durability = SIMULATED_TEST_ONLY`); nessun testo dichiara durabilità |
+
+### Architettura §3, modello §4–§6
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| `AlarmEngine` puro nello stesso `apply`, nessun watcher | ✅ | `scada-core::alarm`; ADR 0012 D4 |
+| CSR tag → regole, regole ordinate per id, valutazione incrementale | ✅ | `AlarmTable::build`; `core:alarm::listed_index_next_matches_a_scan`; `alarms-core` A (costo con 0/100/1k/100k regole) |
+| Indice `active || unacked` senza scansione | ✅ | bitset a due livelli; `t08_snapshot_pages_list_active_or_unacked_in_id_order` |
+| Preflight senza allocazioni, commit infallibile | ✅ | ADR 0012 D4; I2/I4 |
+| Refresh identico `Good` senza eventi | ✅ | stage solo su cambio di (valore, qualità); `t05`/proptest |
+| Regole bool/high/low/bad_quality, isteresi, `i64::MIN/MAX` | ✅ | `t03_high_low_hysteresis_and_boundaries`; `core:alarm::occurrence_counter_never_wraps` |
+| Fingerprint versionato, indipendente dall'ordine TOML | ✅ | `t02_fingerprint_is_order_independent_and_semantic` |
+| Config fail-fast (id duplicati/zero, tipi, soglie, tag inesistente, outbox < fan-out, limiti) | ✅ | `t02_config_validation_fails_fast`; `rt/config_file.rs::invalid_alarm_sections_are_refused`; `rt/vs005.rs::check_config_reports_alarm_capacity` |
+| Automa episodi, retrigger, token stantio, ACK ripetuto | ✅ | `t05`; `rt/vs005.rs::episode_and_ack_over_ipc_and_replay` |
+| Eventi ordinati per `alarm_id`, contigui, `ordinal_in_operation` | ✅ | `t06_events_of_one_operation_are_ordered_by_alarm_id_whatever_the_input_order`; fuzz |
+| Slot `N` riusato solo se watermark ≥ `N`; `OutboxCapacityExceeded{required,free}` prima di mutare | ✅ | `t07`/`t08`; `alarms-core` D (C e C+1) |
+| Timer VS-004 senza client: ritentati, mai inventati | ✅ | sequencer: scadenza rifiutata ⇒ nessuna operazione, ritentata al tick; `rt/vs005.rs::supervision_…` |
+| Saturazione segnalata fuori dal ring | ✅ | `CapacityStatus`, `AlarmSummary`, stderr; `full_outbox_refuses_whole_batch_then_recovers` (CRITICAL) |
+
+### Catalogo §7, control plane §8, digest §9
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Schema `AlarmCatalogEntry` + `AlarmGraphicRef` + esempio validato | ✅ | `docs/catalog/*.json`, `scripts/check_alarm_catalog.py` in `check.sh` (anche caso negativo) |
+| Socket separato, uid allowlist, limiti, malformati, actor non falsificabile | ✅ | `rt/vs005.rs::control_plane_security` (8 casi), `episode_and_ack_over_ipc_and_replay` |
+| Snapshot paginato coerente (`SNAPSHOT_CHANGED`), eventi con cursori/gap/`cursor_ahead` | ✅ | `control_plane_security` (pagina 1, cambio di stato), `full_outbox_refuses_whole_batch_then_recovers` (gap) |
+| `GetCapacityStatus` con durabilità reale e memoria | ✅ | `alarms.proto` `CapacityStatus`; test E2E |
+| Default-off v1/v2 byte-identici; v3 con allarmi | ✅ | `t01`; `rt/vs005.rs` (digest v3) |
+| Cattura `A`/`W`, replay identico | ✅ | `rt/capture.rs` round-trip; `episode_and_ack_over_ipc_and_replay`; suite `SCADA_TEST_ALARMS=1` (replay vs002/vs003 con allarmi) |
+
+### Memoria §10, benchmark §11, test §12
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| Bound da `size_of` e capacità reali, `--check-config`, fail-fast | ✅ | `budget.rs` (`alarms`, `alarm_core`); `rt/config_file.rs::shipped_alarm_example_is_valid` |
+| Profili Micro (4 GiB fisici) / Server | 🟡 | profili invariati (allarmi off); esempi di dimensionamento Micro in `vs005.md` §7; nessuna misura su hardware Micro reale |
+| Capacity tool A/B/C, formule, test | ✅ | `scripts/alarm_capacity.py`, `scripts/test_alarm_capacity.py` (8 test, T15) |
+| A/B VS-004 vs VS-005 disabilitato | vedi `vs005.md` §2 | `results/vs005/c1-ab.txt`, tabelle `c1-*.md` |
+| Enabled: no trip, storm, fan-out, pressione, C/C+1, preflight, zero alloc, cold start | ✅ | `vs005.md` §3, `results/vs005/alarms-core.*` |
+| Storm 60 s misurato PASS/FAIL + sink fermo | vedi `vs005.md` §4–§5 | `results/vs005/storm.txt` |
+| Soak ≥ 30 min | vedi `vs005.md` §6 | `results/vs005/soak/` |
+| T01–T15 | ✅ | sopra; T13 (≥ 100 000 regole: `alarms-core` A/F fino a 1 000 000 regole); T14 `restart_is_a_new_instance` |
+| CI: allarmi on/off, supervisione on/off, FIFO, `source_fair`, ct/mt2, fuzz smoke | ✅ | `scripts/check.sh`, `.github/workflows/ci.yml` (`alarm_transitions` 60 s) |
+| ARM64 | 🟡 | solo `cargo check` (**NOT TESTED ON HARDWARE**) |
+
+### Limiti e rischi residui (VS-005)
+
+1. **Nessuna durabilità** e **NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION**: senza journal (VS-006) gli slot non si liberano; dopo `C` eventi ogni nuova transizione d'allarme è rifiutata fino al riavvio.
+2. Input rifiutati per capacità possono andare persi **fuori dal kernel** se il driver non li conserva (contratto §9.4).
+3. Disconnessione differita: il link resta `Connected` nel kernel finché non si liberano slot (dichiarato da `pending_link_transitions`).
+4. Regole a tag singolo; regole multi-tag (VS-007) richiederanno deduplicazione per regola nel preflight.
+5. Benchmark su VM x86_64 con client co-residenti; ARM64 NOT TESTED ON HARDWARE.
+6. `actor_uid` è l'identità di un processo, non di una persona.
