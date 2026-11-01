@@ -33,7 +33,7 @@ use crate::{CHANNELS, KernelProc, KernelSpec, alloc, arg, arg_str, measure_windo
 
 // ---------------------------------------------------------------- in-process
 
-fn tags_and_sources(sources: u32) -> (Vec<TagSpec>, Vec<SourceSpec>) {
+fn tags_and_sources(sources: u32, supervision: Supervision) -> (Vec<TagSpec>, Vec<SourceSpec>) {
     let mut tags = Vec::new();
     let mut srcs = Vec::new();
     for s in 0..sources {
@@ -47,7 +47,7 @@ fn tags_and_sources(sources: u32) -> (Vec<TagSpec>, Vec<SourceSpec>) {
             source_id: SourceId(s + 1),
             name: format!("load-{s}"),
             channels,
-            supervision: Supervision::NONE,
+            supervision,
         });
     }
     (tags, srcs)
@@ -55,7 +55,17 @@ fn tags_and_sources(sources: u32) -> (Vec<TagSpec>, Vec<SourceSpec>) {
 
 /// `rules` rules assigned round-robin over the tags in id order (rule i on tag i mod n).
 fn config(sources: u32, rules: u32, cond: AlarmCondition, capacity: u64) -> (Arc<ValidatedConfig>, Duration) {
-    let (tags, srcs) = tags_and_sources(sources);
+    config_sup(sources, rules, cond, capacity, Supervision::NONE)
+}
+
+fn config_sup(
+    sources: u32,
+    rules: u32,
+    cond: AlarmCondition,
+    capacity: u64,
+    supervision: Supervision,
+) -> (Arc<ValidatedConfig>, Duration) {
+    let (tags, srcs) = tags_and_sources(sources, supervision);
     let ids: Vec<TagId> = tags.iter().map(|t| t.tag_id).collect();
     let spec = ConfigSpec { limits: CoreLimits { max_observations_per_batch: CHANNELS }, tags, sources: srcs };
     let alarms = (rules > 0).then(|| AlarmSpec {
@@ -384,6 +394,42 @@ pub fn alarms_core(ops: u64) {
         );
         drop(k);
     }
+
+    // G. VS-004 coupling: silence and freshness expiry raise K bad-quality alarms in one
+    // operation; then an ENTIRELY stale plant: repeated expiries find no candidate and must
+    // cost the same whatever the number of rules (no O(all rules) scan per tick).
+    println!("\n### G. Supervision coupling: silence / freshness fan-out, entirely stale plant\n");
+    println!("{HEADER}");
+    for k_rules in [128u32, 8_192] {
+        let sup = Supervision { liveness: true, freshness: true };
+        let (cfg, _) = config_sup(1, k_rules, AlarmCondition::BadQuality, u64::from(k_rules) * 4, sup);
+        let mut r = Run::new(cfg);
+        let n = (ops / u64::from(k_rules)).clamp(200, 5_000);
+        let (mut silence, mut fresh, mut idle) = (Timed::new(n as usize), Timed::new(n as usize), Timed::new(n as usize));
+        for _ in 0..n {
+            let op = Operation::SourceSilenceExpired { source_id: SourceId(1), link_generation: r.gens[0] };
+            let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
+            assert!(silence.time(&mut r.k, input).is_ok());
+            r.release_all();
+            r.full(1, 7); // returns them all, refreshes every tag
+            r.release_all();
+            let up_to = r.k.last_operation_sequence();
+            let op = Operation::FreshnessExpired { source_id: SourceId(1), link_generation: r.gens[0], observed_up_to: up_to };
+            let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
+            assert!(fresh.time(&mut r.k, input).is_ok());
+            r.release_all();
+            // Entirely stale: nothing left to expire (Ignored, no candidate).
+            let op = Operation::FreshnessExpired { source_id: SourceId(1), link_generation: r.gens[0], observed_up_to: up_to };
+            let input = SequencedInput { operation_sequence: r.k.last_operation_sequence() + 1, operation: op };
+            assert!(matches!(idle.time(&mut r.k, input), Ok(TransitionOutcome::Ignored(_))));
+            r.full(1, 7);
+            r.release_all();
+        }
+        silence.report(&format!("SourceSilenceExpired fanout={k_rules}"), "raises fanout bad-quality events");
+        fresh.report(&format!("FreshnessExpired fanout={k_rules}"), "raises fanout events");
+        idle.report(&format!("FreshnessExpired stale plant rules={k_rules}"), "no candidate: Ignored, O(1)");
+    }
+
     println!("\nLayouts: {:?}", scada_core::layout_sizes());
 }
 
@@ -398,7 +444,14 @@ struct DriverOut {
     first_refusal_ns: Option<u64>,
 }
 
-fn storm_driver(socket: PathBuf, source: u32, size: u32, start: Instant, warmup: Duration) -> DriverOut {
+fn storm_driver(
+    socket: PathBuf,
+    source: u32,
+    size: u32,
+    start: Instant,
+    warmup: Duration,
+    interval: Option<Duration>,
+) -> DriverOut {
     let mut s = Session::connect(&socket, "storm", source, 1).expect("connect");
     let obs0: Vec<(u32, Val)> = (1..=CHANNELS).map(|c| (c, Val::I(0))).collect();
     let mut seq = s.welcome.last_accepted_source_sequence.map_or(1, |l| l + 1);
@@ -421,6 +474,9 @@ fn storm_driver(socket: PathBuf, source: u32, size: u32, start: Instant, warmup:
             if measuring {
                 out.lat.push(dt);
                 out.applied += 1;
+            }
+            if let Some(i) = interval {
+                std::thread::sleep(i);
             }
         } else {
             assert_eq!(a.error_code(), ErrorCode::OutboxCapacityExceeded, "{a:?}");
@@ -466,6 +522,10 @@ pub fn alarm_storm(spec: &KernelSpec) {
     let secs = arg("--secs", 60);
     let warmup = Duration::from_secs(arg("--warmup-secs", 2));
     let page = arg("--sink-page", 1024) as u32;
+    // Throttled storm (plant-like event rate): each driver sleeps this long after each
+    // applied batch; 0 = as fast as the kernel answers.
+    let interval_us = arg("--interval-us", 0);
+    let interval = (interval_us > 0).then(|| Duration::from_micros(interval_us));
     let sink_mode = arg_str("--sink").unwrap_or_else(|| "drain".into());
     let label = arg_str("--label").unwrap_or_default();
     let a = spec.alarms.expect("--alarms R:CAP:storm required");
@@ -484,12 +544,13 @@ pub fn alarm_storm(spec: &KernelSpec) {
     let hs: Vec<_> = (1..=clients)
         .map(|c| {
             let sock = k.socket();
-            std::thread::spawn(move || storm_driver(sock, c, size, start, warmup))
+            std::thread::spawn(move || storm_driver(sock, c, size, start, warmup, interval))
         })
         .collect();
     std::thread::sleep(warmup);
     let mut probe = AlarmClient::connect(&alarm_sock).expect("probe");
     let c0 = probe.capacity().expect("capacity");
+    let released0 = released.load(Relaxed);
     let t0 = Instant::now();
     // Sample the capacity status every second (also a responsiveness probe of the control plane).
     let mut max_used = 0;
@@ -520,38 +581,41 @@ pub fn alarm_storm(spec: &KernelSpec) {
     let applied: u64 = outs.iter().map(|o| o.applied).sum();
     let refused: u64 = outs.iter().map(|o| o.refused).sum();
     let events = c1.next_event_seq - c0.next_event_seq;
-    let lat: Vec<u64> = outs.into_iter().flat_map(|o| o.lat).collect();
+    let mut lat: Vec<u64> = outs.into_iter().flat_map(|o| o.lat).collect();
+    lat.sort_unstable();
+    let p95 = lat.get(lat.len() * 95 / 100).copied().unwrap_or(0);
     let s = (!lat.is_empty()).then(|| stats(lat));
     let probe_max = probe_lat.iter().copied().max().unwrap_or(0);
     let (p50, p99, p999) = s.as_ref().map_or((0, 0, 0), |s| (s.p50, s.p99, s.p999));
-    // PASS (drain): no refusal over the whole window. PASS (stopped): the outbox fills,
-    // every further transition is refused explicitly (never overwritten), the control plane
-    // keeps answering, RSS stays flat.
-    let verdict = match sink_mode.as_str() {
-        "drain" => {
-            if refused == 0 {
-                "PASS"
-            } else {
-                "FAIL"
-            }
-        }
-        _ => {
-            if c1.free == 0 && c1.overload() == apb::OverloadState::Critical && c1.durable_watermark == 0 {
-                "PASS"
-            } else {
-                "FAIL"
-            }
-        }
+    // storm: the outbox absorbed the whole measured window with zero refusals.
+    let storm = if refused == 0 { "PASS" } else { "FAIL" };
+    // safety: never more than C in use, accounting exact, and (sink stopped) the very first
+    // event still readable at the end: nothing committed was overwritten.
+    let first = match probe.events(0, 1).expect("events").body {
+        Some(apb::alarm_response::Body::Events(p)) => p,
+        other => panic!("{other:?}"),
     };
+    let no_overwrite = c1.durable_watermark > 0 || (first.oldest_visible <= 1 && !first.gap_detected);
+    let safety = if max_used <= a.capacity
+        && c1.used == c1.next_event_seq - 1 - c1.durable_watermark
+        && no_overwrite
+        && (refused == 0 || c1.overload() == apb::OverloadState::Critical || c1.rejected_batches > 0)
+    {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let verdict = format!("storm60={storm} safety={safety}");
     println!(
-        "kind=alarm-storm label={label} scheduler={} sink={sink_mode} clients={clients} size={size} rules_per_tag={} capacity={} secs={secs} batches_s={:.0} events_s={:.0} released_s={:.0} refused={refused} refused_s={:.0} p50_ns={p50} p99_ns={p99} p999_ns={p999} max_used={max_used} used_end={} next_event_seq={} time_to_full_s={} ctl_probe_max_us={} cpu_pct={:.1} cpu_threads={} rss_idle_kib={} rss_steady_kib={} rss_peak_kib={} verdict={verdict}",
+        "kind=alarm-storm label={label} scheduler={} sink={sink_mode} clients={clients} size={size} rules_per_tag={} capacity={} secs={secs} interval_us={interval_us} batches_s={:.0} events_s={:.0} released_s={:.0} refused={refused} refused_s={:.0} rejected_batches_total={} p50_ns={p50} p95_ns={p95} p99_ns={p99} p999_ns={p999} max_used={max_used} used_end={} next_event_seq={} time_to_full_s={} ctl_probe_max_us={} cpu_pct={:.1} cpu_threads={} rss_idle_kib={} rss_steady_kib={} rss_peak_kib={} {verdict}",
         crate::scheduler_of(&k.ready),
         a.rules_per_tag,
         a.capacity,
         applied as f64 / wall,
         events as f64 / wall,
-        released.load(Relaxed) as f64 / wall,
+        (released.load(Relaxed) - released0) as f64 / wall,
         refused as f64 / wall,
+        c1.rejected_batches,
         c1.used,
         c1.next_event_seq,
         time_to_full.map_or("never".to_owned(), |t| format!("{t:.2}")),
