@@ -354,6 +354,11 @@ fn heartbeat_flood_is_bounded_and_does_not_starve() {
     s.flush().unwrap();
     let other = other.join().unwrap();
     let r = k.wait_for("flood read", |r| r.counters.as_ref().unwrap().heartbeats_valid == N);
+    // Heartbeats are coalesced by the watchdog tick that observes them. On a fast host the
+    // whole flood can be read before the first tick (CI of PR #6: watchdog_ticks 0), so wait
+    // for a tick after the flood was read before checking the coalescing.
+    let ticks = r.counters.as_ref().unwrap().watchdog_ticks;
+    let r = k.wait_for("watchdog tick after the flood", |r| r.counters.as_ref().unwrap().watchdog_ticks > ticks);
     let c = r.counters.unwrap();
     assert!(c.heartbeats_coalesced > N / 2, "{c:?}");
     assert_eq!(c.heartbeats_invalid, 0);
