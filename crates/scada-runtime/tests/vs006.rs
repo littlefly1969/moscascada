@@ -266,8 +266,10 @@ fn restart_recovers_unverified_then_reconciles() {
 
     let k = restart(dir, &limits, &[]);
     assert!(k.ready.contains("boot=2"), "{}", k.ready);
-    // Everything acknowledged durably is recovered (plus the disconnection, also journaled).
-    assert!(ready_u64(&k.ready, "durable_op") > last.operation_sequence.unwrap(), "{}", k.ready);
+    // Everything acknowledged durably is recovered (the disconnection, also journaled, is
+    // recovered only if it was committed before the kill).
+    assert_eq!(last.status, AckStatus::AppliedDurable as i32);
+    assert!(ready_u64(&k.ready, "durable_op") >= last.operation_sequence.unwrap(), "{}", k.ready);
     let r = k.introspect();
     assert_ne!(r.state_digest, Vec::<u8>::new());
     let _ = digest_before;
@@ -401,6 +403,10 @@ fn sigterm_drains_the_journal() {
             s.request(&batch(BatchMode::Delta, seq, &[(3, Val::I(seq as i64))])).unwrap().operation_sequence.unwrap();
     }
     drop(s);
+    // Wait until the disconnection is applied: a SIGTERM sent before the server read the
+    // close would legitimately stop before sequencing it (CI of PR #6), and this test is
+    // about draining what was applied.
+    k.wait_for("disconnection applied", |r| r.last_operation_sequence == last + 1);
     let (err, dir) = k.stop_keep();
     assert!(err.contains("persistence: shutdown"), "{err}");
     let k = restart(dir, &limits, &[]);
