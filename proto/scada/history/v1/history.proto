@@ -1,0 +1,320 @@
+// VS-006 (ADR 0013 D12, ADR 0014 §8): read-only historian and persistence diagnostics,
+// `scada.history.v1`.
+//
+// Transport: its own Unix domain stream socket ([persistence] history_socket_path),
+// separate from the driver socket, the alarm control socket and the test introspection.
+// Same framing as scada.driver.v1: u32 big-endian payload length + one protobuf message.
+// Stop-and-wait: one HistoryRequest, one HistoryResponse.
+//
+// Authentication: the peer's Unix credentials (SO_PEERCRED) must be in
+// [persistence] history_authorized_uids, otherwise ErrorResponse{UNAUTHORIZED} and close.
+//
+// Visibility: every answer is bounded by the durable prefix published by the journal
+// writer (as_of_durable_event_seq): nothing that is only in RAM is ever returned here, and
+// nothing here is the live state of the plant (that is scada.alarm.v1 / the RTDB).
+//
+// Order: history is ordered by (timeline_id, event_seq) — never by a timestamp.
+//
+// Evolution rules: never reuse or renumber a field or enum value; reserve removed numbers.
+syntax = "proto3";
+
+package scada.history.v1;
+
+message HistoryRequest {
+  // Must be 1.
+  uint32 history_api_version = 1;
+  oneof body {
+    QueryAlarmHistory query = 2;
+    GetActiveAlarmProjection projection = 3;
+    GetRecoveryStatus recovery = 4;
+    GetJournalStatus journal = 5;
+    GetTimeStatus time = 6;
+  }
+}
+
+// Keyset pagination over (timeline, event_seq): pass next_after_event_seq of a page as
+// after_event_seq of the next one. Stable across concurrent commits (rows are append-only)
+// and across ring reuse (the historian is not the outbox ring).
+message QueryAlarmHistory {
+  // 16 bytes; empty = the current timeline.
+  bytes timeline_id = 1;
+  // Exclusive cursor; 0 = from the oldest retained event.
+  uint64 after_event_seq = 2;
+  // 0 = the configured maximum; larger values are clamped to it.
+  uint32 limit = 3;
+  // 0 = every alarm.
+  uint32 alarm_id = 4;
+  // 0 = every occurrence (requires alarm_id when set).
+  uint64 occurrence_id = 5;
+  // Optional filter on the sequencer time (ADR 0014): a FILTER, not an order.
+  optional sfixed64 from_sequenced_at_utc_ns = 6;
+  optional sfixed64 to_sequenced_at_utc_ns = 7;
+  // Only events observed during a post-restart reconciliation.
+  bool reconciliation_only = 8;
+}
+
+// Same values as scada.alarm.v1.EventKind (duplicated: the generated Rust modules are
+// flat, cross-package references are avoided).
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_RAISED = 1;
+  EVENT_KIND_RETURNED = 2;
+  EVENT_KIND_RETRIGGERED = 3;
+  EVENT_KIND_ACKNOWLEDGED = 4;
+}
+
+// Same values as scada.alarm.v1.EpisodeState.
+enum EpisodeState {
+  EPISODE_STATE_UNSPECIFIED = 0;
+  EPISODE_STATE_NORMAL = 1;
+  EPISODE_STATE_ACTIVE_UNACKED = 2;
+  EPISODE_STATE_ACTIVE_ACKED = 3;
+  EPISODE_STATE_RETURNED_UNACKED = 4;
+}
+
+// Durability label of the journal.
+enum Durability {
+  DURABILITY_UNSPECIFIED = 0;
+  // SQLite WAL + synchronous=FULL (subject to honest storage flushes).
+  DURABILITY_POWER_LOSS_DURABLE = 1;
+  // synchronous=NORMAL, benchmarks only: NOT durable on power loss.
+  DURABILITY_NOT_DURABLE_BENCHMARK_ONLY = 2;
+}
+
+// Provenance of a timestamp (ADR 0014 §2).
+enum TimeSource {
+  TIME_SOURCE_UNSPECIFIED = 0;
+  // Declared by the originating device (reported, not authenticated).
+  TIME_SOURCE_DEVICE = 1;
+  // Declared by the driver at acquisition.
+  TIME_SOURCE_DRIVER = 2;
+  // Sampled by the kernel sequencer just before applying the operation.
+  TIME_SOURCE_SEQUENCER = 3;
+}
+
+// Quality of a clock (host or source).
+enum ClockState {
+  CLOCK_STATE_UNSPECIFIED = 0;
+  CLOCK_STATE_UNKNOWN = 1;
+  CLOCK_STATE_SYNCHRONIZED = 2;
+  CLOCK_STATE_HOLDOVER = 3;
+  CLOCK_STATE_FAULT = 4;
+}
+
+message HistoryEvent {
+  uint64 event_seq = 1;
+  uint64 operation_seq = 2;
+  uint32 ordinal_in_operation = 3;
+  uint32 alarm_id = 4;
+  uint64 occurrence_id = 5;
+  uint64 activation_token = 6;
+  EventKind kind = 7;
+  EpisodeState state_after = 8;
+  bool input_valid_after = 9;
+  // Peer uid of an acknowledgement (process identity, never a person), 0 otherwise.
+  uint32 actor_uid = 10;
+  // Sequencer time of the operation (shared by its events), raw CLOCK_REALTIME.
+  sfixed64 sequenced_at_utc_ns = 11;
+  // Non-regressive key (NOT certified physical UTC while the clock is wrong).
+  sfixed64 logical_time_ns = 12;
+  ClockState sequencer_clock = 13;
+  // The host realtime clock went backwards at this operation.
+  bool clock_regressed = 14;
+  // Observed at commit of the covering transaction; a lag metric, not the event time.
+  // Absent for the last commit before a crash (its observation was not persisted).
+  optional sfixed64 durable_at_utc_ns = 15;
+  // Origin time of the observation that produced the event, if the driver sent one.
+  optional sfixed64 origin_utc_ns = 16;
+  TimeSource origin_source = 17;
+  ClockState origin_clock = 18;
+  // Observed during the reconciliation after a restart (first FullState of a recovered
+  // source): the real field time of the transition is unknown.
+  bool reconciliation = 19;
+  bool actual_field_time_unknown = 20;
+  // Acknowledgements with an action_id: the id and the note.
+  bytes action_id = 21;
+  string note = 22;
+}
+
+message HistoryPage {
+  repeated HistoryEvent events = 1;
+  uint64 next_after_event_seq = 2;
+  bool has_more = 3;
+  // Upper bound of every row returned: the durable event watermark at query time.
+  uint64 as_of_durable_event_seq = 4;
+  bytes timeline_id = 5;
+  // Oldest event still retained (an explicit retention marker covers anything older).
+  uint64 oldest_retained_event_seq = 6;
+}
+
+// The persisted active alarm projection (alarms active or unacknowledged), consistent with
+// as_of_durable_event_seq. NOT the RAM snapshot of scada.alarm.v1.
+message GetActiveAlarmProjection {
+  uint32 after_alarm_id = 1;
+  uint32 limit = 2;
+}
+
+message ProjectedAlarm {
+  uint32 alarm_id = 1;
+  EpisodeState state = 2;
+  bool input_valid = 3;
+  uint64 occurrence_id = 4;
+  uint64 activation_token = 5;
+  uint64 last_event_seq = 6;
+}
+
+message ActiveAlarmProjection {
+  repeated ProjectedAlarm alarms = 1;
+  uint32 next_after_alarm_id = 2;
+  bool has_more = 3;
+  uint64 as_of_durable_event_seq = 4;
+  // At least one source is still unverified after the last restart: the projection is
+  // the last durable state, not a verified picture of the field.
+  bool recovery_in_progress = 5;
+}
+
+message GetRecoveryStatus {}
+
+enum LiveVerification {
+  LIVE_VERIFICATION_UNSPECIFIED = 0;
+  // Never connected in this timeline.
+  LIVE_VERIFICATION_NEVER_CONNECTED = 1;
+  // Restored after a restart; the field is not verified (values are last known).
+  LIVE_VERIFICATION_UNVERIFIED_RECOVERED = 2;
+  // Connected again; a FullState is required and not yet applied.
+  LIVE_VERIFICATION_AWAITING_FULL_STATE = 3;
+  // A FullState was applied after the restart.
+  LIVE_VERIFICATION_LIVE_VERIFIED = 4;
+  // Reserved: native buffered-history ingest (deferred slice).
+  LIVE_VERIFICATION_REPLAYING_BUFFERED_HISTORY = 5;
+}
+
+enum HistoryContinuity {
+  HISTORY_CONTINUITY_UNSPECIFIED = 0;
+  // Proven gap-free (only possible with a verifiable buffered event stream).
+  HISTORY_CONTINUITY_COMPLETE = 1;
+  // Not proven either way (e.g. a snapshot-only driver after a restart).
+  HISTORY_CONTINUITY_UNKNOWN = 2;
+  // Known missing history (sequence gap, buffer overflow, ...).
+  HISTORY_CONTINUITY_GAP = 3;
+}
+
+message SourceRecovery {
+  uint32 source_id = 1;
+  LiveVerification live = 2;
+  HistoryContinuity continuity = 3;
+  optional fixed64 source_epoch = 4;
+  optional uint64 last_source_sequence = 5;
+  // Persisted Unknown/Gap intervals of this source in the current timeline.
+  uint64 gap_records = 6;
+  // Operation sequence of the FullState that verified it (0 = not verified since restart).
+  uint64 verified_at_operation_seq = 7;
+  bool link_connected = 8;
+}
+
+message RecoveryStatus {
+  bytes timeline_id = 1;
+  uint64 boot_generation = 2;
+  bool recovered_from_checkpoint = 3;
+  uint64 checkpoint_operation_seq = 4;
+  uint64 replayed_operations = 5;
+  uint64 recovery_duration_us = 6;
+  uint64 recovered_operation_seq = 7;
+  uint64 recovered_event_seq = 8;
+  repeated SourceRecovery sources = 9;
+}
+
+message GetJournalStatus {}
+
+enum JournalState {
+  JOURNAL_STATE_UNSPECIFIED = 0;
+  JOURNAL_STATE_OK = 1;
+  // The queue is at or above the high threshold.
+  JOURNAL_STATE_BACKPRESSURE = 2;
+  JOURNAL_STATE_DISK_FULL = 3;
+  // Unrecoverable error: no more commits, admission stopped until restart.
+  JOURNAL_STATE_FAULT = 4;
+  // Without [persistence] (never returned by this socket, which exists only with it).
+  JOURNAL_STATE_DISABLED = 5;
+}
+
+message LatencySummary {
+  uint64 count = 1;
+  uint64 p50_ns = 2;
+  uint64 p99_ns = 3;
+  uint64 p999_ns = 4;
+  uint64 max_ns = 5;
+}
+
+message JournalStatus {
+  JournalState state = 1;
+  Durability durability = 2;
+  bytes timeline_id = 3;
+  uint64 durable_operation_seq = 4;
+  uint64 durable_event_seq = 5;
+  uint64 backlog_operations = 6;
+  uint64 backlog_bytes = 7;
+  uint64 queue_capacity_operations = 8;
+  uint64 queue_capacity_bytes = 9;
+  uint64 commits = 10;
+  uint64 committed_operations = 11;
+  uint64 committed_events = 12;
+  // Duration of COMMIT (the fsync of the WAL with synchronous=FULL).
+  LatencySummary commit_latency = 13;
+  // Sequencer sample -> commit confirmed, per operation.
+  LatencySummary durable_lag = 14;
+  uint64 checkpoints_written = 15;
+  uint64 last_checkpoint_operation_seq = 16;
+  uint64 wal_bytes = 17;
+  uint64 db_bytes = 18;
+  uint64 disk_free_bytes = 19;
+  string last_error = 20;
+  uint64 refused_queue_full = 21;
+  uint64 refused_disk_full = 22;
+  uint64 refused_fault = 23;
+  // Since the writer started.
+  uint64 uptime_ms = 24;
+}
+
+message GetTimeStatus {}
+
+message TimeStatus {
+  sfixed64 last_sequenced_at_utc_ns = 1;
+  sfixed64 last_logical_time_ns = 2;
+  string os_boot_id = 3;
+  uint64 boot_generation = 4;
+  ClockState host_clock = 5;
+  // Host sync estimate when a probe is configured (0 = unknown).
+  uint64 host_offset_uncertainty_ns = 6;
+  string host_sync_source = 7;
+  uint64 clock_regressions = 8;
+  uint64 clock_jumps_forward = 9;
+  sfixed64 last_anomaly_utc_ns = 10;
+  sint64 last_anomaly_delta_ns = 11;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNAUTHORIZED = 1;
+  ERROR_CODE_INVALID_REQUEST = 2;
+  ERROR_CODE_UNKNOWN_TIMELINE = 3;
+  ERROR_CODE_TOO_MANY_CONNECTIONS = 4;
+  ERROR_CODE_FRAME_TOO_LARGE = 5;
+  ERROR_CODE_UNAVAILABLE = 6;
+}
+
+message ErrorResponse {
+  ErrorCode code = 1;
+  string detail = 2;
+}
+
+message HistoryResponse {
+  oneof body {
+    ErrorResponse error = 1;
+    HistoryPage history = 2;
+    ActiveAlarmProjection projection = 3;
+    RecoveryStatus recovery = 4;
+    JournalStatus journal = 5;
+    TimeStatus time = 6;
+  }
+}

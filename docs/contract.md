@@ -1,12 +1,14 @@
-# Contratto semantico (VS-001, aggiornato in VS-002, VS-003, VS-004 e VS-005)
+# Contratto semantico (VS-001, aggiornato in VS-002, VS-003, VS-004, VS-005 e VS-006)
 
-Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009; VS-003 ADR 0010; VS-004 ADR 0011; VS-005 ADR 0012 (allarmi, schema `proto/scada/alarm/v1/alarm.proto`).
+Questo documento è normativo per `scada-core` e `scada-runtime`. Schema wire: `proto/scada/driver/v1/driver.proto`. Decisioni e alternative: ADR 0001 e 0002; per VS-002 ADR 0004–0009; VS-003 ADR 0010; VS-004 ADR 0011; VS-005 ADR 0012 (allarmi, schema `proto/scada/alarm/v1/alarm.proto`); VS-006 ADR 0013 (journal, recovery, historian, schema `proto/scada/history/v1/history.proto`) e ADR 0014 (tempo).
 
 **VS-002 non modifica lo schema `scada.driver.v1`** (nessun campo, messaggio o valore enum nuovo; `buf breaking` contro la baseline v1.0 è verde) né la semantica di `Kernel::apply`, di `APPLIED_VOLATILE`, della deduplicazione e della qualità. Cambiano solo due comportamenti del runtime, entrambi espressi con messaggi già esistenti (§2.1), e si aggiunge una procedura raccomandata per il driver (§5.1). Lo schema di sola diagnostica `scada.introspect.v1` riceve solo campi additivi.
 
 **VS-004 introduce il minor 1.1** di `scada.driver.v1` (tutto additivo, `buf breaking` verde): `Hello.protocol_minor`, messaggio `Heartbeat`, `ERROR_CODE_INVALID_HEARTBEAT` (§2.3), e la supervisione opzionale di liveness e freschezza (§6.1). **A supervisione disabilitata (default) il contratto è quello VS-003**: stessi esiti, stesse qualità, stessi ACK, digest v1.
 
 **VS-005 aggiunge il motore allarmi opzionale** (§9): sezione `[alarms]` assente (default) ⇒ **nessun cambiamento** (nessun outbox, nessun socket, digest/fingerprint v1/v2 byte-identici). Con allarmi configurati il wire driver resta **1.1**; l'unica novità visibile a un driver è il codice additivo `ERROR_CODE_OUTBOX_CAPACITY_EXCEEDED = 44` (§9.4). **Nulla in VS-005 è durevole**: stati allarme, eventi e ACK operatore si perdono al riavvio.
+
+**VS-006 aggiunge il journal durevole opzionale** (§10): sezione `[persistence]` assente (default) ⇒ **contratto VS-005 invariato** (nessun file, thread o socket in più; digest/fingerprint v1/v2/v3 byte-identici; `APPLIED_VOLATILE` come prima, §3 e §7 restano veri). Con `[persistence]` il wire driver diventa **1.2** (additivo e negoziato): receipt durevoli opzionali, timestamp di sorgente opzionali, codici 45–48. Il riavvio recupera l'ultimo prefisso **durevole** come stato *non verificato* (§10.4).
 
 ## 1. Identità
 
@@ -74,7 +76,7 @@ Con `source_fair`, inoltre: un `Hello` è ammesso anche con le code dati sature 
 | `Duplicate` | `DUPLICATE` | assente | nessuno |
 | `Err(e)` | `REJECTED` + `error_code` | assente | nessuno (`S' == S`) |
 
-`APPLIED_VOLATILE` viene inviato solo dopo il ritorno di `apply`. **Non esiste uno stato durevole**: nessun ACK sopravvive a crash, arresto o riavvio del kernel. Lo stato `DurableCommitted` non esiste e non è simulato.
+`APPLIED_VOLATILE` viene inviato solo dopo il ritorno di `apply`. **Senza `[persistence]` non esiste uno stato durevole**: nessun ACK sopravvive a crash, arresto o riavvio del kernel. `APPLIED_VOLATILE` significa sempre e solo «applicato in RAM», anche quando l'operazione verrà poi registrata dal journal VS-006; l'unico ACK che promette durabilità è `APPLIED_DURABLE` (§10.2), che un driver riceve solo se l'ha chiesto e il kernel journala con `durability = "full"`.
 
 ## 4. Validazione di un `ObservationBatch` (tutto o niente)
 
@@ -164,7 +166,9 @@ Revisione: +1 a ogni cambio di `(value, quality)`; nessun wrap (`REVISION_OVERFL
 
 ## 7. Riavvio del kernel
 
-Un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i tag `Unknown` e nessuna baseline: il `Welcome` riporta `full_state_required = true` e nessun `last_accepted_source_sequence`. Un driver che vede cambiare `kernel_instance_id` deve considerare persi tutti gli ACK precedenti.
+Senza `[persistence]`: un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i tag `Unknown` e nessuna baseline: il `Welcome` riporta `full_state_required = true` e nessun `last_accepted_source_sequence`. Un driver che vede cambiare `kernel_instance_id` deve considerare persi tutti gli ACK precedenti.
+
+Con `[persistence]` il riavvio è descritto in §10.4: nuovo `kernel_instance_id`, ma stato recuperato dal prefisso durevole (valori `Uncertain(RecoveredUnverified)`), `last_accepted_source_sequence` recuperato e `full_state_required = true` per ogni sorgente recuperata. Gli ACK `APPLIED_VOLATILE` dell'istanza precedente restano non garantiti: un'operazione mai resa durevole può non esistere più e il suo `operation_sequence` può essere riassegnato.
 
 ## 8. Invarianti verificati dai test
 
@@ -183,6 +187,10 @@ Un nuovo processo kernel genera un nuovo `kernel_instance_id`, parte con tutti i
 - I13 (VS-005) Nessun evento con `event_seq > durable_watermark` è mai sovrascritto o reso illeggibile; ogni rifiuto per capacità è tipizzato (`OutboxCapacityExceeded{required, free}`).
 - I14 (VS-005) Una regola di processo non rientra mai con input non `Good`; `BadQuality` si arma solo dopo il primo `Good`.
 - I15 (VS-005) Replay dello stream catturato (batch, link, scadenze, ACK, watermark) ⇒ stessi stati, stessi eventi (events digest), stesso digest v3.
+- I16 (VS-006) Senza `[persistence]`: digest/fingerprint v1/v2/v3, ACK e READY della VS-005 invariati (`vs006.rs::default_off_is_the_vs005_contract`, suite VS-001…VS-005).
+- I17 (VS-006) Dopo kill -9 in qualunque punto (8 punti di guasto × 3 posizioni, più kill casuali durante una storm): ogni operazione con receipt durevole è recuperata, la sequenza degli eventi non ha buchi e termina al watermark durevole, proiezione degli allarmi = ultimo evento storico.
+- I18 (VS-006) Il recupero e il replay non producono eventi né effetti esterni; dopo il recupero nessun tag è `Good` e nessuna sorgente è verificata prima di un `FullState`.
+- I19 (VS-006) Il tempo non decide l'ordine: regressioni e salti dell'orologio sono diagnosticati, `logical_time` non diminuisce (neppure attraverso un riavvio), i timestamp di sorgente sono conservati invariati.
 
 ## 9. Allarmi (VS-005, ADR 0012) — opzionali, volatili
 
@@ -213,3 +221,52 @@ Un batch le cui transizioni d'allarme non entrano negli slot liberi riceve `REJE
 ### 9.5 Riavvio
 
 Un nuovo processo è una nuova istanza: tutti gli allarmi `Normal`, `next_event_seq = 1`, nessun evento. Richieste con il `kernel_instance_id` precedente ⇒ `INSTANCE_MISMATCH`; token e cursori dell'istanza precedente non valgono nulla.
+
+## 10. Journal durevole, recovery, historian e tempo (VS-006, ADR 0013/0014) — opzionali
+
+### 10.1 Stati di un'operazione
+
+`admitted` (spazio prenotato nella coda journal) → `applied RAM` (`Kernel::apply` = `Applied`) → `enqueued` → `COMMIT returned` → **`durable`** (unico stato che pubblica `durable_operation_seq` / `durable_event_seq`) → `watermarked` (`AdvanceDurableWatermark` applicato: slot dell'outbox riusabili). Con `durability = "full"` (SQLite WAL, `synchronous=FULL`) il `COMMIT` restituisce dopo l'fsync del WAL. Con `"normal"` (solo benchmark, flag di test obbligatorio) **niente** è durevole e nessuna receipt durevole è emessa. Quanto valga un fsync dopo un'interruzione di corrente dipende dallo storage (§10.8).
+
+### 10.2 Ingresso, ammissione e receipt (driver 1.2)
+
+- **Ammissione prima di `apply`**: ogni input applicabile prenota 1 operazione e i byte massimi del suo record nella coda journal. Se non entra: `REJECTED` con `ERROR_CODE_JOURNAL_QUEUE_FULL` (45), `ERROR_CODE_DISK_FULL` (46: spazio libero sotto `min_disk_free_bytes`, DB sopra `max_db_bytes` o `SQLITE_FULL` in corso) o `ERROR_CODE_JOURNAL_FAULT` (47: errore I/O non recuperabile, serve un riavvio). Nulla è applicato, `source_sequence` non è consumata, la sessione resta aperta, `last_accepted_source_sequence` è il suggerimento per il reinvio. Un `Hello` che non può essere ammesso riceve `HandshakeRejected` con lo stesso codice. Il driver ritenta **la stessa** `source_sequence`; se non conserva il dato, il dato è perso **fuori dal kernel**.
+- **Receipt durevoli** (`Hello.protocol_minor ≥ 2` e `request_durable_receipts = true`; `Welcome.durable_receipts = true` solo con journal `full`): l'unica risposta a un batch applicato è `APPLIED_DURABLE` (4) con `operation_sequence`, inviata **dopo** il `COMMIT` che contiene l'operazione; `APPLIED_NOT_DURABLE` (5) se il commit è fallito (stato `FAULT`): applicato in RAM, non durevole, da riconciliare dopo il riavvio. Con disco pieno la receipt **attende** (il writer riprova lo stesso gruppo): non è mai risposta in anticipo né falsamente.
+- Driver 1.0/1.1, o 1.2 senza richiesta: sempre `APPLIED_VOLATILE` (nessuna promessa).
+- **Timestamp di sorgente** (1.2, opzionali): `ObservationBatch.source_timestamps_utc_ns` è allineato a `observations` (`INT64_MIN` = assente), più `acquired_at_utc_ns`, `source_clock_quality`, `source_clock_id`. Lunghezza diversa o valore negativo ⇒ `REJECTED` + `ERROR_CODE_INVALID_TIMESTAMP` (48) senza effetto. Sono *reported*, conservati invariati nel journal, non entrano in digest, deduplicazione o confronto dei batch (un duplicato con timestamp diversi resta `DUPLICATE` e non sostituisce i primi). Conservati solo con `[persistence]`.
+
+### 10.3 Ordine e tempo
+
+L'ordine è `(timeline_id, operation_seq, event_seq / ordinal)`, **mai** un timestamp. Ogni operazione applicata porta un `TimeEnvelope` (`sequenced_at_utc_ns` = `CLOCK_REALTIME` raw, `boottime_ns`, `logical_time_ns = max(precedente, sequenced_at)` persistito attraverso i riavvii, qualità del clock, flag `REGRESSED` / `LOGICAL_HELD` / `CROSS_BOOT_REGRESSION`). Un orologio che arretra produce una diagnosi (`ClockRegression`, contatori, riga `time_observations`), mai un riordino o un evento retrodatato. `logical_time_ns` non è UTC certificato. `durable_at` è una metrica di lag, mai il tempo dell'evento. DST è solo visualizzazione: si persiste UTC. Timeout e watchdog usano `CLOCK_MONOTONIC` (indipendenti dagli step del wall clock).
+
+### 10.4 Riavvio con journal
+
+1. Store aperto con lock esclusivo; integrità, `application_id`, versione schema e fingerprint della configurazione verificati: qualsiasi incompatibilità ⇒ **avvio rifiutato** (mai fallback volatile). Una configurazione diversa richiede una nuova timeline creata esplicitamente con `scada-journal new-timeline … --confirm` (lo storico precedente resta leggibile).
+2. Stato = ultimo checkpoint valido + replay verificato del suffisso (stessi esiti e stessi eventi, record per record) in un kernel isolato senza I/O; ring ricaricato dal DB. Divergenza, buco o digest errato ⇒ avvio rifiutato.
+3. `RecoveryFence` (operazione registrata): ogni tag con valore diventa `Uncertain(RecoveredUnverified)` col **valore conservato**; ogni sorgente diventa `Disconnected` + `unverified`; le regole d'allarme dei tag toccati hanno `input_valid = false` e **nessun evento** (niente `Returned`, `Raised`, ACK falsi). Gli allarmi conservano stato, occurrence e token.
+4. Una sorgente recuperata deve inviare un **`FullState`** (`Welcome.full_state_required = true`; un `Delta` riceve `REJECTED` + `RESYNC_REQUIRED` con `last_accepted_source_sequence`). Solo quel `FullState` riporta i suoi tag `Good`; le transizioni d'allarme che produce sono marcate `reconciliation = true` e `actual_field_time_unknown = true` (il momento reale nel campo è ignoto). Le altre sorgenti restano non verificate finché non rientrano.
+5. Continuità storica per sorgente, **separata** dalla verifica live: `Unknown` (stessa epoca, sequenza contigua: la contiguità dei batch non prova che il campo non sia cambiato), `Gap` con range noto (sequenza saltata), `Unknown` con limiti ignoti (nuova epoca). `Complete` non è mai dichiarata per un driver senza buffer di eventi verificabile. I gap sono persistiti e non si cancellano.
+6. Il replay non esegue logica né comandi (nessun Logic Engine in VS-006) e non invia nulla all'esterno.
+
+### 10.5 ACK operatore durevole (`scada.alarm.v1`, campi additivi)
+
+`AcknowledgeAlarm.action_id` (16 B), `note` (≤ 256 B UTF-8), `require_durable`. Con `action_id`: un retry restituisce lo **stesso esito** e lo stesso `event_seq` senza un nuovo evento, anche dopo un riavvio (deduplicazione dal journal); un `action_id` riusato con parametri diversi ⇒ `ACTION_ID_CONFLICT`. Con `require_durable` la risposta arriva dopo il commit (`APPLIED_DURABLE`), oppure `DURABILITY_UNAVAILABLE` (13) se il journal non è durevole o manca `action_id`; `JOURNAL_UNAVAILABLE` (11) se l'ammissione è rifiutata. Senza `action_id` la semantica resta quella volatile VS-005. `actor_uid` resta l'uid di un processo.
+
+### 10.6 Historian e diagnostica (`scada.history.v1`, socket separato)
+
+Letture solo fino a `durable_event_seq` pubblicato (`as_of`), pagine keyset per `event_seq` bounded da `max_history_page` e da `history_max_scan` per i filtri, oltre la dimensione del ring. `GetActiveAlarmProjection` (proiezione persistita, `as_of`) è un prodotto diverso dallo snapshot RAM di `scada.alarm.v1`. `GetJournalStatus`, `GetRecoveryStatus`, `GetTimeStatus` restano interrogabili anche con outbox pieno o journal in errore.
+
+### 10.7 Retention
+
+Nessuna cancellazione automatica dello storico allarmi. Le operazioni del journal restano (servono al replay e portano i tempi e i timestamp di sorgente). `compact_replay_payloads = true` (opt-in) svuota solo i **payload di replay** coperti dal più vecchio di almeno due checkpoint conservati, con una riga `retention_markers` per ogni intervallo; senza un checkpoint valido il recupero è poi rifiutato. Lo spazio finisce ⇒ `DISK_FULL` prima di applicare (mai cancellazione al posto dell'ammissione).
+
+### 10.8 Garanzie e non-garanzie
+
+| Garantito | Non garantito |
+|---|---|
+| Ogni operazione con `APPLIED_DURABLE` (o `operation_seq ≤ durable_operation_seq`) sopravvive a kill -9 / crash del processo (provato) | la sopravvivenza al power loss se disco, controller o hypervisor mentono sul flush; provata solo una **simulazione** (WAL troncato), non un vero taglio di corrente |
+| Prefisso coerente RTDB ↔ allarmi ↔ ACK ↔ storico ↔ checkpoint | che il campo sia ancora nello stato recuperato |
+| Nessun falso `Good`, `Returned`, ACK o continuità dopo il riavvio | che non siano andati persi eventi fisici durante il fermo |
+| Rifiuti tipizzati prima della mutazione (coda, disco, guasto) | una latenza durevole massima: dipende dallo storage, è misurata (`docs/benchmarks/vs006.md`), non promessa |
+| Timestamp di sorgente conservati invariati quando il driver li invia | che siano corretti: sono *reported* |
+

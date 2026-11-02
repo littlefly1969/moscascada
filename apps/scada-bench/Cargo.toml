@@ -11,6 +11,8 @@ publish.workspace = true
 scada-core.workspace = true
 scada-protocol.workspace = true
 scada-sim-driver = { path = "../scada-sim-driver" }
+scada-journal.workspace = true
+rusqlite.workspace = true
 
 [lints.rust]
 # The counting global allocator needs `unsafe impl GlobalAlloc` (ADR 0003). Benchmark-only

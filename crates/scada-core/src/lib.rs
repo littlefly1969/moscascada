@@ -26,17 +26,17 @@ mod kernel;
 mod types;
 
 pub use alarm::{
-    AlarmCondition, AlarmEvent, AlarmEventKind, AlarmFlags, AlarmRuleMeta, AlarmRuleSpec, AlarmSpec, AlarmTable,
-    AlarmView, EpisodeState, EventPage, MAX_ALARM_NAME_BYTES, MAX_ALARM_RULES_CEILING, MAX_OUTBOX_CAPACITY_CEILING,
-    OutboxStatus, Severity, SnapshotPage, layout_sizes,
+    AlarmCheckpoint, AlarmCondition, AlarmEvent, AlarmEventKind, AlarmFlags, AlarmRuleMeta, AlarmRuleSpec, AlarmSpec,
+    AlarmStateRecord, AlarmTable, AlarmView, EpisodeState, EventPage, MAX_ALARM_NAME_BYTES, MAX_ALARM_RULES_CEILING,
+    MAX_OUTBOX_CAPACITY_CEILING, OutboxStatus, RestoreError, Severity, SnapshotPage, layout_sizes,
 };
 pub use config::{
     ChannelSpec, ConfigError, ConfigSpec, CoreLimits, SourceMeta, SourceSpec, TagMeta, TagSpec, ValidatedConfig,
 };
 pub use kernel::{
-    AlarmsSnapshot, AppliedKind, ApplyError, IgnoredReason, Kernel, LastBatchSnapshot, LinkState, LogicalSnapshot,
-    Observation, ObservationBatch, Operation, SequencedInput, SourceSnapshot, SourceStatus, TagSnapshot,
-    TransitionOutcome,
+    AlarmsSnapshot, AppliedKind, ApplyError, CheckpointBatch, CheckpointSource, CheckpointTag, IgnoredReason, Kernel,
+    KernelCheckpoint, LastBatchSnapshot, LinkState, LogicalSnapshot, Observation, ObservationBatch, Operation,
+    SequencedInput, SourceSnapshot, SourceStatus, TagSnapshot, TransitionOutcome,
 };
 pub use types::{
     AlarmId, BatchMode, ChannelId, Continuity, Quality, SourceId, Supervision, TagId, UncertainReason, Value, ValueType,
@@ -60,3 +60,8 @@ pub const CONFIG_FINGERPRINT_VERSION_ALARMS: u16 = 3;
 /// VS-005: state digest encoding with alarms: the v2 field list (supervision markers
 /// always present) followed by every alarm state and the outbox sequences.
 pub const STATE_DIGEST_VERSION_ALARMS: u16 = 3;
+/// VS-006 (ADR 0013 §6): state digest of a recoverable kernel (persistent runtime): the
+/// base version (1, 2 or 3) as a `u32`, the base field list, then the recovery section
+/// (`fence_boot_generation`, `unverified` flag of every source). Never used without
+/// `[persistence]`.
+pub const STATE_DIGEST_VERSION_RECOVERABLE: u16 = 4;

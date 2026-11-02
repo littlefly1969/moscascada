@@ -12,7 +12,8 @@ one of them. Every raw line printed by `scada-bench` is appended to OUT, prefixe
                                                    @ipc:key=value becomes an extra [ipc]
                                                    config line, e.g. a VS-003 ingress policy;
                                                    @bench:--opt=value is passed to scada-bench,
-                                                   e.g. VS-004 @bench:--supervise=5000:12000:250)
+                                                   e.g. VS-004 @bench:--supervise=5000:12000:250;
+                                                   @flag:--durable-receipts is a bare flag, VS-006)
       --cell 'cell clients=8 size=128 pipeline=32'  (repeatable)
       --cell 'mixed hv=8 rare_interval_us=1000 queue=64'
 """
@@ -70,6 +71,9 @@ with open(a.out, "a") as out:
                 if k.startswith("@ipc:"):
                     key, val = k[5:].split("=", 1)
                     cmd += ["--ipc-line", f"{key} = {val}"]
+                elif k.startswith("@flag:"):
+                    # VS-006: a scada-bench flag without value, e.g. @flag:--durable-receipts
+                    cmd += [k[6:]]
                 elif k.startswith("@bench:"):
                     # VS-004: a scada-bench option, e.g. @bench:--supervise=5000:12000:250
                     opt, val = k[7:].split("=", 1)

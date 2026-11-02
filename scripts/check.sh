@@ -8,7 +8,7 @@ echo "== clippy"; cargo clippy --workspace --all-targets -- -D warnings
 echo "== test";   cargo test --workspace
 echo "== test (release, runtime under multi_thread(2))"
 # The multiprocess tests spawn the simulator binary, which `-p scada-runtime` does not build.
-cargo build --release -p scada-sim-driver
+cargo build --release -p scada-sim-driver -p scada-journal
 SCADA_TEST_SCHEDULER=multi_thread:2 cargo test --release -p scada-runtime
 echo "== test (release, VS-001/VS-002/VS-003 runtime suite under the VS-003 ingress policies, ADR 0010)"
 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
@@ -23,6 +23,13 @@ SCADA_TEST_ALARMS=1 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_INGRESS=source_fair:1 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
+echo "== test (release, VS-001..VS-005 runtime suite with the VS-006 durable journal enabled, ADR 0013)"
+# Default-off (J10) is covered by every run above (no [persistence] section). Here the same
+# suite runs with [persistence] (synchronous=FULL) and the historian: the journal must not
+# change any earlier outcome (tests whose subject is volatility pin persistence off).
+SCADA_TEST_PERSISTENCE=1 cargo test --release -p scada-runtime
+SCADA_TEST_PERSISTENCE=1 SCADA_TEST_ALARMS=1 SCADA_TEST_SCHEDULER=multi_thread:2 SCADA_TEST_INGRESS=source_fair:4 cargo test --release -p scada-runtime
+SCADA_TEST_PERSISTENCE=1 SCADA_TEST_ALARMS=1 SCADA_TEST_SUPERVISION=60000:60000 cargo test --release -p scada-runtime
 echo "== alarm capacity model (VS-005 T15)"
 python3 scripts/test_alarm_capacity.py
 echo "== alarm catalog example (VS-005, docs/alarm-catalog.md)"
@@ -50,8 +57,18 @@ if command -v buf >/dev/null; then echo "== proto"; ./scripts/check-proto.sh; el
 if rustup target list --installed | grep -q aarch64-unknown-linux-gnu; then
   # Criterion (bench dev-dependency) pulls a C build script that needs an aarch64 C
   # compiler; the benchmark harness is checked without its dev targets.
+  # VS-006: scada-journal bundles SQLite (C), so it and its dependents (scada-runtime,
+  # scada-bench) also need an aarch64 C cross compiler (CC_aarch64_unknown_linux_gnu or
+  # aarch64-linux-gnu-gcc). Without one only the pure-Rust crates are checked, and that
+  # is said explicitly.
   echo "== aarch64 compile check (not a runtime proof: NOT TESTED ON HARDWARE)"
-  cargo check --workspace --all-targets --exclude scada-bench --target aarch64-unknown-linux-gnu
-  cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
+  if [ -n "${CC_aarch64_unknown_linux_gnu:-}" ] || command -v aarch64-linux-gnu-gcc >/dev/null; then
+    cargo check --workspace --all-targets --exclude scada-bench --target aarch64-unknown-linux-gnu
+    cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
+  else
+    cargo check --workspace --all-targets --exclude scada-bench --exclude scada-runtime --exclude scada-journal \
+      --target aarch64-unknown-linux-gnu
+    echo "aarch64: scada-journal, scada-runtime, scada-bench NOT CHECKED (no aarch64 C cross compiler for SQLite)"
+  fi
 fi
 echo "ALL CHECKS PASSED"

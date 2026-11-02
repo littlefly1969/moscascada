@@ -10,13 +10,11 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use scada_core::Kernel;
 use scada_protocol::driver_v1::{AckStatus, BatchMode, ErrorCode, KernelMessage, kernel_message};
 use scada_protocol::introspect_v1::{IntrospectResponse, LinkState, Liveness, Quality};
-use scada_sim_driver::{Session, Val, batch, heartbeat, hello, hello_v10};
+use scada_sim_driver::{Session, Val, batch, heartbeat, hello_minor, hello_v10};
 use support::*;
 
 const SRC: u32 = 1001;
@@ -32,13 +30,19 @@ fn supervised(live: Option<u64>, fresh: Option<u64>) -> Limits {
     if let Some(f) = fresh {
         src.push_str(&format!("freshness_timeout_ms = {f}\n"));
     }
-    // VS-004 digest versions (1/2) are asserted here: alarms stay off (VS-005 coupling is
-    // tested in vs005.rs).
-    Limits { runtime: format!("watchdog_poll_ms = {POLL_MS}\n"), source_1001: src, alarms: None, ..Limits::default() }
+    // VS-004 digest versions (1/2) are asserted here: alarms and the journal stay off (VS-005
+    // coupling is tested in vs005.rs, the VS-006 journal in vs006.rs).
+    Limits {
+        runtime: format!("watchdog_poll_ms = {POLL_MS}\n"),
+        source_1001: src,
+        alarms: None,
+        persistence: None,
+        ..Limits::default()
+    }
 }
 
 fn unsupervised() -> Limits {
-    Limits { runtime: String::new(), source_1001: String::new(), alarms: None, ..Limits::default() }
+    Limits { runtime: String::new(), source_1001: String::new(), alarms: None, persistence: None, ..Limits::default() }
 }
 
 fn liveness(r: &IntrospectResponse, id: u32) -> Liveness {
@@ -89,7 +93,8 @@ fn default_off_is_the_vs003_contract() {
     legacy.send(&heartbeat(1)).unwrap();
     assert_eq!(protocol_error(legacy.recv().unwrap()), ErrorCode::UnexpectedMessage);
     // Updated driver: 1.1 negotiated, heartbeats accepted and harmless without supervision.
-    let mut new = Session::connect_with(&k.socket, &hello("new", SRC, 7)).unwrap();
+    // A 1.1 driver (VS-004): 1.1 negotiated (a VS-006 driver would get 1.2).
+    let mut new = Session::connect_with(&k.socket, &hello_minor("new", SRC, 7, 1)).unwrap();
     assert_eq!(new.welcome.negotiated_protocol_minor, 1);
     for _ in 0..10 {
         assert!(new.heartbeat().unwrap());
@@ -291,7 +296,7 @@ fn capture_replay_reproduces_supervised_state() {
     let kinds: String = std::fs::read_to_string(&cap).unwrap().lines().map(|l| &l[..1]).collect();
     assert!(kinds.contains('S') && kinds.contains('R') && kinds.contains('X'), "{kinds}");
     let cfg = scada_runtime::config::load(&k.dir.path().join("kernel.toml")).unwrap();
-    let mut replay = Kernel::new(Arc::new(cfg.core.clone()));
+    let mut replay = replay_kernel(&cfg);
     for i in inputs {
         let _ = replay.apply(i);
     }

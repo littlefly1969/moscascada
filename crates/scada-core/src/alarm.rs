@@ -554,6 +554,44 @@ pub struct OutboxStatus {
     pub last_alarm_change_operation: u64,
 }
 
+/// VS-006: one rule's dynamic state in a checkpoint (the 32-byte `AlarmState`, public).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AlarmStateRecord {
+    pub token: u64,
+    pub occurrence: u64,
+    pub last_event_seq: u64,
+    pub flags: u8,
+}
+
+/// VS-006: alarm part of a [`crate::KernelCheckpoint`]: **every** rule (not only the
+/// listed ones) and the outbox counters. The ring contents are not part of it: they are
+/// durable in the journal and reloaded on restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlarmCheckpoint {
+    /// One per rule, in rule-index (= `AlarmId`) order.
+    pub states: Vec<AlarmStateRecord>,
+    pub next_event_seq: u64,
+    pub durable_watermark: u64,
+    pub high_water: u64,
+    pub last_alarm_change_operation: u64,
+}
+
+/// VS-006: why a checkpoint could not be restored (the store is then refused: fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoreError {
+    pub reason: &'static str,
+    /// Index, sequence or count that identifies the offending item.
+    pub detail: u64,
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.reason, self.detail)
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
 /// Page of events returned by [`crate::Kernel::read_alarm_events`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventPage {
@@ -1247,6 +1285,124 @@ impl AlarmEngine {
 
     pub(crate) fn rules(&self) -> usize {
         self.states.len()
+    }
+
+    /// VS-006 (ADR 0013 D9): recovery fence. Every rule whose tag index satisfies
+    /// `unverified` loses `input_valid`; **no condition is evaluated and no event is
+    /// produced** (latches, tokens and occurrences are kept). Returns the number of rules
+    /// that changed. O(rules + tags), once per boot.
+    pub(crate) fn fence(&mut self, table: &AlarmTable, unverified: impl Fn(u32) -> bool, op: u64) -> u32 {
+        let mut n: u32 = 0;
+        for (r, rule) in table.rules.iter().enumerate() {
+            if unverified(rule.tag)
+                && let Some(st) = self.states.get_mut(r)
+                && st.flags & F_INPUT_VALID != 0
+            {
+                st.flags &= !F_INPUT_VALID;
+                n = n.saturating_add(1);
+            }
+        }
+        if n > 0 {
+            self.last_change_op = op;
+        }
+        for tag in 0..self.quiet.len() {
+            self.refresh_quiet(table, tag);
+        }
+        n
+    }
+
+    /// VS-006: complete dynamic state for a checkpoint (every rule, including `Normal`).
+    pub(crate) fn export(&self) -> AlarmCheckpoint {
+        AlarmCheckpoint {
+            states: self
+                .states
+                .iter()
+                .map(|s| AlarmStateRecord {
+                    token: s.token,
+                    occurrence: s.occurrence,
+                    last_event_seq: s.last_event_seq,
+                    flags: s.flags,
+                })
+                .collect(),
+            next_event_seq: self.next_event_seq,
+            durable_watermark: self.watermark,
+            high_water: self.high_water,
+            last_alarm_change_operation: self.last_change_op,
+        }
+    }
+
+    /// VS-006: rebuild an engine from a checkpoint and the readable window of the ring
+    /// (`ring` = events `oldest_visible ..= next_event_seq - 1`, in order, bounded by the
+    /// outbox capacity). Derived indices (listed bitset, quiet windows) are recomputed.
+    pub(crate) fn restore(
+        t: &AlarmTable,
+        cp: &AlarmCheckpoint,
+        ring: &[AlarmEvent],
+    ) -> Result<AlarmEngine, RestoreError> {
+        let mut e = AlarmEngine::new(t);
+        if cp.states.len() != e.states.len() {
+            return Err(RestoreError {
+                reason: "alarm state count differs from the rule table",
+                detail: cp.states.len() as u64,
+            });
+        }
+        if cp.next_event_seq == 0 {
+            return Err(RestoreError { reason: "next_event_seq is 0", detail: 0 });
+        }
+        let newest = cp.next_event_seq.saturating_sub(1);
+        if cp.durable_watermark > newest {
+            return Err(RestoreError {
+                reason: "durable watermark beyond the last event",
+                detail: cp.durable_watermark,
+            });
+        }
+        if newest.saturating_sub(cp.durable_watermark) > t.outbox_capacity {
+            return Err(RestoreError { reason: "more non-durable events than outbox slots", detail: newest });
+        }
+        for (i, (st, rec)) in e.states.iter_mut().zip(&cp.states).enumerate() {
+            if rec.flags & !(F_ACTIVE | F_UNACKED | F_INPUT_VALID | F_ARMED) != 0
+                || rec.last_event_seq > newest
+                || (rec.occurrence == 0 && rec.flags & (F_ACTIVE | F_UNACKED) != 0)
+            {
+                return Err(RestoreError { reason: "invalid alarm state", detail: i as u64 });
+            }
+            *st = AlarmState {
+                token: rec.token,
+                occurrence: rec.occurrence,
+                last_event_seq: rec.last_event_seq,
+                flags: rec.flags,
+            };
+        }
+        e.next_event_seq = cp.next_event_seq;
+        e.watermark = cp.durable_watermark;
+        e.high_water = cp.high_water;
+        e.last_change_op = cp.last_alarm_change_operation;
+        let oldest = e.oldest_visible(newest);
+        let expected = if newest == 0 { 0 } else { newest.saturating_sub(oldest).saturating_add(1) };
+        if ring.len() as u64 != expected {
+            return Err(RestoreError {
+                reason: "ring window length differs from the outbox window",
+                detail: ring.len() as u64,
+            });
+        }
+        for (i, ev) in ring.iter().enumerate() {
+            let seq = oldest.saturating_add(i as u64);
+            if ev.event_seq != seq || t.rule_index(ev.alarm_id).is_none() {
+                return Err(RestoreError { reason: "ring event out of sequence or of an unknown alarm", detail: seq });
+            }
+            let slot = seq.wrapping_sub(1).checked_rem(e.capacity).unwrap_or(0);
+            if let Some(dst) = e.ring.get_mut(usize::try_from(slot).unwrap_or(usize::MAX)) {
+                *dst = *ev;
+            }
+        }
+        for r in 0..e.states.len() {
+            let on = e.states.get(r).is_some_and(|s| s.flags & (F_ACTIVE | F_UNACKED) != 0);
+            e.listed.set(u32::try_from(r).unwrap_or(u32::MAX), on);
+        }
+        for tag in 0..e.quiet.len() {
+            e.refresh_quiet(t, tag);
+        }
+        Ok(e)
     }
 
     /// Tests only: jump the event sequence (exhaustion tests).

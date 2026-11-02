@@ -87,6 +87,8 @@ pub fn decode_driver_message<'a>(
             if scratch.observations.capacity() > retained_capacity_bound(max_observations) {
                 scratch.observations = Vec::new();
             }
+            // VS-006: the aligned timestamps are never retained (bounded by the frame).
+            scratch.source_timestamps_utc_ns = Vec::new();
             merged?;
             return Ok(Decoded::Oversized {
                 mode: scratch.mode,
@@ -308,27 +310,59 @@ pub fn as_batch(msg: &pb::DriverMessage) -> Option<&pb::ObservationBatch> {
     }
 }
 
+/// VS-006 (ADR 0014 §6): source time sidecar of one batch (wire 1.2). Never part of the
+/// core value, of the deduplication or of the digest: carried to the journal unchanged.
+pub use scada_journal::{MAX_CLOCK_ID_BYTES, SourceTimes};
+
+/// Entry of `source_timestamps_utc_ns` meaning "not available for this observation".
+pub const NO_SOURCE_TIMESTAMP: i64 = i64::MIN;
+
 /// Convert a decoded wire batch into a core batch. Structural problems that the core
 /// type system cannot even represent (unknown mode, missing value) are rejected here,
 /// before the sequencer, and therefore also without any state change.
+///
+/// VS-006: the source time sidecar is returned separately (`None` when the batch carries
+/// no time field, the 1.0/1.1 case: no allocation). A timestamp outside `0 <= t < 2^63`
+/// or a clock id over 64 bytes rejects the batch (`INVALID_TIMESTAMP`).
 pub fn batch_from_wire(
     source_id: SourceId,
     link_generation: u64,
     b: &pb::ObservationBatch,
     max_observations: u32,
-) -> Result<ObservationBatch, ErrorCode> {
+) -> Result<(ObservationBatch, Option<Box<SourceTimes>>), ErrorCode> {
     // Size checked again by the core; done here to avoid converting oversized vectors.
     let mode = check_batch_header(b.mode, b.observations.len() as u64, max_observations)?;
     let mut observations = Vec::with_capacity(b.observations.len());
-    for o in &b.observations {
+    let mut times: Option<Box<SourceTimes>> = None;
+    let valid = |t: i64| if t >= 0 { Ok(t) } else { Err(ErrorCode::InvalidTimestamp) };
+    let stamps = &b.source_timestamps_utc_ns;
+    if !stamps.is_empty() && stamps.len() != b.observations.len() {
+        return Err(ErrorCode::InvalidTimestamp);
+    }
+    for (i, o) in b.observations.iter().enumerate() {
         let value = match o.value {
             Some(pb::observation::Value::BoolValue(v)) => Value::Bool(v),
             Some(pb::observation::Value::I64Value(v)) => Value::I64(v),
             None => return Err(ErrorCode::MissingValue),
         };
-        observations.push(Observation { channel_id: ChannelId(o.channel_id), value });
+        let channel_id = ChannelId(o.channel_id);
+        if let Some(&t) = stamps.get(i)
+            && t != NO_SOURCE_TIMESTAMP
+        {
+            times.get_or_insert_default().observations.push((o.channel_id, valid(t)?));
+        }
+        observations.push(Observation { channel_id, value });
     }
-    Ok(ObservationBatch { source_id, link_generation, mode, source_sequence: b.source_sequence, observations })
+    if b.acquired_at_utc_ns.is_some() || b.source_clock_quality != 0 || !b.source_clock_id.is_empty() {
+        if b.source_clock_id.len() > MAX_CLOCK_ID_BYTES {
+            return Err(ErrorCode::InvalidTimestamp);
+        }
+        let t = times.get_or_insert_default();
+        t.acquired_at_utc_ns = b.acquired_at_utc_ns.map(valid).transpose()?;
+        t.clock_quality = u8::try_from(b.source_clock_quality).unwrap_or(0);
+        t.clock_id.clone_from(&b.source_clock_id);
+    }
+    Ok((ObservationBatch { source_id, link_generation, mode, source_sequence: b.source_sequence, observations }, times))
 }
 
 /// Error code reported to the driver for a core rejection.
@@ -366,7 +400,8 @@ pub fn error_code(e: &ApplyError) -> ErrorCode {
         | ApplyError::AlarmCounterOverflow(_)
         | ApplyError::AlarmFanoutExceeded { .. }
         | ApplyError::WatermarkBeyondCommitted { .. }
-        | ApplyError::WatermarkRegression { .. } => ErrorCode::Internal,
+        | ApplyError::WatermarkRegression { .. }
+        | ApplyError::RecoveryNotEnabled => ErrorCode::Internal,
     }
 }
 
@@ -420,6 +455,7 @@ mod tests {
                 mode,
                 source_sequence,
                 observations: o.into_iter().map(|(c, v)| obs(c, v)).collect(),
+                ..Default::default()
             })
     }
 
@@ -451,6 +487,7 @@ mod tests {
                             source_epoch: 2,
                             supported_protocol_majors: vec![1],
                             protocol_minor: 0,
+                            ..Default::default()
                         })),
                     }
                     .encode_to_vec(),
@@ -562,6 +599,7 @@ mod tests {
                 mode: 2,
                 source_sequence: 9,
                 observations: (1..=128).map(|c| obs(c, Some(pb::observation::Value::I64Value(1)))).collect(),
+                ..Default::default()
             })),
         }
         .encode_to_vec();

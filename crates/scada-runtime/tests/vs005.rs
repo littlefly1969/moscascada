@@ -23,8 +23,10 @@ use support::*;
 
 const SRC: u32 = 1001;
 
+/// VS-005 contract (volatile outbox, simulated sink, `durability=none`): the VS-006 journal
+/// stays off here; alarms with the journal are tested in vs006.rs.
 fn with_alarms(a: Alarms) -> Limits {
-    Limits { alarms: Some(a), ..Limits::default() }
+    Limits { alarms: Some(a), persistence: None, ..Limits::default() }
 }
 
 fn door(s: &mut Session, seq: u64, v: bool) -> scada_protocol::driver_v1::InputAck {
@@ -100,12 +102,17 @@ fn default_off_has_no_alarm_surface() {
         alarms: None,
         runtime: String::new(),
         source_1001: String::new(),
+        persistence: None,
         ..Limits::default()
     });
     assert!(!k.ready.contains("alarms="), "{}", k.ready);
     assert!(!k.alarm.exists(), "no control socket without [alarms]");
     let mut s = Session::connect(&k.socket, "d", SRC, 1).unwrap();
-    assert_eq!((s.welcome.negotiated_protocol_major, s.welcome.negotiated_protocol_minor), (1, 1));
+    assert_eq!(
+        (s.welcome.negotiated_protocol_major, s.welcome.negotiated_protocol_minor),
+        (1, scada_protocol::PROTOCOL_MINOR),
+        "VS-006 driver library: 1.2"
+    );
     full(&mut s, 1, true);
     let r = k.introspect();
     assert_eq!(r.state_digest_version, 1, "VS-003/VS-004 digest v1 unchanged");
@@ -178,6 +185,7 @@ fn episode_and_ack_over_ipc_and_replay() {
             body: Some(apb::alarm_request::Body::Acknowledge(apb::AcknowledgeAlarm {
                 alarm_id: 1,
                 activation_token: token,
+                ..Default::default()
             })),
         })
         .unwrap();

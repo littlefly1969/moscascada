@@ -47,6 +47,38 @@ pub struct Limits {
     /// `SCADA_TEST_ALARMS=1`, so that the whole earlier suite also runs with alarms enabled
     /// (rules on every tag, an outbox large enough never to refuse).
     pub alarms: Option<Alarms>,
+    /// VS-006: `Some(extra lines)` adds `[persistence]` with the store at
+    /// `<dir>/journal/kernel.db` and the historian at `<dir>/history.sock` (current uid);
+    /// the extra lines may also open a `[time]` section. Default from
+    /// `SCADA_TEST_PERSISTENCE=1`, so that the whole earlier suite also runs with the
+    /// durable journal enabled.
+    pub persistence: Option<String>,
+}
+
+/// `SCADA_TEST_PERSISTENCE=1` -> journal with default settings except a queue large enough
+/// for the pipelined load tests (journal backpressure itself is tested in vs006.rs).
+pub fn persistence_from_env() -> Option<String> {
+    match std::env::var("SCADA_TEST_PERSISTENCE") {
+        Ok(v) if v == "1" => Some("journal_queue_operations = 262144\n".into()),
+        _ => None,
+    }
+}
+
+/// Kernel for replaying a capture of a kernel started with `cfg`: a journaling kernel is
+/// recoverable (its own digest version, ADR 0013 D3).
+pub fn replay_kernel(cfg: &scada_runtime::config::RuntimeConfig) -> scada_core::Kernel {
+    let c = std::sync::Arc::new(cfg.core.clone());
+    if cfg.persistence.is_some() { scada_core::Kernel::new_recoverable(c) } else { scada_core::Kernel::new(c) }
+}
+
+/// `[persistence]` section of the test configuration.
+pub fn persistence_section(dir: &Path, extra: &str) -> String {
+    format!(
+        "\n[persistence]\npath = \"{}\"\nhistory_socket_path = \"{}\"\nhistory_authorized_uids = [{}]\n{extra}\n",
+        dir.join("journal").join("kernel.db").display(),
+        dir.join("history.sock").display(),
+        current_uid()
+    )
 }
 
 /// VS-005 `[alarms]` of the test configuration. The control socket is `<dir>/alarm.sock`.
@@ -87,7 +119,10 @@ pub fn demo_rules() -> String {
 pub fn alarms_from_env() -> Option<Alarms> {
     match std::env::var("SCADA_TEST_ALARMS").ok().as_deref() {
         Some("1") => Some(Alarms {
-            capacity: 1 << 20,
+            // Without a journal nothing releases the slots, so the ring must hold every
+            // event of a test. With SCADA_TEST_PERSISTENCE=1 the commits release them: a
+            // 64 Ki ring suffices and keeps the RSS assertions of VS-002 meaningful.
+            capacity: if persistence_from_env().is_some() { 1 << 16 } else { 1 << 20 },
             authorized_uids: None,
             extra: String::new(),
             rules: demo_rules(),
@@ -159,6 +194,7 @@ impl Default for Limits {
             runtime: supervision_from_env().0,
             source_1001: supervision_from_env().1,
             alarms: alarms_from_env(),
+            persistence: persistence_from_env(),
         }
     }
 }
@@ -213,7 +249,7 @@ id = 2001
 name = "restricted"
 authorized_uids = [4294967294]
 channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
-{load}{alarms}"#,
+{load}{alarms}{persistence}"#,
         load = (1..=16)
             .map(|n| format!(
                 "\n[[tags]]\nid = {t}\nname = \"load_{n}\"\ntype = \"i64\"\n\n[[sources]]\nid = {s}\nname = \"load-{n}\"\nchannels = [ {{ channel = 1, tag = {t}, type = \"i64\" }} ]\n",
@@ -235,6 +271,7 @@ channels = [ {{ channel = 1, tag = 201, type = "i64" }} ]
         runtime = l.runtime,
         sup = l.source_1001,
         alarms = l.alarms.as_ref().map_or(String::new(), |a| a.section(dir)),
+        persistence = l.persistence.as_ref().map_or(String::new(), |e| persistence_section(dir, e)),
     )
 }
 
@@ -309,7 +346,14 @@ impl KernelProc {
     }
 
     pub fn introspect(&self) -> IntrospectResponse {
-        let mut s = UnixStream::connect(&self.intro).expect("introspection socket");
+        introspect_at(&self.intro)
+    }
+}
+
+/// One introspection call on `path` (any kernel started with an introspection socket).
+pub fn introspect_at(path: &Path) -> IntrospectResponse {
+    {
+        let mut s = UnixStream::connect(path).expect("introspection socket");
         s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut w = Vec::new();
         frame::write_message(
@@ -322,7 +366,9 @@ impl KernelProc {
         let mut r = Vec::new();
         frame::read_message(&mut s, frame::MAX_FRAME_BYTES_CEILING, &mut r).unwrap().expect("response")
     }
+}
 
+impl KernelProc {
     /// Poll the introspection until `pred` holds (state changes are asynchronous to the test).
     pub fn wait_for(&self, what: &str, pred: impl Fn(&IntrospectResponse) -> bool) -> IntrospectResponse {
         let start = Instant::now();
@@ -343,6 +389,47 @@ impl KernelProc {
 
     pub fn threads(&self) -> u64 {
         proc_status(self.pid(), "Threads:")
+    }
+
+    /// VS-006: SIGKILL, keep the directory (store) for a restart: (stderr, dir).
+    pub fn kill_keep(mut self) -> (String, tempfile::TempDir) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let err = self.stderr.take().map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+        (err, self.take_dir())
+    }
+
+    /// VS-006: wait for the process to end by itself (e.g. an injected fault aborts it);
+    /// returns (exit status, stderr, dir).
+    pub fn wait_exit(mut self, timeout: Duration) -> (std::process::ExitStatus, String, tempfile::TempDir) {
+        let start = Instant::now();
+        let status = loop {
+            if let Some(st) = self.child.try_wait().unwrap() {
+                break st;
+            }
+            if start.elapsed() > timeout {
+                let _ = self.child.kill();
+                break self.child.wait().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let err = self.stderr.take().map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+        (status, err, self.take_dir())
+    }
+
+    /// VS-006: SIGTERM (graceful), keep the directory: (stderr, dir).
+    pub fn stop_keep(mut self) -> (String, tempfile::TempDir) {
+        unsafe_free_sigterm(self.child.id());
+        let status = self.child.wait().unwrap();
+        let err = self.stderr.take().map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+        assert!(status.success(), "kernel exit {status:?}\n{err}");
+        assert!(!err.contains("panicked"), "kernel panicked:\n{err}");
+        (err, self.take_dir())
+    }
+
+    fn take_dir(&mut self) -> tempfile::TempDir {
+        let placeholder = tempfile::Builder::new().prefix("scada-it-empty").tempdir().unwrap();
+        std::mem::replace(&mut self.dir, placeholder)
     }
 
     /// SIGKILL and collect stderr.

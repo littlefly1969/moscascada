@@ -1,0 +1,136 @@
+# VS-006 persistence example (ADR 0013, ADR 0014): the VS-005 alarm example plus a durable
+# journal, the alarm historian and the time authority. Every key of [persistence] and
+# [time] is listed with its default. Without [persistence] the kernel is the VS-005
+# volatile kernel (nothing opened, nothing written).
+#
+# Durability: "full" (SQLite WAL, synchronous=FULL) is the only durable mode. A durable
+# receipt (driver protocol 1.2, ACK_STATUS_APPLIED_DURABLE) is sent only after the COMMIT
+# that holds the operation returned. What a COMMIT is worth after a power cut depends on
+# the storage honouring fsync: see docs/benchmarks/vs006.md (measured only on a VM disk;
+# NOT TESTED ON physical power loss, ARM64 NOT TESTED ON HARDWARE).
+#
+# The store directory must be private (not group/world writable, not a symlink); the
+# database files are created 0600. Only one kernel can write a store (flock).
+
+[ipc]
+socket_path = "/run/scada/driver.sock"
+max_frame_bytes = 65536
+max_driver_connections = 16
+input_queue_capacity = 64
+max_inflight_per_connection = 32
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "door_contact"
+type = "bool"
+
+[[tags]]
+id = 102
+name = "tamper_switch"
+type = "bool"
+
+[[tags]]
+id = 103
+name = "case_temperature_centi_c"   # hundredths of °C, scaled integer
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "sim-enclosure-1"
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "i64" },
+]
+
+[alarms]
+# Hard ceiling of the rule table (defaults to the number of rules). Startup is refused
+# above it, so that the memory bound is fixed by configuration.
+max_rules = 16
+# Bounded outbox: events are NEVER overwritten while not durable. A transition that does
+# not fit is refused as a whole (batch: OUTBOX_CAPACITY_EXCEEDED, retry later). Must hold
+# at least the worst fan-out of one operation (all rules of the tags of one source).
+outbox_capacity_events = 65536
+# Occupancy (percent) from which the capacity status reports HIGH (CRITICAL = refusals).
+outbox_high_percent = 80
+# Control socket (snapshot, events, ACK, capacity). ACKs are attributed to the peer uid
+# of this socket (SO_PEERCRED), never to a client-declared value.
+control_socket_path = "/run/scada/alarm.sock"
+control_authorized_uids = [1000]
+max_control_connections = 4
+control_page_max = 1024
+
+[[alarms.rules]]
+id = 1
+name = "door_open"
+tag_id = 101
+kind = "bool_equals"      # bool_equals | high | low | bad_quality
+expected = true
+severity = "major"        # info | warning | major | critical
+
+[[alarms.rules]]
+id = 2
+name = "tamper"
+tag_id = 102
+kind = "bool_equals"
+expected = true
+severity = "critical"
+
+[[alarms.rules]]
+id = 3
+name = "case_temperature_high"
+tag_id = 103
+kind = "high"             # active while v >= trip; returns when v <= reset (hysteresis)
+trip = 4500
+reset = 4300
+severity = "warning"
+
+[[alarms.rules]]
+id = 4
+name = "case_temperature_low"
+tag_id = 103
+kind = "low"              # active while v <= trip; returns when v >= reset
+trip = -1000
+reset = -800
+severity = "warning"
+
+[[alarms.rules]]
+id = 5
+name = "enclosure_signal_lost"
+tag_id = 103
+kind = "bad_quality"      # armed by the first Good value; active while not Good
+severity = "info"
+
+[persistence]
+enabled = true                         # false = section ignored: VS-005 volatile kernel
+path = "/var/lib/scada/journal/kernel.db"
+durability = "full"                    # "normal" = NOT DURABLE, benchmarks only (needs --test-allow-non-durable)
+journal_queue_operations = 65536       # admission refuses with JOURNAL_QUEUE_FULL (45) beyond this backlog
+journal_queue_bytes = 67108864         # ... or beyond these bytes
+commit_max_operations = 1024           # group commit: operations per transaction (one fsync)
+commit_max_delay_ms = 0                # 0 = natural batching (no added latency)
+checkpoint_every_operations = 100000   # bounds the replay after a restart
+checkpoints_keep = 2
+compact_replay_payloads = false        # true: empty replay payloads older than the oldest kept checkpoint (marked, ADR 0013 D13)
+startup_check = "quick"                # "quick" | "full" | "none"
+sqlite_cache_kib = 8192
+wal_max_bytes = 67108864               # WAL truncated by the writer beyond this size
+min_disk_free_bytes = 268435456        # below it: DISK_FULL (46) before applying anything
+# max_db_bytes = 8589934592            # optional cap of the database file (DISK_FULL beyond)
+operator_actions_cache = 16384         # durable ACK action_id deduplication cache (RAM)
+history_socket_path = "/run/scada/history.sock"
+history_authorized_uids = [1000]
+max_history_connections = 4
+max_history_page = 1000
+history_max_scan = 100000
+
+[time]
+clock_regression_alert_ms = 1          # realtime step backwards >= this: ClockRegression (diagnosed, never reordered)
+clock_jump_alert_ms = 60000            # realtime step forwards >= this: ClockJump
+host_sync_probe = "none"               # "none" | "chronyc" | "timedatectl"
+host_sync_probe_period_ms = 60000

@@ -17,7 +17,8 @@
 //! R <op> <source> <generation>                       VS-004 SourceLivenessRestored
 //! X <op> <source> <generation> <observed_up_to>      VS-004 FreshnessExpired
 //! A <op> <alarm_id> <activation_token> <actor_uid>   VS-005 AlarmAcknowledge
-//! W <op> <up_to_event_seq>                           VS-005 AdvanceDurableWatermark (test sink)
+//! W <op> <up_to_event_seq>                           VS-005 AdvanceDurableWatermark (test sink; VS-006 journal)
+//! F <op> <boot_generation>                           VS-006 RecoveryFence
 //! ```
 //!
 //! VS-005: acknowledgements (with the peer uid the runtime authenticated) and the
@@ -111,6 +112,9 @@ fn format_input(s: &mut String, input: &SequencedInput) {
         Operation::AdvanceDurableWatermark { up_to_event_seq } => {
             let _ = write!(s, "W {op} {up_to_event_seq}");
         }
+        Operation::RecoveryFence { boot_generation } => {
+            let _ = write!(s, "F {op} {boot_generation}");
+        }
         Operation::ObservationBatch(b) => {
             let mode = match b.mode {
                 BatchMode::FullState => 'F',
@@ -149,6 +153,10 @@ pub fn parse_line(line: &str) -> Option<SequencedInput> {
         }
         "W" => {
             let operation = Operation::AdvanceDurableWatermark { up_to_event_seq: f.next()?.parse().ok()? };
+            return f.next().is_none().then_some(SequencedInput { operation_sequence: op, operation });
+        }
+        "F" => {
+            let operation = Operation::RecoveryFence { boot_generation: f.next()?.parse().ok()? };
             return f.next().is_none().then_some(SequencedInput { operation_sequence: op, operation });
         }
         _ => {}
@@ -279,6 +287,7 @@ mod tests {
                 operation_sequence: 8,
                 operation: Operation::AdvanceDurableWatermark { up_to_event_seq: 42 },
             },
+            SequencedInput { operation_sequence: 9, operation: Operation::RecoveryFence { boot_generation: 3 } },
         ];
         for i in &inputs {
             let mut s = String::new();

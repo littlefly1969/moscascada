@@ -1,4 +1,4 @@
-# Architettura (VS-001 + VS-002 + VS-003 + VS-004 + VS-005)
+# Architettura (VS-001 + VS-002 + VS-003 + VS-004 + VS-005 + VS-006)
 
 ```text
  processi driver (invariati)               processo scada-kernel (scada-runtime)
@@ -28,6 +28,10 @@
                                             │  [VS-005, solo con [alarms]: AlarmEngine dentro Kernel::apply;  │
                                             │   socket di controllo scada.alarm.v1 (allowlist uid, limiti);   │
                                             │   le richieste passano dal sequencer (corsia di controllo)]     │
+                                            │  [VS-006, solo con [persistence]: ammissione journal prima di   │
+                                            │   apply; thread "scada-journal" (writer SQLite, group commit);  │
+                                            │   thread "scada-time-probe" (opzionale); socket historian       │
+                                            │   scada.history.v1 servito da connessioni read-only]            │
                                             └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -40,6 +44,7 @@ Il nucleo deterministico è invariato: `scada-core` resta puro (nessun I/O, cloc
 | `scada-core` | Configurazione validata, RTDB in RAM, `Kernel::apply`, snapshot, digest. Puro e sincrono. | `blake3` (feature `pure`) |
 | `scada-protocol` | Tipi generati da `proto/` (`prost`, compilati con `protox`), framing limitato. | `prost`, `bytes` |
 | `scada-runtime` | Lib + binario `scada-kernel`: config TOML, socket, sessioni, ingresso (VS-003), sequencer, introspezione, diagnostica, budget di memoria, cattura input. | core, protocol, sched, `prost` (stessa versione, solo `decode_varint`), `tokio` (`rt`, `rt-multi-thread`, …), `serde`, `toml` |
+| `scada-journal` | VS-006: store SQLite (schema v1, WAL, lock, permessi), codec canonico dei record e dei checkpoint, writer group-commit, recovery (checkpoint + replay verificato), reader dello storico, `ReconciliationTracker`, punti di guasto di test, CLI offline `scada-journal` (`info`, `verify`, `history`, `gaps`, `new-timeline`). | core, `rusqlite` (`bundled`, SQLite 3.54.1), `blake3`, `rustix` |
 | `scada-sched` | VS-003: modello puro dello scheduler di ingresso (`FairQueue`, RR/DRR) + simulatore delle politiche. Nessuna dipendenza. | — |
 | `scada-sim-driver` | Driver simulato + client bloccante; procedura di ripresa `resume` (D1). | protocol |
 | `scada-bench` | Benchmark E2E (`cell`, `mixed`, `saturation`, `e2e`) e microbenchmark Criterion (`benches/micro.rs`). Non distribuito. | core, protocol, sim-driver; dev: `criterion`, runtime |
@@ -102,6 +107,35 @@ Opzionale e **disabilitato per default**: senza `[alarms]` il campo `Kernel::ala
 - **Cattura/replay**: ACK e watermark sono righe `A` / `W`; gli eventi si ricavano deterministicamente.
 - **Catalogo operatore** fuori dal kernel: `docs/alarm-catalog.md`.
 
+## Journal durevole, recovery e tempo (VS-006, ADR 0013/0014)
+
+Opzionale e **disabilitato per default**: senza `[persistence]` nessun file, thread o socket in più e il percorso è quello VS-005 (un controllo `Option` per richiesta).
+
+```text
+ sessione ─ batch (+ timestamp sidecar 1.2) ─▶ sequencer
+                                               │ 1. ammissione: prenota 1 op + B_max(op) byte nella coda journal
+                                               │    (non entra ⇒ REJECTED 45/46/47, nulla applicato)
+                                               │ 2. TimeAuthority: TimeEnvelope (realtime raw, boottime, logical, qualità, flag)
+                                               │ 3. Kernel::apply (puro, invariato)
+                                               │ 4. record = op + eventi + envelope + timestamp sorgente + azione operatore
+                                               ▼    → sync_channel(journal_queue_operations)  (try_send, mai bloccante)
+                               thread scada-journal (unico writer SQLite)
+                                 BEGIN IMMEDIATE · fino a commit_max_operations op intere · COMMIT (WAL, synchronous=FULL)
+                                 → pubblica durable_op / durable_event (atomici) → receipt APPLIED_DURABLE in attesa
+                                 → sveglia il sequencer ─▶ AdvanceDurableWatermark (operazione registrata, 0 eventi)
+                                 checkpoint (export sul sequencer ogni N op, scrittura sul writer dopo il prefisso)
+                                 compattazione opzionale dei payload di replay, statistiche, WAL TRUNCATE oltre wal_max_bytes
+ socket historian (scada.history.v1) ─▶ pool di connessioni read-only (spawn_blocking, ≤ max_history_connections)
+                                       letture limitate a as_of ≤ durable_event_seq
+```
+
+- **Avvio** (`open_journal`): lock + controlli dello store → `recovery::recover` (checkpoint valido più recente + replay del suffisso in un kernel isolato, confronto evento per evento; fail-closed) → cache delle azioni operatore → stato per sorgente (`source_recovery`) → `begin_boot` (riga `runtime_boots`) → writer → `AdvanceDurableWatermark` + `RecoveryFence` come operazioni registrate → socket aperti → `READY … persistence=full timeline=… boot=N durable_op=… recovery_ms=…`.
+- **Riconciliazione** (`persist.rs`, `scada-journal::reconcile`): per sorgente `live_verification` (`UnverifiedRecovered → AwaitingFullState → LiveVerified`) e `history_continuity` (`Unknown | Gap | Complete`) sono campi separati e persistiti; il primo `FullState` di una sorgente recuperata produce eventi `reconciliation=true`.
+- **Tempo** (`time_authority.rs`): un campione per operazione **applicata** sul thread sequencer (`clock_gettime` REALTIME + BOOTTIME, un `load` atomico per la qualità pubblicata dal probe); `logical_time` persistito in `schema_meta`; il replay usa i tempi registrati e non legge orologi. Iniezione di test: `--test-clock-offset-file`.
+- **Memoria**: coda journal (`journal_queue_bytes`), staging, checkpoint, cache SQLite, sessioni historian e cache delle azioni sono nel bound di `budget.rs` e stampati da `--check-config` con la percentuale di 4 GiB (Micro).
+- **Arresto**: SIGTERM attende fino a 10 s che `durable_op ≥ applied_op` (stampato su stderr); kill -9 perde solo ciò che non era durevole (nessuna receipt durevole era stata inviata).
+- **Ganci di test** (rifiutati senza `[persistence]`, mai attivi in produzione): `--test-fault point:n` (abort in 8 punti del percorso), `--test-journal-delay-us`, `--test-journal-stall-file`, `--test-journal-max-pages` (ENOSPC), `--test-journal-eio-at-commit`, `--test-clock-offset-file`, `--test-allow-non-durable`.
+
 ## Ordine e concorrenza
 
 - **Per sorgente**: una connessione = una sessione = un task. Reader e writer sono futures dello stesso task (`tokio::join!`), quindi **non** girano in parallelo fra loro nemmeno con `multi_thread`; il parallelismo multicore è **fra sessioni diverse**. L'ordine dei batch di una sorgente è quello del socket; la coda ACK è FIFO; il sequencer applica in ordine FIFO; nessun componente riordina. Test: `vs002.rs::ingestion_modes_preserve_order_and_give_the_same_normalized_state` (16 sorgenti, `current_thread` e `multi_thread(1/2/4)`).
@@ -117,6 +151,7 @@ Opzionale e **disabilitato per default**: senza `[alarms]` il campo `Kernel::ala
 | `multi_thread(N)` | N+2: `scada-io` × N, main (accept + segnali, dentro `block_on`), `scada-sequencer` | `max_blocking_threads(1)`: il kernel non usa `spawn_blocking` |
 | + supervisione VS-004 | +1: `scada-watchdog` | solo se almeno una sorgente è sorvegliata; ~`1000 / watchdog_poll_ms` risvegli al secondo |
 | + allarmi VS-005 | +0 | il motore è nel thread sequencer; le sessioni del socket di controllo sono task del runtime |
+| + journal VS-006 | +1 `scada-journal`, +0/1 `scada-time-probe`, ≤ `max_history_connections` thread bloccanti on demand | `max_blocking_threads = max_history_connections` (le query SQLite storiche non occupano i worker di I/O) |
 
 Ogni struttura ha un limite configurato; il **bound configurativo** delle allocazioni applicative è calcolato all'avvio in `u128` (`budget.rs`), stampato da `--check-config` e su stderr, e confrontato con `[runtime] memory_budget_bytes` se presente (avvio rifiutato se superato). Non è un bound dell'RSS (stack, allocatore, Tokio, libc, buffer socket del kernel Linux non sono inclusi): vedi ADR 0009.
 
@@ -134,6 +169,12 @@ Ogni struttura ha un limite configurato; il **bound configurativo** delle alloca
 | Takeover con vecchio link inattivo (VS-002) | il sequencer segnala il vecchio link al `Welcome` del nuovo: `ProtocolError LINK_SUPERSEDED` e chiusura, slot liberato (`links_superseded`). |
 | Flood di connessioni | oltre `max_driver_connections`: `TOO_MANY_CONNECTIONS` e chiusura immediata. |
 | Thread sequencer terminato (panic) | il processo termina con errore (`sequencer thread stopped unexpectedly`) invece di accettare input non applicabili (test `sequencer_failure_stops_the_host`). |
-| Kernel riavviato | Nuovo `kernel_instance_id`, tutti i tag `Unknown`, `full_state_required = true`. Con allarmi (VS-005): stati, eventi e ACK persi; richieste con il vecchio instance id ⇒ `INSTANCE_MISMATCH`. |
+| Kernel riavviato | Nuovo `kernel_instance_id`, tutti i tag `Unknown`, `full_state_required = true`. Con allarmi (VS-005): stati, eventi e ACK persi; richieste con il vecchio instance id ⇒ `INSTANCE_MISMATCH`. Con `[persistence]` (VS-006): prefisso durevole recuperato, valori `Uncertain(RecoveredUnverified)`, sorgenti non verificate fino al `FullState`, allarmi con il loro stato e nessun evento falso. |
+| Kernel ucciso (kill -9) con journal (VS-006) | Al riavvio: ogni operazione durevole recuperata; operazioni solo in RAM perse (nessuna aveva receipt durevole); WAL con coda incompleta ⇒ prefisso valido o avvio rifiutato. |
+| Coda journal piena / disco lento (VS-006) | `JOURNAL_QUEUE_FULL` prima di applicare; il sequencer non attende mai l'fsync; diagnostica interrogabile. |
+| Disco pieno (VS-006) | `DISK_FULL` prima di applicare (soglia `min_disk_free_bytes` / `max_db_bytes`); `SQLITE_FULL` al commit ⇒ il writer riprova lo stesso gruppo senza pubblicare nulla; le receipt durevoli attendono. |
+| Errore I/O (EIO) del journal (VS-006) | stato `FAULT`: nessun altro commit, receipt in attesa `APPLIED_NOT_DURABLE`, ammissione `JOURNAL_FAULT`; il processo resta interrogabile; serve un riavvio (che esegue il recovery). |
+| Store corrotto, schema o configurazione incompatibili (VS-006) | avvio rifiutato con messaggio (mai fallback volatile); vedi `docs/operations/vs006-playbook.md`. |
+| Orologio dell'host che arretra o salta (VS-006) | diagnosi (`ClockRegression` / `ClockJumpForward`), nessun riordino; `logical_time` non diminuisce. |
 | Outbox allarmi pieno (VS-005) | batch con transizioni rifiutati (`OUTBOX_CAPACITY_EXCEEDED`), disconnessioni differite, ACK rifiutati; stato `CRITICAL` interrogabile; batch senza transizioni applicati. Senza journal (VS-006) la condizione dura fino al riavvio. |
 | Client HMI ostile sul socket allarmi (VS-005) | uid non autorizzato ⇒ `UNAUTHORIZED` e chiusura; frame > 1024 B, protobuf malformato, versione errata ⇒ errore e chiusura; oltre `max_control_connections` ⇒ `TOO_MANY_CONNECTIONS`; l'actor dell'ACK è sempre l'uid del peer. |
