@@ -82,3 +82,13 @@ Il sequencer non governa l'orologio del SO. Un thread diagnostico (periodo `[tim
 - Il `TimeAuthority` vede solo l'orologio dell'host: un host con orologio sbagliato e stabile produce `sequenced_at` sbagliati ma monotoni; solo il confronto con una fonte esterna lo rivela.
 - I timestamp di sorgente sono quanto dichiarato dal driver.
 - Le prove di salto d'orologio usano un orologio iniettato (`--test-clock-offset-file`), non un vero step del clock del SO (che richiederebbe privilegi sull'host di test): **NOT TESTED WITH A REAL OS CLOCK STEP**.
+
+## 10. Verifica (a implementazione conclusa)
+
+Prove: matrice T01–T30 di [`docs/traceability.md`](../traceability.md) (VS-006). Scostamenti dal disegno:
+
+1. **Trasporto dei timestamp di sorgente:** campo parallelo `ObservationBatch.source_timestamps_utc_ns = 7` invece di `Observation.source_timestamp_utc_ns = 4` (§6, motivo: bound di memoria VS-005).
+2. **Default `clock_regression_alert_ms` = 1** (prima stesura 1000; allineato al brief): qualunque regressione del realtime osservata fra due operazioni applicate è registrata; la soglia serve solo a sopprimere rumore se l'operatore lo decide.
+3. **Chiavi non implementate:** `clock_uncertainty_alert_ms` (previsto dal brief) non esiste; l'incertezza dell'host è solo esposta in `GetTimeStatus` quando un probe la fornisce, senza allarme.
+4. **Probe dell'host:** il thread `scada-time-probe` esiste solo se `host_sync_probe ≠ "none"`; con il default la qualità resta `Unknown`. Il parser di `chronyc tracking` è testato su testo campione, non contro un demone reale; nessun test esegue `chronyc`/`timedatectl` sull'host di prova.
+5. **Salti d'orologio:** provati solo con orologio iniettato (`--test-clock-offset-file`): **NOT TESTED WITH A REAL OS CLOCK STEP** (§9).

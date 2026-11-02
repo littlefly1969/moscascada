@@ -57,8 +57,18 @@ if command -v buf >/dev/null; then echo "== proto"; ./scripts/check-proto.sh; el
 if rustup target list --installed | grep -q aarch64-unknown-linux-gnu; then
   # Criterion (bench dev-dependency) pulls a C build script that needs an aarch64 C
   # compiler; the benchmark harness is checked without its dev targets.
+  # VS-006: scada-journal bundles SQLite (C), so it and its dependents (scada-runtime,
+  # scada-bench) also need an aarch64 C cross compiler (CC_aarch64_unknown_linux_gnu or
+  # aarch64-linux-gnu-gcc). Without one only the pure-Rust crates are checked, and that
+  # is said explicitly.
   echo "== aarch64 compile check (not a runtime proof: NOT TESTED ON HARDWARE)"
-  cargo check --workspace --all-targets --exclude scada-bench --target aarch64-unknown-linux-gnu
-  cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
+  if [ -n "${CC_aarch64_unknown_linux_gnu:-}" ] || command -v aarch64-linux-gnu-gcc >/dev/null; then
+    cargo check --workspace --all-targets --exclude scada-bench --target aarch64-unknown-linux-gnu
+    cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
+  else
+    cargo check --workspace --all-targets --exclude scada-bench --exclude scada-runtime --exclude scada-journal \
+      --target aarch64-unknown-linux-gnu
+    echo "aarch64: scada-journal, scada-runtime, scada-bench NOT CHECKED (no aarch64 C cross compiler for SQLite)"
+  fi
 fi
 echo "ALL CHECKS PASSED"

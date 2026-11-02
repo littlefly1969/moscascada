@@ -1,0 +1,5 @@
+# vs006 soak 2026-11-02T00:34:55Z host=Linux 6.18.44-fc-v185 x86_64 minutes=30
+# /tmp/claude-0/vs006-bin/scada-bench alarm-storm --kernel /tmp/claude-0/vs006-bin/scada-kernel --label SOAK_ct_journal --alarms 1:65536:storm --clients 2 --size 128 --interval-us 2000 --persistence full --secs 1800 --warmup-secs 5
+# rss_sample t_min=1 pid=275 VmHWM:	 28392 kB VmRSS:	 28392 kB 
+# rss_sample t_min=2 pid=275 VmHWM:	 28800 kB VmRSS:	 28800 kB 
+# rss_sample t_min=3 pid=275 VmHWM:	 30936 kB VmRSS:	 30936 kB 

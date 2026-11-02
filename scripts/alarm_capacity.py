@@ -20,7 +20,7 @@ mu (durable releases/s):
     process restarts (scenario `vs005_mu_0`, kept for comparison);
   * with the VS-006 journal, mu = the MEASURED journal rate (level A, scenario
     `vs006_journal_measured`): the smallest of the process storm rate with the journal
-    as sink (alarm-storm sink=journal, storm60 PASS) and the in-process journal rate at
+    as sink (alarm-storm sink=journal, unthrottled, safety PASS: released_s) and the in-process journal rate at
     the closest measured fan-out not above --events-per-op (events/s grows with
     fan-out, so the lower cell is the conservative one);
   * `--durable-rate` is an ASSUMPTION (e.g. other storage): scenario `vs006_projection`,
@@ -109,7 +109,9 @@ def _parse_file(path, a):
                                               "recover_ms": _num(kv, "recover_ms"),
                                               "replayed_ops": _num(kv, "replayed_ops")})
                 continue
-            if (kind == "alarm-storm" and kv.get("sink") == "journal" and kv.get("storm60") == "PASS"
+            # Journal as sink, unthrottled producers: the released rate is the durable drain
+            # the journal sustained (saturated storms refuse the excess: that is the point).
+            if (kind == "alarm-storm" and kv.get("sink") == "journal"
                     and kv.get("safety") == "PASS" and kv.get("interval_us", "0") == "0"
                     and not re.search(r"slow|stall|NORMAL", kv.get("label", ""))):
                 a["journal_storm_released_s"].append(float(kv["released_s"]))
@@ -256,7 +258,7 @@ def model(args, measured):
         if lam > mu_measured:
             out["warnings"].append(
                 f"event rate {lam}/s exceeds the measured durable journal rate {mu_measured:.0f}/s: the outbox fills, "
-                "then transitions are refused (OUTBOX_CAPACITY_EXCEEDED), never silently lost")
+                "then input is refused (JOURNAL_QUEUE_FULL or OUTBOX_CAPACITY_EXCEEDED, whichever fills first), never silently lost")
     # Journal queue (operations, including zero-event ones) and disk.
     mu_ops = A["journal_ops_s_zero_event"] if epo == 0 else A["journal_ops_s_in_process_at_fanout"]
     j = {"mu_ops_s_measured": mu_ops}

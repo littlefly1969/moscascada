@@ -251,3 +251,18 @@ Rischi esaminati e come il disegno li chiude:
 | Nessun falso `Good`, `Returned`, ACK o continuità dopo il riavvio | che non siano andati persi eventi fisici durante il fermo |
 | Rifiuti tipizzati prima della mutazione a coda/disco pieni | latenza durevole bounded (dipende dallo storage; è misurata, non promessa) |
 | Storico interrogabile oltre la dimensione del ring | exactly-once verso sistemi esterni (fuori ambito) |
+
+## 8. Verifica (a implementazione conclusa)
+
+Le prove sono nella matrice T01–T30 di [`docs/traceability.md`](../traceability.md) (sezione VS-006) e i numeri grezzi in [`docs/benchmarks/vs006.md`](../benchmarks/vs006.md) / `docs/benchmarks/results/vs006/`. Qui si registrano solo gli **scostamenti** dal disegno scritto prima del codice; ogni scostamento è deliberato e dichiarato.
+
+1. **Retention (D13) implementata in forma ridotta.**
+   - Implementato: `[persistence] compact_replay_payloads` (default **false**, opt-in). Dopo un checkpoint riuscito il writer svuota i *payload di replay* di `journal_operations` fino all'operazione del più vecchio dei **≥ 2** checkpoint conservati, a blocchi di 20 000 righe (al più 8 blocchi per checkpoint), con riga in `retention_markers` (`table_name = 'journal_operations.payload'`). Le righe (sequenza, envelope temporale, digest) restano; si rimuove solo il corpo necessario al replay.
+   - Recovery fail-closed: se nessun checkpoint valido copre il prefisso compattato, l'avvio è rifiutato con un errore `Corrupt` che cita la compattazione (test `replay_payload_compaction_is_explicit_and_fail_closed`).
+   - **Non implementato:** cancellazione delle righe di `journal_operations` e `history_max_events` (potatura di `alarm_events`). Lo storico cresce senza limite salvo `max_db_bytes`, che **ferma l'ammissione** (`DISK_FULL`), mai cancella. Dichiarato come limite.
+2. **Comportamento di receipt con disco pieno.** Con `SQLITE_FULL` il gruppo viene riprovato con backoff (20 ms → 1 s); i receipt durevoli restano **in attesa** (nessun `APPLIED_DURABLE`, nessun `APPLIED_NOT_DURABLE`) finché il commit non riesce o il writer entra in `FAULT`. Solo `FAULT` produce `APPLIED_NOT_DURABLE`. L'ammissione nel frattempo rifiuta con `DISK_FULL` (46).
+3. **Default allineati al brief** (la prima stesura ne aveva di diversi): `journal_queue_operations` 4096 → **65536**; il bound in byte `journal_queue_bytes` (default 64 MiB) resta il limite di memoria effettivo della coda. Il valore non è stato ottimizzato con misure: le tempeste di `vs006.md` §4 girano con questo default.
+4. **Chiavi di configurazione diverse dal brief:** non esiste `recovery_mode` (il recovery è sempre fail-closed; il recupero distruttivo è solo nello strumento offline `scada-journal`); la pagina historian si chiama `max_history_page` (non `max_history_query_page`, il nome usato in D12). `[persistence] enabled = false` equivale a sezione assente e fa ignorare anche `[time]`.
+5. **Hint d'indice nell'historian.** `QueryAlarmHistory` filtrata per `alarm_id` usa `INDEXED BY alarm_events_by_alarm`: senza l'hint il planner di SQLite percorreva il range della chiave primaria (misurato 100 ms p50 su 6 M righe con 20 000 allarmi). È un accoppiamento esplicito allo schema v1: se l'indice venisse rinominato la query fallirebbe (errore, non risultato sbagliato).
+6. **Wire 1.2:** i timestamp di sorgente viaggiano in un campo parallelo di `ObservationBatch` invece che in `Observation` (motivo e misura in ADR 0014 §6).
+7. **Non verificato:** power loss reale (solo kill -9 e fault injection del processo), ARM64 hardware (**NOT TESTED ON HARDWARE**), fsync della VM probabilmente assorbito da una write cache dell'hypervisor (~0,23 ms): le latenze durevoli misurate sono un **limite inferiore** rispetto a un disco fisico.
