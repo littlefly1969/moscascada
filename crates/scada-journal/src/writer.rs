@@ -82,7 +82,7 @@ const COMPACT_CHUNKS_PER_CHECKPOINT: u32 = 8;
 pub const COMPACTED_TABLE: &str = "journal_operations.payload";
 
 /// Result of one group transaction.
-struct Written {
+pub(crate) struct Written {
     first_op: u64,
     last_op: u64,
     ops: u64,
@@ -451,7 +451,7 @@ impl Writer {
     }
 }
 
-fn write_rows(
+pub(crate) fn write_rows(
     c: &Connection,
     tl: i64,
     boot: u64,

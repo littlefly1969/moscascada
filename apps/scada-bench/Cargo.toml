@@ -14,6 +14,10 @@ scada-sim-driver = { path = "../scada-sim-driver" }
 scada-journal.workspace = true
 rusqlite.workspace = true
 
+[features]
+# EXP-001: `scada-bench owal ...` (open-wal journal variants B and C). Off by default.
+experimental-open-wal = ["scada-journal/experimental-open-wal"]
+
 [lints.rust]
 # The counting global allocator needs `unsafe impl GlobalAlloc` (ADR 0003). Benchmark-only
 # binary, never deployed; every other crate keeps `forbid(unsafe_code)`.

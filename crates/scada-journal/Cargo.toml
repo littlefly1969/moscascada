@@ -16,6 +16,13 @@ scada-core.workspace = true
 blake3.workspace = true
 rusqlite = { workspace = true }
 rustix = { workspace = true }
+open-wal = { workspace = true, optional = true }
+
+[features]
+# EXP-001 spike: open-wal 0.2.1 binary journal as an EXPERIMENTAL backend of the
+# authoritative journal only (module `owal`). Off by default: ordinary builds neither
+# compile nor link it, and SQLite stays the default and the production baseline.
+experimental-open-wal = ["dep:open-wal"]
 
 [dev-dependencies]
 proptest.workspace = true

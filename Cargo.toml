@@ -43,6 +43,9 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 # VS-006 (ADR 0013 D1): SQLite compiled from the bundled amalgamation (no system library).
 rusqlite = { version = "0.41.1", features = ["bundled"] }
+# EXP-001 (docs/experiments/exp-001-open-wal-backend.md): experimental journal backend,
+# exact pin, only behind the `experimental-open-wal` feature of scada-journal / scada-bench.
+open-wal = { version = "=0.2.1", default-features = false }
 rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "time", "process"] }
 
 [profile.release]

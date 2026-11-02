@@ -14,6 +14,8 @@
 
 pub mod codec;
 pub mod fault;
+#[cfg(feature = "experimental-open-wal")]
+pub mod owal;
 pub mod progress;
 pub mod reader;
 pub mod reconcile;
