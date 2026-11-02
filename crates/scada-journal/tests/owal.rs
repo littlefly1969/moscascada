@@ -115,12 +115,49 @@ struct Pipe {
     det: bool,
 }
 
+/// Serializes child-process creation against store (re)opens in this test binary.
+///
+/// Store locks are `flock` on an `O_CLOEXEC` descriptor. A child being created by another
+/// test thread holds a copy of every open descriptor until its `exec` has closed them; a
+/// store dropped in that window stays locked, and an immediate reopen of the same store
+/// fails with `Locked` (seen on GitHub Actions in `t02_t03_crash_at_every_fault_point`).
+/// `Command::spawn` returns before that close is guaranteed to have happened (with
+/// `CLONE_VFORK` the parent resumes when the child releases the parent's memory, before
+/// close-on-exec runs), so every spawn here holds the gate until the child has produced
+/// output or exited, and every open first takes the gate once. No retry: a genuine double
+/// open still fails.
+static SPAWN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn spawn_gate() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn fence() {
+    drop(spawn_gate());
+}
+
+/// Spawn under the gate and return only once the child has exec'd (first output line read,
+/// or end of output): from then on it holds no copy of this process's descriptors.
+fn spawn_settled(cmd: &mut Command) -> (std::process::Child, BufReader<std::process::ChildStdout>, Option<String>) {
+    let _g = spawn_gate();
+    let mut child = cmd.spawn().unwrap();
+    let mut r = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    let got = r.read_line(&mut first).unwrap_or(0);
+    (child, r, (got > 0).then(|| first.trim_end_matches('\n').to_owned()))
+}
+
+fn fenced_open(dir: &Path, o: OwalOptions, fp: [u8; 32]) -> Result<(OwalStore, open_wal::Wal), JournalError> {
+    fence();
+    OwalStore::open(dir, o, fp)
+}
+
 fn recover_owal(
     dir: &Path,
     o: OwalOptions,
     cfg: Arc<ValidatedConfig>,
 ) -> Result<(OwalStore, open_wal::Wal, owal::Recovered), JournalError> {
-    let (st, wal) = OwalStore::open(dir, o, cfg.fingerprint())?;
+    let (st, wal) = fenced_open(dir, o, cfg.fingerprint())?;
     let r = owal::recover(&st, &wal, cfg)?;
     Ok((st, wal, r))
 }
@@ -137,6 +174,7 @@ impl Pipe {
         commit_max: usize,
         tweak: impl FnOnce(&mut OwalWriterOptions),
     ) -> Pipe {
+        fence();
         let (tx, rx) = sync_channel(4096);
         match b {
             Backend::Sqlite(path) => {
@@ -610,6 +648,7 @@ fn t01_sqlite_and_owal_projection_are_equivalent() {
     drop((ca, cc));
     // Recovery from each authority equals the live kernel.
     let (_s, _w, rc) = recover_owal(&c_dir, small_wal(), cfg.clone()).unwrap();
+    fence();
     let sa = Store::open(&sqlite_opts(&a_path), cfg.fingerprint()).unwrap();
     let ra = recover(&sa.conn, sa.info.timeline_no, cfg.clone()).unwrap();
     let (da, dc, last) = digests[1];
@@ -622,7 +661,7 @@ fn t01_sqlite_and_owal_projection_are_equivalent() {
     drop(_w);
     // T08: lose the projection and rebuild it from the log only.
     std::fs::remove_file(&c_proj).unwrap();
-    let (st, wal) = OwalStore::open(&c_dir, small_wal(), cfg.fingerprint()).unwrap();
+    let (st, wal) = fenced_open(&c_dir, small_wal(), cfg.fingerprint()).unwrap();
     let mut pr =
         Projector::rebuild(&c_proj, Durability::NormalBenchmarkOnly, cfg.fingerprint(), st.manifest.timeline_id)
             .unwrap();
@@ -799,13 +838,15 @@ fn run_child(spec: &str, kill_after: Option<Duration>, wrap: Option<&str>) -> Ch
         }
     };
     cmd.env(CHILD_ENV, spec).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = cmd.spawn().unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let (mut child, stdout, first) = spawn_settled(&mut cmd);
     let killer = kill_after.map(|d| {
         let pid = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(d);
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            let _g = spawn_gate();
+            if let Ok(mut k) = Command::new("kill").arg("-9").arg(pid.to_string()).spawn() {
+                let _ = k.wait();
+            }
         })
     });
     let mut out = ChildOut {
@@ -816,7 +857,7 @@ fn run_child(spec: &str, kill_after: Option<Duration>, wrap: Option<&str>) -> Ch
         recovered: None,
         status: Default::default(),
     };
-    for line in BufReader::new(stdout).lines() {
+    for line in first.into_iter().map(Ok).chain(stdout.lines()) {
         let Ok(line) = line else { break };
         let mut w = line.splitn(3, ' ');
         match (w.next(), w.next(), w.next()) {
@@ -995,7 +1036,7 @@ fn t03_projection_ahead_of_a_truncated_log_is_detected() {
     let _ = p.close();
     let active = segments(&dir).last().unwrap().clone();
     flip(&active, used_bytes(&active) - 3);
-    let (st, wal) = OwalStore::open(&dir, small_wal(), config_with(64).fingerprint()).unwrap();
+    let (st, wal) = fenced_open(&dir, small_wal(), config_with(64).fingerprint()).unwrap();
     let mut pr =
         Projector::open(&proj, Durability::NormalBenchmarkOnly, config_with(64).fingerprint(), st.manifest.timeline_id)
             .unwrap();
@@ -1032,20 +1073,20 @@ fn t03_identity_configuration_and_single_writer() {
     let dir = private(d.path(), "w").join("owal");
     build(&dir, 50, 0);
     // Second writer.
-    let (_s, _w) = OwalStore::open(&dir, small_wal(), config_with(64).fingerprint()).unwrap();
-    let e = err_of(OwalStore::open(&dir, small_wal(), config_with(64).fingerprint()));
+    let (_s, _w) = fenced_open(&dir, small_wal(), config_with(64).fingerprint()).unwrap();
+    let e = err_of(fenced_open(&dir, small_wal(), config_with(64).fingerprint()));
     assert!(matches!(e, JournalError::Locked(_)), "{e}");
     drop((_s, _w));
     // Other configuration.
-    let e = err_of(OwalStore::open(&dir, small_wal(), fanout_config(1).fingerprint()));
+    let e = err_of(fenced_open(&dir, small_wal(), fanout_config(1).fingerprint()));
     assert!(matches!(e, JournalError::Incompatible(_)), "{e}");
     // Damaged manifest.
     flip(&dir.join("MANIFEST"), 30);
-    let e = err_of(OwalStore::open(&dir, small_wal(), config_with(64).fingerprint()));
+    let e = err_of(fenced_open(&dir, small_wal(), config_with(64).fingerprint()));
     assert!(matches!(e, JournalError::Corrupt(_)), "{e}");
     // Lost manifest with segments present.
     std::fs::remove_file(dir.join("MANIFEST")).unwrap();
-    let e = err_of(OwalStore::open(&dir, small_wal(), config_with(64).fingerprint()));
+    let e = err_of(fenced_open(&dir, small_wal(), config_with(64).fingerprint()));
     assert!(matches!(e, JournalError::Corrupt(_)), "{e}");
 }
 
@@ -1114,7 +1155,11 @@ fn t04_real_write_failure_poisons_and_faults() {
 /// unprivileged user/mount namespaces are not available.
 #[test]
 fn t04_real_enospc_at_segment_preallocation() {
-    if !Command::new("unshare").args(["-rm", "true"]).status().is_ok_and(|s| s.success()) {
+    let probe = {
+        let _g = spawn_gate();
+        Command::new("unshare").args(["-rm", "true"]).stderr(Stdio::null()).spawn().and_then(|mut c| c.wait())
+    };
+    if !probe.is_ok_and(|s| s.success()) {
         eprintln!("SKIPPED: unshare -rm not available");
         return;
     }
@@ -1130,14 +1175,13 @@ fn t04_real_enospc_at_segment_preallocation() {
         m = mnt.display(),
         d = dir.display()
     );
-    let mut child = Command::new("unshare")
-        .args(["-rm", "sh", "-c", &prefix])
-        .arg(&exe)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let (mut child, stdout, first) = spawn_settled(
+        Command::new("unshare")
+            .args(["-rm", "sh", "-c", &prefix])
+            .arg(&exe)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
     let mut out = ChildOut {
         applied: BTreeMap::new(),
         durable: 0,
@@ -1146,7 +1190,7 @@ fn t04_real_enospc_at_segment_preallocation() {
         recovered: None,
         status: Default::default(),
     };
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+    for line in first.into_iter().chain(stdout.lines().map_while(Result::ok)) {
         let mut w = line.splitn(3, ' ');
         match (w.next(), w.next(), w.next()) {
             (Some("A"), Some(s), Some(dg)) => {

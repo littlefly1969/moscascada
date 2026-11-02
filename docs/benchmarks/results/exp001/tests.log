@@ -91,3 +91,11 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 exit=0
+
+# 2026-11-02 follow-up to review: CI failure Locked in t02_t03_crash_at_every_fault_point
+# before fix (54baf49 tests): 1 failure in 6 release runs and 1 in 8 debug runs at --test-threads=16
+#   (owal "Locked" in t02_t03..., SQLite p.db.lock "journal locked" in t08...)
+# after fix (spawn_settled + fence in tests/owal.rs):
+#   cargo test --release -p scada-journal --features experimental-open-wal --test owal -- --test-threads=16  x40: 0 failed
+#   cargo test -p scada-journal --features experimental-open-wal --test owal -- --test-threads=16            x20: 0 failed
+# t04_real_enospc_at_segment_preallocation runs here; on GitHub Actions it prints SKIPPED (unshare -rm denied).
