@@ -19,6 +19,37 @@ jobs:
       - name: Runtime tests in release, current_thread
         run: cargo build --release -p scada-sim-driver -p scada-journal && cargo test --release -p scada-runtime
 
+  exp001-open-wal:
+    # EXP-001 spike (docs/experiments/exp-001-report.md): experimental open-wal journal
+    # backend, off by default. Separate from the stable gate on purpose.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: fmt + clippy with the feature on
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p scada-journal --features experimental-open-wal --all-targets -- -D warnings
+          cargo clippy -p scada-bench --features experimental-open-wal --bins -- -D warnings
+      - name: Default builds do not contain open-wal
+        run: |
+          if cargo tree -p scada-journal -e normal | grep -q open-wal; then echo "open-wal leaked into the default build" >&2; exit 1; fi
+          if cargo tree -p scada-runtime -e normal | grep -q open-wal; then echo "open-wal leaked into scada-runtime" >&2; exit 1; fi
+      - name: EXP-001 tests (T01-T11; T04 ENOSPC needs unprivileged user namespaces, else SKIPPED)
+        run: |
+          cargo test -p scada-journal --features experimental-open-wal
+          cargo test --release -p scada-journal --features experimental-open-wal --test owal -- --nocapture
+      - name: aarch64 compile check (NOT a hardware test)
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc cargo check -p scada-journal --features experimental-open-wal \
+            --all-targets --target aarch64-unknown-linux-gnu
+      - name: Benchmark harness smoke (tiny, not a measurement)
+        run: |
+          cargo build --release -p scada-bench --features experimental-open-wal
+          for v in a b c; do target/release/scada-bench exp001 --variant $v --store "$RUNNER_TEMP/exp001" --ops 2000 --rebuild; done
+
   fuzz-smoke:
     # Separate from the stable gate: cargo-fuzz needs nightly (libFuzzer + sanitizers).
     runs-on: ubuntu-latest
@@ -40,3 +71,5 @@ jobs:
         run: mkdir -p fuzz/corpus/alarm_transitions && cd fuzz && cargo +nightly fuzz run -O alarm_transitions corpus/alarm_transitions -- -max_total_time=60
       - name: journal_decode (60 s, VS-006)
         run: mkdir -p fuzz/corpus/journal_decode && cd fuzz && cargo +nightly fuzz run -O journal_decode corpus/journal_decode -- -max_total_time=60
+      - name: owal_envelope_decode (60 s, EXP-001, experimental feature)
+        run: mkdir -p fuzz/corpus/owal_envelope_decode && cd fuzz && cargo +nightly fuzz run -O --features exp001 owal_envelope_decode corpus/owal_envelope_decode -- -max_total_time=60

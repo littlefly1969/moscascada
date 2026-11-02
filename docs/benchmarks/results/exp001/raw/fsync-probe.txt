@@ -1,0 +1,9 @@
+# target/release/scada-bench fsync-probe --store /home/claude/benchstore --n 3000 --size 512
+# exit=0 wall_s=0.6
+kind=fsync-probe fs=/dev/vda:ext4 n=3000 append_bytes=512 fdatasync_us_p50=178 fdatasync_us_p99=568 fdatasync_us_p999=1430 fdatasync_us_max=2670
+# target/release/scada-bench fsync-probe --store /home/claude/benchstore --n 3000 --size 4096
+# exit=0 wall_s=0.9
+kind=fsync-probe fs=/dev/vda:ext4 n=3000 append_bytes=4096 fdatasync_us_p50=253 fdatasync_us_p99=759 fdatasync_us_p999=1810 fdatasync_us_max=3525
+# target/release/scada-bench fsync-probe --store /home/claude/benchstore --n 3000 --size 65536
+# exit=0 wall_s=1.6
+kind=fsync-probe fs=/dev/vda:ext4 n=3000 append_bytes=65536 fdatasync_us_p50=413 fdatasync_us_p99=1205 fdatasync_us_p999=3006 fdatasync_us_max=5302

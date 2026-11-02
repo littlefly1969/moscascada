@@ -607,7 +607,12 @@ mod tests {
             b.extend_from_slice(&(body.len() as u32).to_le_bytes());
             b.extend_from_slice(&open_wal::crc32c(&body).to_le_bytes());
             b.extend_from_slice(&body);
-            let _ = decode(&b);
+            if let Ok(d) = decode(&b) {
+                // Canonical: whatever decodes re-encodes to the same bytes.
+                let (mut out, mut scratch) = (Vec::new(), Vec::new());
+                encode(&d.record, &d.timeline_id, d.boot_generation, &mut out, &mut scratch);
+                prop_assert_eq!(out, b);
+            }
         }
 
         #[test]

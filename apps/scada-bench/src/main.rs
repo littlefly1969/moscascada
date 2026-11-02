@@ -15,6 +15,8 @@
 //!       [--sink drain|stopped] [--sink-page P]   VS-005 process storm, PASS/FAIL line
 //!       VS-006: with --persistence the journal is the sink (released = durable watermark);
 //!       [--stall-at S --stall-for S] stalls the journal writer in the window (catch-up)
+//! scada-bench exp001 --variant a|b|c --store DIR --ops N ...   EXP-001 (feature
+//!       experimental-open-wal): SQLite vs open-wal vs open-wal + derived projection
 //! scada-bench journal --store DIR --ops N [--events-per-op E] ...   VS-006 in-process
 //!       journal/historian: durable μ, fsync/s, bytes/event, queries, recovery
 //! VS-006 process options: --persistence LINES (`full` or `key = v;key = v`),
@@ -55,6 +57,8 @@
 
 mod alarms;
 mod alloc;
+#[cfg(feature = "experimental-open-wal")]
+mod exp001;
 mod journal;
 
 use std::io::{BufRead, BufReader, Write};
@@ -186,6 +190,10 @@ fn main() {
         ),
         "alarm-storm" => alarms::alarm_storm(&KernelSpec::from_args()),
         "journal" => journal::journal_bench(),
+        #[cfg(feature = "experimental-open-wal")]
+        "exp001" => exp001::exp001_bench(),
+        #[cfg(feature = "experimental-open-wal")]
+        "fsync-probe" => exp001::fsync_probe(),
         "e2e" => e2e_bench(&KernelSpec::from_args(), arg("--secs", 10), arg("--warmup-secs", 2)),
         "saturation" => saturation(&KernelSpec::from_args(), arg("--secs", 60), arg("--clients", 8) as u32),
         "cell" => {

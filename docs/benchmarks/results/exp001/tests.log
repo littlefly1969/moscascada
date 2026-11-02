@@ -1,0 +1,93 @@
+   Compiling libc v0.2.191
+   Compiling scada-journal v0.1.0 (/home/claude/moscascada/crates/scada-journal)
+   Compiling getrandom v0.4.3
+   Compiling rand v0.10.3
+   Compiling tempfile v3.27.0
+   Compiling proptest v1.12.0
+    Finished `release` profile [optimized + debuginfo] target(s) in 48.48s
+     Running unittests src/lib.rs (target/release/deps/scada_journal-88524bfb0eaa00c4)
+
+running 13 tests
+test codec::tests::checkpoint_roundtrip ... ok
+test codec::tests::decoders_never_panic ... ok
+test codec::tests::op_roundtrip_and_strict ... ok
+test codec::tests::decoded_is_canonical ... ok
+test owal::envelope::tests::every_truncation_and_single_bit_flip_is_rejected ... ok
+test owal::envelope::tests::roundtrip_keeps_every_field ... ok
+test codec::tests::source_times_roundtrip ... ok
+test reconcile::tests::buffered_complete_only_with_proof ... ok
+test reconcile::tests::buffered_without_baseline_is_unknown_and_overflow_is_gap ... ok
+test reconcile::tests::legacy_rules ... ok
+test owal::envelope::tests::forged_crc_body_is_bounded ... ok
+test owal::envelope::tests::decoder_never_panics_on_garbage ... ok
+test owal::envelope::tests::roundtrip_random_sizes ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/bin/scada-journal.rs (target/release/deps/scada_journal-f2dc706d8a8aa90d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/journal.rs (target/release/deps/journal-283d6c70dbe6af3b)
+
+running 10 tests
+journal: FAULT, no further commit: journal I/O error: TEST: simulated EIO at commit
+test eio_is_a_fault ... ok
+test incompatible_store_is_refused ... ok
+test genesis_replay_and_resume ... ok
+test corruption_is_fail_closed ... ok
+test historian_pages_beyond_the_ring ... ok
+test single_writer_and_permissions ... ok
+test missing_operation_or_event_is_fail_closed ... ok
+test recovery_equals_live_kernel ... ok
+test replay_payload_compaction_is_explicit_and_fail_closed ... ok
+journal: FAULT, no further commit: journal SQLite error: database or disk is full
+test sqlite_full_publishes_nothing_and_recovers ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/owal.rs (target/release/deps/owal-26cd8831717123f4)
+
+running 15 tests
+test child_entry ... ok
+test t03_identity_configuration_and_single_writer ... ok
+test t03_projection_ahead_of_a_truncated_log_is_detected ... ok
+sigkill round 0: 171 ms, acknowledged 2450, applied 2450, recovered 2450
+test t03_damaged_checkpoints_fall_back_then_genesis ... ok
+test t02_t03_crash_at_every_fault_point ... ok
+sigkill round 1: 228 ms, acknowledged 3470, applied 3470, recovered 3470
+test t01_sqlite_and_owal_projection_are_equivalent ... ok
+test t04_real_enospc_at_segment_preallocation ... ok
+journal(open-wal): FAULT, no further commit: TEST: simulated EIO at commit
+test t04_simulated_eio_faults_and_recovers ... ok
+test t04_real_write_failure_poisons_and_faults ... ok
+test t08_projection_follows_status_change_without_event ... ok
+journal(open-wal): FAULT, no further commit: operation 2 encodes to 11580 B > max_record_size 4096 (RecordTooLarge)
+test t05_fanout_bursts_fit_one_record_and_oversize_is_refused_before_apply ... ok
+sigkill round 2: 155 ms, acknowledged 2710, applied 2739, recovered 2718
+test t10_log_not_starting_at_one_is_refused_and_a_missing_middle_segment_too ... ok
+t11 outcomes: {"corrupt": 30, "prefix": 30}
+sigkill round 3: 394 ms, acknowledged 5463, applied 5494, recovered 5479
+test t11_random_segment_corruption_never_panics_and_never_lies ... ok
+sigkill round 4: 130 ms, acknowledged 2372, applied 2422, recovered 2388
+test t03_torn_tail_is_truncated_and_mid_log_corruption_is_fatal ... ok
+sigkill round 5: 277 ms, acknowledged 4944, applied 4944, recovered 4944
+sigkill round 6: 196 ms, acknowledged 3570, applied 3570, recovered 3570
+sigkill round 7: 97 ms, acknowledged 1833, applied 1902, recovered 1852
+sigkill round 8: 195 ms, acknowledged 3738, applied 3767, recovered 3738
+sigkill round 9: 397 ms, acknowledged 7535, applied 7535, recovered 7535
+sigkill round 10: 152 ms, acknowledged 2874, applied 2874, recovered 2874
+sigkill round 11: 77 ms, acknowledged 1336, applied 1399, recovered 1352
+test t03_random_sigkill ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.73s
+
+   Doc-tests scada_journal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0

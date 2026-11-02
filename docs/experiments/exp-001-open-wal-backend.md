@@ -1,6 +1,6 @@
 # EXP-001 — Spike open-wal: journal binario come backend sperimentale di MoScada
 
-**Stato: SPECIFICA DI ESPERIMENTO / DRAFT.** Questo documento avvia il lavoro; non costituisce implementazione, benchmark o prova di durabilità. Non rilasciare in produzione. La PR parte dal commit VS-006 3a409caca6cf8ca8793233c2bb2e931e1f3cfc21 e ha temporaneamente come base il branch della PR #6, ancora non mergiata. **Non mergiare PR #6 o questa PR automaticamente.**
+**Stato: SPECIFICA DI ESPERIMENTO / DRAFT.** Esito dello spike: [`exp-001-report.md`](exp-001-report.md) (raccomandazione: mantenere SQLite). Questo documento avvia il lavoro; non costituisce implementazione, benchmark o prova di durabilità. Non rilasciare in produzione. La PR parte dal commit VS-006 3a409caca6cf8ca8793233c2bb2e931e1f3cfc21 e ha temporaneamente come base il branch della PR #6, ancora non mergiata. **Non mergiare PR #6 o questa PR automaticamente.**
 
 ## 0. Missione e confini
 

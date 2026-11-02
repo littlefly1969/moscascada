@@ -1,0 +1,46 @@
+date_utc: 2026-11-02T19:29:55Z
+uname: {'system': 'Linux', 'node': 'vm', 'release': '6.18.44-fc-v185', 'version': '#1 SMP PREEMPT_DYNAMIC @0', 'machine': 'x86_64', 'processor': 'x86_64'}
+cpu: Architecture:                            x86_64
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) Processor @ 2.10GHz
+Hypervisor vendor:                       KVM
+mem: total        used        free      shared  buff/cache   available
+Mem:           16091         527       14544          15        1264       15563
+fs: /dev/vda       ext4 264212084 11186028  29129924  28% /
+mount: /dev/vda ext4   rw,relatime,discard,no_prefetch_block_bitmaps,resv_strict,resuid=65534,resgid=65534
+block: NAME  ROTA   SIZE MODEL
+zram0    0     0B 
+vda      1   256G 
+vdb      1   9.4M 
+vdc      1 344.7M 
+vdd      1  48.3M 
+vde      1   696K 
+vdf      1   5.8M
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+git: 506a9755edb31d92844c44c4b2421b1ddd22acb2
+open_wal: version = "0.2.1"
+rusqlite: version = "0.41.1"
+
+date_utc: 2026-11-02T19:55:17Z
+uname: {'system': 'Linux', 'node': 'vm', 'release': '6.18.44-fc-v185', 'version': '#1 SMP PREEMPT_DYNAMIC @0', 'machine': 'x86_64', 'processor': 'x86_64'}
+cpu: Architecture:                            x86_64
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) Processor @ 2.10GHz
+Hypervisor vendor:                       KVM
+mem: total        used        free      shared  buff/cache   available
+Mem:           16091         551       14499          15        1286       15539
+fs: /dev/vda       ext4 264212084 11187764  29128188  28% /
+mount: /dev/vda ext4   rw,relatime,discard,no_prefetch_block_bitmaps,resv_strict,resuid=65534,resgid=65534
+block: NAME  ROTA   SIZE MODEL
+zram0    0     0B 
+vda      1   256G 
+vdb      1   9.4M 
+vdc      1 344.7M 
+vdd      1  48.3M 
+vde      1   696K 
+vdf      1   5.8M
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+git: 506a9755edb31d92844c44c4b2421b1ddd22acb2
+open_wal: version = "0.2.1"
+rusqlite: version = "0.41.1"
+

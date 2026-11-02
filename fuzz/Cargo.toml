@@ -4,6 +4,7 @@
 #   cargo +nightly fuzz run batch_validation
 #   cargo +nightly fuzz run supervision_transitions   (VS-004)
 #   cargo +nightly fuzz run journal_decode            (VS-006)
+#   cargo +nightly fuzz run --features exp001 owal_envelope_decode   (EXP-001, open-wal spike)
 [package]
 name = "scada-fuzz"
 version = "0.0.0"
@@ -19,6 +20,10 @@ scada-core = { path = "../crates/scada-core" }
 scada-protocol = { path = "../crates/scada-protocol" }
 scada-runtime = { path = "../crates/scada-runtime" }
 scada-journal = { path = "../crates/scada-journal" }
+
+[features]
+# EXP-001: the experimental open-wal journal backend (off by default).
+exp001 = ["scada-journal/experimental-open-wal"]
 
 [workspace]
 members = ["."]
@@ -71,3 +76,11 @@ path = "fuzz_targets/journal_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "owal_envelope_decode"
+path = "fuzz_targets/owal_envelope_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["exp001"]
