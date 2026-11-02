@@ -282,7 +282,28 @@ fn restart_recovers_unverified_then_reconciles() {
     // J6: the restart produced no event (in particular no false Raised/Returned).
     let mut h = hist(&k);
     let events_mid = all_events(&mut h);
-    assert_eq!(events_mid.len(), events_before.len(), "no event from the recovery itself");
+    // The disconnection (drop(s) above) is journaled too and may or may not be durable
+    // before the kill, so its events (input invalid) may follow `events_before`. What J6
+    // forbids is an event from the recovery: every event belongs to an operation of the
+    // first boot (<= the recovered durable operation) and the old events are unchanged.
+    let recovered_op = ready_u64(&k.ready, "durable_op");
+    assert!(events_mid.len() >= events_before.len());
+    // durable_at is written by the *next* commit (ADR 0014 §2): it may be filled in only
+    // after the restart. Everything else must be identical.
+    let strip = |v: &[hpb::HistoryEvent]| -> Vec<hpb::HistoryEvent> {
+        v.iter()
+            .cloned()
+            .map(|mut e| {
+                e.durable_at_utc_ns = None;
+                e
+            })
+            .collect()
+    };
+    assert_eq!(strip(&events_mid[..events_before.len()]), strip(&events_before), "recovered history is unchanged");
+    for e in &events_mid {
+        assert!(e.operation_seq <= recovered_op, "no event from the recovery itself: {e:?}");
+        assert!(!e.reconciliation, "{e:?}");
+    }
     let rec = h.recovery().unwrap();
     assert_eq!(rec.boot_generation, 2);
     let sr = rec.sources.iter().find(|x| x.source_id == SRC).unwrap();
@@ -974,7 +995,10 @@ fn clock_steps_are_diagnosed_not_causal() {
         assert!(w[1].event_seq > w[0].event_seq);
         if w[1].sequenced_at_utc_ns < w[0].sequenced_at_utc_ns {
             regressed += 1;
-            assert!(w[1].clock_regressed || w[1].operation_seq == w[0].operation_seq, "{:?}", w[1]);
+            // REGRESSED is per operation, against the previous *operation*: when operations
+            // without alarm events (watermark advances, deltas that change no alarm) sit
+            // between the two events, the flagged operation may be one of those.
+            assert!(w[1].clock_regressed || w[1].operation_seq > w[0].operation_seq + 1, "{:?} after {:?}", w[1], w[0]);
         }
     }
     for e in &ev {

@@ -565,13 +565,13 @@ Legenda della matrice T01–T30: **PASS** = eseguito e superato in questo reposi
 | T21 ACK durevole perso dopo commit, retry stesso id | PASS | `durable_operator_ack_is_idempotent_across_restart` (stesso esito ed `event_seq`, un solo evento storico) |
 | T22 historian 10 M+ eventi, ring 64k | PASS | bench `rows10M_*` (`results/vs006/journal.txt`): pagine keyset bounded, query per allarme con indice; `historian_pages_beyond_the_ring` |
 | T23 disco e WAL a cap / compaction | PASS | WAL troncato oltre `wal_max_bytes`; `disk_full_refuses_and_publishes_nothing`; compattazione esplicita `replay_payload_compaction_is_explicit_and_fail_closed`. Nessuna retention automatica dello storico (dichiarato) |
-| T24 soak 30–60 min e ripartenza durante storm | PASS | `kill9_during_a_storm_recovers_coherently_every_time`; soak (`results/vs006/soak.txt`, `vs006.md`) |
+| T24 soak 30–60 min e ripartenza durante storm | PARTIAL | ripartenza: `kill9_during_a_storm_recovers_coherently_every_time` (5 cicli kill -9, PASS). Soak 30 min (`results/vs006/soak.txt`, `vs006.md` §5): RSS piatto e safety PASS, ma dopo ≈ 10 min il disco della sessione ha raggiunto il pavimento e il resto è rifiuto `DISK_FULL`: non sono 30 min di accettazione continua |
 | T25 replay deterministico con TimeAuthority iniettato | PASS | `checkpoint_restore_is_transparent`; `replay_emits_nothing`; `time_zone_does_not_change_stored_times` (stessi digest e tempi raw dal journal) |
 | T26 driver non-buffering durante crash | PASS | `continuity_gap_and_new_epoch`, `restart_recovers_unverified_then_reconciles` (Unknown osservabile, nessun Complete) |
 | T27 recovery senza Logic Engine/comandi | PASS | `replay_emits_nothing` (nessun evento, nessun messaggio ai driver durante il recovery); nessun Logic Engine esiste in VS-006 |
 | T28 socket, path, lock, owner, permessi | PASS | `single_writer_and_private_store`, `j/single_writer_and_permissions`; socket historian 0660 + allowlist uid |
 | T29 property/fuzz | PASS | `j:codec` proptest (`op_roundtrip_and_strict`, `decoded_is_canonical`, `decoders_never_panic`), `checkpoint_restore_is_transparent`; fuzz `journal_decode` 300 s, 0 crash (`results/vs006/fuzz_journal_decode.md`), 60 s in CI |
-| T30 ARM64 | PARTIAL | `cargo check --target aarch64-unknown-linux-gnu` in `check.sh`; **NOT TESTED ON HARDWARE** (nessun hardware Micro disponibile) |
+| T30 ARM64 | PARTIAL | `cargo check --target aarch64-unknown-linux-gnu` in `check.sh` (senza cross compiler C per aarch64 solo i crate senza SQLite: `scada-journal`, `scada-runtime`, `scada-bench` NOT CHECKED); **NOT TESTED ON HARDWARE** (nessun hardware Micro disponibile) |
 
 ### Limiti e rischi residui (VS-006)
 

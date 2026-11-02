@@ -697,6 +697,11 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         (Some(h), Some(path)) => Some((server::bind_socket(path, 0o660, cfg.socket_group_gid)?, h)),
         _ => None,
     };
+    // Signal handlers before READY: a supervisor (or test) that sends SIGTERM as soon as it
+    // reads READY must get a clean shutdown, not the default action (found by check.sh:
+    // vs003 policy_is_reported_and_check_config_counts_it, exit by signal 15).
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let alarm_durability = match &journal {
         Some(j) if j.info.durable => "journal",
         Some(_) => "journal_not_durable",
@@ -724,8 +729,6 @@ async fn run(cfg: config::RuntimeConfig, opts: Options) -> std::io::Result<()> {
         j.public.recovering.store(false, Ordering::Release);
     }
 
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let intro_task = async {
         match intro {
             Some((l, _g)) => server::serve_introspection(srv.clone(), l).await,
