@@ -182,7 +182,7 @@ enum Body {
 #[cold]
 #[inline(never)]
 fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
-    use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, skip_field, uint64};
+    use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, sfixed64, skip_field, uint64};
     let mut top = bytes;
     let mut body = Body::None;
     while !top.is_empty() {
@@ -222,6 +222,28 @@ fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
                             let o = take_len(&mut inner).ok_or(Malformed)?;
                             pb::Observation::decode(o)?; // no heap fields: no allocation
                             n = n.saturating_add(1);
+                        }
+                        // VS-006 (wire 1.2) batch fields: validated with the same wire-type
+                        // rules as the generic decoder, without retaining anything (found by
+                        // fuzz `decode_equivalence`: skipping them as unknown accepted a
+                        // varint where `acquired_at_utc_ns` must be fixed64).
+                        4 => sfixed64::merge(w, &mut 0i64, &mut inner, DecodeContext::default())?,
+                        5 => int32::merge(w, &mut 0i32, &mut inner, DecodeContext::default())?,
+                        6 => {
+                            check_wire_type(WireType::LengthDelimited, w)?;
+                            let id = take_len(&mut inner).ok_or(Malformed)?;
+                            std::str::from_utf8(id).map_err(|_| Malformed)?;
+                        }
+                        7 => {
+                            if w == WireType::LengthDelimited {
+                                // Packed: a whole number of 8-byte values.
+                                let packed = take_len(&mut inner).ok_or(Malformed)?;
+                                if packed.len() % 8 != 0 {
+                                    return Err(Malformed);
+                                }
+                            } else {
+                                sfixed64::merge(w, &mut 0i64, &mut inner, DecodeContext::default())?;
+                            }
                         }
                         _ => skip_field(w, t, &mut inner, DecodeContext::default())?,
                     }
@@ -656,6 +678,51 @@ mod adversarial {
         assert_eq!(check_batch_header(7, 1_000, 128), Err(ErrorCode::InvalidMode));
         assert_eq!(check_batch_header(2, 1_000, 128), Err(ErrorCode::BatchTooLarge));
         assert_eq!(check_batch_header(2, 128, 128), Ok(BatchMode::Delta));
+    }
+
+    /// VS-006 (fuzz `decode_equivalence`, CI of PR #6): an oversized batch whose wire 1.2
+    /// sidecar fields have the wrong wire type, or a bad packed length / UTF-8, is malformed
+    /// for both decoders; well-typed sidecar fields leave it `Oversized`.
+    #[test]
+    fn oversized_with_sidecar_fields_agrees_with_the_generic_decoder() {
+        let with = |extra: &[u8]| {
+            let mut inner = Vec::new();
+            prost::encoding::int32::encode(1, &2, &mut inner);
+            for _ in 0..10 {
+                inner.extend_from_slice(&[(3 << 3) | 2, 0]);
+            }
+            inner.extend_from_slice(extra);
+            let mut out = vec![BATCH_KEY];
+            prost::encoding::encode_varint(inner.len() as u64, &mut out);
+            out.extend_from_slice(&inner);
+            out
+        };
+        let bad: [&[u8]; 5] = [
+            &[4 << 3, 1],                          // acquired_at as varint
+            &[5 << 3 | 1, 0, 0, 0, 0, 0, 0, 0, 0], // clock quality as fixed64
+            &[6 << 3 | 2, 1, 0xff],                // clock id not UTF-8
+            &[7 << 3 | 2, 3, 1, 2, 3],             // packed timestamps not a multiple of 8
+            &[7 << 3, 1],                          // timestamp as varint
+        ];
+        for b in bad {
+            let frame = with(b);
+            assert!(pb::DriverMessage::decode(frame.as_slice()).is_err(), "{b:?}");
+            let mut scratch = pb::ObservationBatch::default();
+            assert_eq!(decode_driver_message(&frame, &mut scratch, 4).unwrap_err(), Malformed, "{b:?}");
+        }
+        let mut good = Vec::new();
+        prost::encoding::sfixed64::encode(4, &5, &mut good);
+        prost::encoding::int32::encode(5, &1, &mut good);
+        prost::encoding::string::encode(6, &"gps".to_owned(), &mut good);
+        prost::encoding::sfixed64::encode_packed(7, &[1, 2], &mut good);
+        prost::encoding::sfixed64::encode_repeated(7, &[3], &mut good);
+        let frame = with(&good);
+        assert!(pb::DriverMessage::decode(frame.as_slice()).is_ok());
+        let mut scratch = pb::ObservationBatch::default();
+        assert!(matches!(
+            decode_driver_message(&frame, &mut scratch, 4),
+            Ok(Decoded::Oversized { observations: 10, .. })
+        ));
     }
 
     #[test]
