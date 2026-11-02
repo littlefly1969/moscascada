@@ -539,14 +539,13 @@ fn handle(kernel: &mut Kernel, links: &mut Links, req: Request, ctx: &SequencerC
             }
             let t0 = diag::now(d);
             let x = Extras { source_times: times, received_at, action: None, hold: durable };
-            let source_id = batch.source_id;
             let mut r = apply_batch(kernel, links, batch, &ctx.counters, x);
             if let (Some(d), Some(t0)) = (d, t0) {
                 d.since(Stage::Apply, t0);
                 r.sent = Some(Instant::now());
             }
             if durable {
-                durable_batch_reply(kernel, links, source_id, r, reply);
+                durable_batch_reply(kernel, links, r, reply);
             } else {
                 // ACK only after `apply` returned; if the session is gone the ACK is moot.
                 let _ = reply.send(r);
@@ -772,13 +771,7 @@ fn ack(kernel: &mut Kernel, links: &mut Links, ctx: &SequencerContext, a: AckArg
 }
 
 /// VS-006: reply to a batch of a link that negotiated durable receipts.
-fn durable_batch_reply(
-    kernel: &Kernel,
-    links: &mut Links,
-    source_id: SourceId,
-    r: BatchReply,
-    reply: oneshot::Sender<BatchReply>,
-) {
+fn durable_batch_reply(kernel: &Kernel, links: &mut Links, r: BatchReply, reply: oneshot::Sender<BatchReply>) {
     let Some(p) = links.persist.as_mut() else {
         let _ = reply.send(r);
         return;
@@ -796,9 +789,14 @@ fn durable_batch_reply(
         }
         AckStatus::Duplicate => {
             p.release_held(None);
-            // The original may still be in flight: confirm the duplicate once the operation
-            // that accepted it is durable.
-            let target = kernel.source_status(source_id).map_or(0, |s| s.last_batch_operation);
+            // The original may still be in flight: confirm the duplicate only once the
+            // operation that accepted it is durable. That operation is not tracked per
+            // source (`last_batch_operation` is the VS-004 liveness marker, 0 for sources
+            // without supervision: review of PR #6), so wait for every operation applied so
+            // far, which includes it. Conservative (a duplicate may wait for unrelated
+            // operations of the same group commit), never early; after a restart the
+            // recovered prefix is already durable.
+            let target = kernel.last_operation_sequence();
             let mut d = r;
             let res = p.notify(
                 target,

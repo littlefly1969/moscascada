@@ -15,9 +15,9 @@ use std::time::Instant;
 use scada_core::{AlarmId, AppliedKind, Kernel, Operation, SequencedInput, SourceId};
 use scada_journal::reconcile::legacy_continuity;
 use scada_journal::{
-    CheckpointMsg, EVENT_RECORD_BYTES, EventOrigin, JournalShared, JournalState, NOTIFY_BYTES, OBSERVATION_BYTES,
-    OpRecord, OperatorAction, RECORD_FIXED_BYTES, Receipt, SourceRecoveryUpdate, SourceTimes, TimeAnomaly,
-    TimeEnvelope, WriterMsg, continuity, fault, live, time_source,
+    ALARM_UPDATE_BYTES, CheckpointMsg, EVENT_RECORD_BYTES, EventOrigin, JournalShared, JournalState, NOTIFY_BYTES,
+    OBSERVATION_BYTES, OpRecord, OperatorAction, RECORD_FIXED_BYTES, Receipt, SourceRecoveryUpdate, SourceTimes,
+    TimeAnomaly, TimeEnvelope, WriterMsg, continuity, fault, live, time_source,
 };
 
 use crate::config::PersistenceSettings;
@@ -197,6 +197,24 @@ pub struct PersistInit {
     pub recovered_op: u64,
 }
 
+/// Event-less alarm status changes of the operation just applied, for the persistent
+/// projection (review of PR #6). The fence changes `input_valid` of many alarms at once
+/// without staging them: every alarm already in the projection (it had an event) is
+/// re-stated with its current status. O(rules log rules), once per boot.
+fn alarm_updates(k: &Kernel, kind: &AppliedKind) -> Vec<(u32, u8)> {
+    if let AppliedKind::RecoveryFenced { .. } = kind {
+        let Some(t) = k.config().alarm_table() else { return Vec::new() };
+        return t
+            .ids()
+            .iter()
+            .filter_map(|&id| k.alarm(id))
+            .filter(|v| v.last_event_seq != 0)
+            .map(|v| (v.alarm_id.0, v.flags.0))
+            .collect();
+    }
+    k.alarm_silent_changes().map(|(id, f)| (id.0, f.0)).collect()
+}
+
 impl Persist {
     pub fn new(k: &Kernel, init: PersistInit) -> Persist {
         let cfg = k.config();
@@ -278,7 +296,10 @@ impl Persist {
                 | Operation::FreshnessExpired { source_id, .. } => self.fan(k, *source_id) * EVENT_RECORD_BYTES + 48,
                 Operation::AlarmAcknowledge { .. } => EVENT_RECORD_BYTES,
                 Operation::AdvanceDurableWatermark { .. } => 0,
-                Operation::RecoveryFence { .. } => 48 * k.config().sources().len() as u64,
+                Operation::RecoveryFence { .. } => {
+                    48 * k.config().sources().len() as u64
+                        + ALARM_UPDATE_BYTES * k.config().alarm_table().map_or(0, |t| t.len() as u64)
+                }
             }
     }
 
@@ -507,6 +528,7 @@ impl Persist {
             reconciliation,
             action,
             recovery,
+            alarm_updates: alarm_updates(k, kind),
             anomaly,
             reserved_bytes: res.bytes,
             receipt: None,

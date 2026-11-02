@@ -722,6 +722,10 @@ pub(crate) struct AlarmEngine {
     /// each of their quiet windows once, O(rules of the touched tags).
     staged_tags: Vec<u32>,
     refresh_all: bool,
+    /// VS-006: operation whose commit `staging` still describes (0 = none). The staging is
+    /// kept after a commit until the next preflight so that the persistent runtime can
+    /// read the state changes that produced no event ([`AlarmEngine::silent_changes`]).
+    committed_op: u64,
 }
 
 const FULL_WINDOW: [i64; 2] = [i64::MIN, i64::MAX];
@@ -851,6 +855,7 @@ impl Clone for AlarmEngine {
                 v
             },
             refresh_all: self.refresh_all,
+            committed_op: self.committed_op,
         }
     }
 }
@@ -872,6 +877,7 @@ impl AlarmEngine {
             quiet: vec![FULL_WINDOW; t.offsets.len().saturating_sub(1)],
             staged_tags: Vec::with_capacity(t.worst_fanout.max(1) as usize),
             refresh_all: false,
+            committed_op: 0,
         };
         for tag in 0..e.quiet.len() {
             e.refresh_quiet(t, tag);
@@ -932,6 +938,7 @@ impl AlarmEngine {
     /// Start a preflight.
     #[inline]
     pub(crate) fn begin(&mut self) {
+        self.committed_op = 0;
         self.staging.clear();
         self.staged_events = 0;
         self.staged_tags.clear();
@@ -1107,8 +1114,25 @@ impl AlarmEngine {
         self.next_event_seq = seq;
         self.last_change_op = op;
         self.high_water = self.high_water.max(self.used());
-        self.staging.clear();
+        // The staging is kept (cleared by the next `begin`): see `silent_changes`.
+        self.committed_op = op;
         self.staged_events = 0;
+    }
+
+    /// VS-006: alarms whose state changed **without an event** in the commit of operation
+    /// `op` (e.g. `input_valid` lost on a non-Good input while the latch is kept), with
+    /// their new status. Empty unless `op` is the last committed alarm transition.
+    /// O(staged rules), no allocation.
+    pub(crate) fn silent_changes<'a>(
+        &'a self,
+        table: &'a AlarmTable,
+        op: u64,
+    ) -> impl Iterator<Item = (AlarmId, AlarmFlags)> + 'a {
+        let staged: &[Staged] = if op != 0 && self.committed_op == op { &self.staging } else { &[] };
+        staged
+            .iter()
+            .filter(|s| s.event.is_none())
+            .map(|s| (table.ids.get(s.rule as usize).copied().unwrap_or(AlarmId(0)), AlarmFlags(s.state.flags)))
     }
 
     /// `AdvanceDurableWatermark`: `Ok(None)` = nothing to advance (no-op).

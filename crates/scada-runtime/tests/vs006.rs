@@ -1311,3 +1311,151 @@ fn kill9_during_a_storm_recovers_coherently_every_time() {
     }
     k.stop();
 }
+
+// ------------------------------------------------- review of PR #6: blockers and their tests
+
+/// Review P1: a duplicate retried on a durable link while the original is still waiting for
+/// its commit must not be confirmed early, also for a source without supervision (the
+/// VS-004 `last_batch_operation` marker stays 0 there).
+#[test]
+fn duplicate_waits_for_the_original_commit_without_supervision() {
+    let limits = journal_limits("", None);
+    let dir = tempfile::Builder::new().prefix("scada-it").tempdir().unwrap();
+    let stall = dir.path().join("stall");
+    let stall_s = stall.display().to_string();
+    let k = KernelProc::start_in(dir, &limits, None, &["--test-journal-stall-file", &stall_s]);
+    let mut a = Session::connect_with(&k.socket, &hello_durable("d", SRC, 1)).unwrap();
+    assert_eq!(full(&mut a, 1, false, 0).status, AckStatus::AppliedDurable as i32);
+    let r = k.introspect();
+    let src = r.sources.iter().find(|x| x.source_id == SRC).unwrap();
+    // The case of the review: no supervision, so no VS-004 marker. check.sh also runs the
+    // suite with supervision enabled (SCADA_TEST_SUPERVISION), where the marker is set and
+    // the duplicate must wait all the same.
+    if supervision_from_env().1.is_empty() {
+        assert_eq!(src.last_batch_operation, 0, "precondition: no supervision marker");
+    }
+    // Writer stalled: batch 2 is applied, its durable ACK is held.
+    std::fs::write(&stall, b"").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    a.send(&batch(BatchMode::Delta, 2, &[(3, Val::I(2))])).unwrap();
+    a.flush().unwrap();
+    let applied = k.wait_for("batch 2 applied", |r| {
+        r.sources.iter().find(|x| x.source_id == SRC).unwrap().last_accepted_source_sequence == Some(2)
+    });
+    let original_op = applied.last_operation_sequence;
+    // The driver reconnects (takeover) and retries batch 2 on the new link.
+    let socket = k.socket.clone();
+    let retry = std::thread::spawn(move || {
+        let mut b = Session::connect_with(&socket, &hello_durable("d", SRC, 1)).unwrap();
+        let ack = b.request(&batch(BatchMode::Delta, 2, &[(3, Val::I(2))])).unwrap();
+        (ack, Instant::now())
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!retry.is_finished(), "duplicate confirmed while the original is not durable");
+    let mut h = hist(&k);
+    assert!(h.journal().unwrap().durable_operation_seq < original_op);
+    let released = Instant::now();
+    std::fs::remove_file(&stall).unwrap();
+    let (ack, at) = retry.join().unwrap();
+    assert_eq!(ack.status, AckStatus::Duplicate as i32, "{ack:?}");
+    assert!(at >= released);
+    assert!(h.journal().unwrap().durable_operation_seq >= original_op);
+    drop(a);
+    k.stop();
+}
+
+/// Review P1, failure branch: the commit holding the original fails (EIO): the duplicate is
+/// answered `JOURNAL_FAULT`, never `DUPLICATE`.
+#[test]
+fn duplicate_of_a_batch_lost_by_eio_is_a_journal_fault() {
+    let limits = journal_limits("", None);
+    let dir = tempfile::Builder::new().prefix("scada-it").tempdir().unwrap();
+    let stall = dir.path().join("stall");
+    let stall_s = stall.display().to_string();
+    // Stalled from the start: the first commit holds everything, and it fails.
+    std::fs::write(&stall, b"").unwrap();
+    let k = KernelProc::start_in(
+        dir,
+        &limits,
+        None,
+        &["--test-journal-stall-file", &stall_s, "--test-journal-eio-at-commit", "1"],
+    );
+    let mut a = Session::connect_with(&k.socket, &hello_durable("d", SRC, 1)).unwrap();
+    a.send(&batch(BatchMode::FullState, 1, &[(1, Val::B(false)), (2, Val::B(false)), (3, Val::I(0))])).unwrap();
+    a.flush().unwrap();
+    k.wait_for("batch 1 applied", |r| {
+        r.sources.iter().find(|x| x.source_id == SRC).unwrap().last_accepted_source_sequence == Some(1)
+    });
+    let socket = k.socket.clone();
+    let retry = std::thread::spawn(move || {
+        let mut b = Session::connect_with(&socket, &hello_durable("d", SRC, 1)).unwrap();
+        b.request(&batch(BatchMode::FullState, 1, &[(1, Val::B(false)), (2, Val::B(false)), (3, Val::I(0))])).unwrap()
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!retry.is_finished(), "duplicate confirmed before the commit");
+    std::fs::remove_file(&stall).unwrap();
+    let ack = retry.join().unwrap();
+    assert_eq!(ack.status, AckStatus::Rejected as i32, "{ack:?}");
+    assert_eq!(ack.error_code, ErrorCode::JournalFault as i32);
+    drop(a);
+    k.kill();
+}
+
+fn projected(h: &mut HistoryClient, id: u32) -> hpb::ProjectedAlarm {
+    h.projection(0, 0).unwrap().alarms.into_iter().find(|a| a.alarm_id == id).expect("alarm in the projection")
+}
+
+/// Review P1/P2: the persistent projection follows status changes that produce no event.
+/// (1) Recovery fence: alarm 1 raised from a Good input, crash, restart: the projection,
+/// the RAM snapshot and the recovery status all say "input not valid / unverified".
+/// (2) Quality lost without event: the source disconnects, alarm 1 (process rule) keeps its
+/// latch with `input_valid=false` and no event of its own: same check across the APIs.
+#[test]
+fn projection_follows_status_changes_without_events() {
+    let limits = journal_limits("", Some(alarms(256)));
+    // (2) quality-only change on a live kernel.
+    let k = KernelProc::start(&limits);
+    let mut s = Session::connect_with(&k.socket, &hello_durable("d", SRC, 7)).unwrap();
+    full(&mut s, 1, false, 0);
+    assert_eq!(delta_door(&mut s, 2, true).status, AckStatus::AppliedDurable as i32);
+    let mut h = hist(&k);
+    let p = projected(&mut h, 1);
+    assert!(p.input_valid);
+    assert_eq!(p.state, hpb::EpisodeState::ActiveUnacked as i32);
+    let raised_at = p.last_event_seq;
+    drop(s);
+    let r = k.wait_for("tag 101 degraded", |r| tag_q(r, 101) != Quality::Good);
+    wait_durable_op(&k, r.last_operation_sequence);
+    let mut c = AlarmClient::connect(&k.alarm).unwrap();
+    let ram = snapshot_entry(&mut c, 1);
+    assert!(!ram.input_valid, "precondition: input lost in RAM");
+    let p = projected(&mut h, 1);
+    assert_eq!(p.last_event_seq, raised_at, "no event of alarm 1: only its status changed");
+    assert!(!p.input_valid, "projection must follow the RAM state: {p:?}");
+    assert_eq!(p.state, hpb::EpisodeState::ActiveUnacked as i32, "latch kept");
+    drop(c);
+
+    // (1) recovery fence: a fresh episode from a Good input, then a crash.
+    let mut s = Session::connect_with(&k.socket, &hello_durable("d", SRC, 7)).unwrap();
+    let a = full(&mut s, 3, true, 0);
+    assert_eq!(a.status, AckStatus::AppliedDurable as i32);
+    assert!(projected(&mut h, 1).input_valid);
+    drop(h);
+    drop(s);
+    let (_e, dir) = k.kill_keep();
+    let k = restart(dir, &limits, &[]);
+    let mut h = hist(&k);
+    wait_durable_op(&k, k.introspect().last_operation_sequence);
+    let p = projected(&mut h, 1);
+    assert!(!p.input_valid, "after the fence the projection is not input-valid: {p:?}");
+    let mut c = AlarmClient::connect(&k.alarm).unwrap();
+    let ram = snapshot_entry(&mut c, 1);
+    assert_eq!(ram.input_valid, p.input_valid);
+    assert_eq!(ram.state, p.state);
+    assert_eq!(ram.activation_token, p.activation_token);
+    let rec = h.recovery().unwrap();
+    let sr = rec.sources.iter().find(|x| x.source_id == SRC).unwrap();
+    assert_eq!(sr.live, hpb::LiveVerification::UnverifiedRecovered as i32);
+    assert!(h.projection(0, 0).unwrap().recovery_in_progress);
+    k.stop();
+}

@@ -157,6 +157,8 @@ message GetActiveAlarmProjection {
 message ProjectedAlarm {
   uint32 alarm_id = 1;
   EpisodeState state = 2;
+  // Input validity in the durable state as of the last committed operation, also when it
+  // changed without an event (recovery fence, input lost while latched).
   bool input_valid = 3;
   uint64 occurrence_id = 4;
   uint64 activation_token = 5;

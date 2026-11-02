@@ -1251,6 +1251,18 @@ impl Kernel {
         Some(self.alarms.as_deref()?.read(after_event_seq, limit, out))
     }
 
+    /// VS-006: alarms whose state changed without an event in the last applied operation
+    /// (the persistent projection must follow them: review of PR #6). Empty if that
+    /// operation committed no alarm transition. O(staged rules), no allocation.
+    pub fn alarm_silent_changes(&self) -> impl Iterator<Item = (AlarmId, crate::AlarmFlags)> + '_ {
+        let op = self.last_operation_sequence;
+        self.config
+            .alarm_table()
+            .zip(self.alarms.as_deref())
+            .into_iter()
+            .flat_map(move |(t, e)| e.silent_changes(t, op))
+    }
+
     /// VS-005: one event, if still in the ring.
     pub fn alarm_event(&self, event_seq: u64) -> Option<AlarmEvent> {
         self.alarms.as_deref()?.event(event_seq)

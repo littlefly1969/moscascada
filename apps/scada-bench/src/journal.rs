@@ -171,6 +171,7 @@ pub fn journal_bench() {
             reconciliation: false,
             action: None,
             recovery: Vec::new(),
+            alarm_updates: Vec::new(),
             anomaly: None,
             reserved_bytes: 0,
             receipt: None,

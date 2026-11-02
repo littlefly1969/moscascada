@@ -566,6 +566,17 @@ fn write_op(
             i64::from(e.kind.code())
         ])?;
     }
+    if !r.alarm_updates.is_empty() {
+        // Status change without event: only rows already in the projection (an alarm that
+        // never had an event is not listed). `last_event_seq` and the episode identity are
+        // unchanged.
+        let mut upd = c.prepare_cached(
+            "UPDATE alarm_active_projection SET status_after = ?3 WHERE timeline_no = ?1 AND alarm_id = ?2",
+        )?;
+        for &(alarm_id, flags) in &r.alarm_updates {
+            upd.execute(params![tl, i64::from(alarm_id), i64::from(flags)])?;
+        }
+    }
     if let Some(a) = &r.action {
         c.prepare_cached(
             "INSERT OR IGNORE INTO operator_actions VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",

@@ -121,7 +121,9 @@ startup_check = "quick"                # "quick" | "full" | "none"
 sqlite_cache_kib = 8192
 wal_max_bytes = 67108864               # WAL truncated by the writer beyond this size
 min_disk_free_bytes = 268435456        # below it: DISK_FULL (46) before applying anything
-# max_db_bytes = 8589934592            # optional cap of the database file (DISK_FULL beyond)
+# max_db_bytes = 8589934592            # optional SOFT threshold on DB+WAL size (DISK_FULL beyond); sizes are
+#                                       # sampled by the writer (>= every 100 ms) and the queued records are not
+#                                       # counted: the files can exceed it by the in-flight queue. Not a hard cap.
 operator_actions_cache = 16384         # durable ACK action_id deduplication cache (RAM)
 history_socket_path = "/run/scada/history.sock"
 history_authorized_uids = [1000]

@@ -212,6 +212,10 @@ pub struct OpRecord {
     pub reconciliation: bool,
     pub action: Option<OperatorAction>,
     pub recovery: Vec<SourceRecoveryUpdate>,
+    /// Alarms whose status changed **without an event** in this operation (alarm id, new
+    /// status flags): the persistent projection follows them (RecoveryFence, input lost
+    /// on a non-Good value while the latch is kept). Review of PR #6.
+    pub alarm_updates: Vec<(u32, u8)>,
     pub anomaly: Option<TimeAnomaly>,
     /// Bytes still reserved for this record in the journal queue (released after commit).
     pub reserved_bytes: u64,
@@ -239,6 +243,10 @@ pub const NOTIFY_BYTES: u64 = 64;
 /// Bytes reserved per event (48 B record + origin + bookkeeping).
 pub const EVENT_RECORD_BYTES: u64 = 96;
 
+/// Queue bytes charged per event-less alarm status update of a record (`<= EVENT_RECORD_BYTES`,
+/// so an operation's events plus updates stay within its fan-out estimate).
+pub const ALARM_UPDATE_BYTES: u64 = 16;
+
 impl OpRecord {
     /// Bytes this record actually holds in the queue (the reservation after `apply`).
     pub fn queued_bytes(&self) -> u64 {
@@ -255,6 +263,7 @@ impl OpRecord {
             + note
             + self.events.len() as u64 * EVENT_RECORD_BYTES
             + 48 * self.recovery.len() as u64
+            + ALARM_UPDATE_BYTES * self.alarm_updates.len() as u64
     }
 }
 
