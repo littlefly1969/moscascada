@@ -5,6 +5,7 @@
 #   scripts/bench_vs006.sh confirm   n=10 on the critical cells (default-off regression)
 #   scripts/bench_vs006.sh journal   in-process journal: fan-out, rows, disk vs tmpfs, FULL vs NORMAL
 #   scripts/bench_vs006.sh storm     60 s process storms with the journal as sink
+#   scripts/bench_vs006.sh soak      T24: 30 min durable storm, kernel RSS every minute
 #
 # Variants (same scada-bench binary for all):
 #   A  = merged main 9f335df (VS-005) kernel, no persistence (BASE)
@@ -86,5 +87,24 @@ storm)
   # J6 NORMAL (NOT DURABLE) for the cost split fsync vs rest.
   run --label J6_ct_regular_NORMAL_NOT_DURABLE --alarms 1:1048576:storm --clients 4 --size 128 --persistence 'durability = "normal"' --kernel-arg --test-allow-non-durable
   ;;
-*) echo "usage: $0 ab|confirm|journal|storm" >&2; exit 2 ;;
+soak)
+  # T24: 30 min durable storm below the journal capacity; kernel RSS sampled every minute.
+  O="$OUTDIR/soak.txt"
+  MIN=${MIN:-30}
+  echo "# vs006 soak $(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(uname -srm) minutes=$MIN" >> "$O"
+  CMD=("$BENCH" alarm-storm --kernel "$NEW" --label SOAK_ct_journal --alarms 1:65536:storm --clients 2 --size 128 \
+       --interval-us 2000 --persistence full --secs $((MIN * 60)) --warmup-secs 5)
+  echo "# ${CMD[*]}" >> "$O"
+  "${CMD[@]}" 2>/dev/null | grep '^kind=' > /tmp/claude-0/soak-lines.txt &
+  BP=$!
+  for m in $(seq 1 "$MIN"); do
+    sleep 60
+    P=$(pgrep -nx scada-kernel || true)
+    [ -n "$P" ] && echo "# rss_sample t_min=$m pid=$P $(grep -E 'VmHWM|VmRSS' /proc/$P/status | tr -s ' \n' ' ')" >> "$O"
+  done
+  wait $BP
+  cat /tmp/claude-0/soak-lines.txt >> "$O"
+  tail -2 "$O"
+  ;;
+*) echo "usage: $0 ab|confirm|journal|storm|soak" >&2; exit 2 ;;
 esac

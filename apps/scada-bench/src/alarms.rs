@@ -709,10 +709,22 @@ pub fn alarm_storm(spec: &KernelSpec) {
         other => panic!("{other:?}"),
     };
     let no_overwrite = c1.durable_watermark > 0 || (first.oldest_visible <= 1 && !first.gap_detected);
+    // VS-006: with the journal as sink a refusal may be journal backpressure
+    // (JOURNAL_QUEUE_FULL / DISK_FULL, counted by the journal) instead of a full outbox.
+    let journal_refused = if journal {
+        hist.as_mut()
+            .and_then(|h| h.journal().ok())
+            .map_or(0, |j| j.refused_queue_full + j.refused_disk_full + j.refused_fault)
+    } else {
+        0
+    };
     let safety = if max_used <= a.capacity
         && c1.used == c1.next_event_seq - 1 - c1.durable_watermark
         && no_overwrite
-        && (refused == 0 || c1.overload() == apb::OverloadState::Critical || c1.rejected_batches > 0)
+        && (refused == 0
+            || c1.overload() == apb::OverloadState::Critical
+            || c1.rejected_batches > 0
+            || journal_refused > 0)
     {
         "PASS"
     } else {

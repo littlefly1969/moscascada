@@ -1,6 +1,6 @@
-# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004 + VS-005
+# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004 + VS-005 + VS-006
 
-La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003), [§VS-004](#vs-004) e [§VS-005](#vs-005); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
+La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003), [§VS-004](#vs-004), [§VS-005](#vs-005) e [§VS-006](#vs-006); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
 Legenda: **✅ verificato** = implementato e coperto da un test o da una misura eseguiti (risultati in questo repository); **🟡 parziale** = implementato, verifica incompleta (motivo indicato); **❌ non soddisfatto** = non implementato o non verificabile qui (motivo indicato).
 
@@ -505,3 +505,81 @@ Brief: `MoscaSCADA_VS005_Alarm_Engine_Agent_Brief_v2.md`. Base: `main` `b762242`
 4. Regole a tag singolo; regole multi-tag (VS-007) richiederanno deduplicazione per regola nel preflight.
 5. Benchmark su VM x86_64 con client co-residenti; ARM64 NOT TESTED ON HARDWARE.
 6. `actor_uid` è l'identità di un processo, non di una persona.
+
+## VS-006
+
+Brief: `MoscaSCADA_VS006_Durable_Journal_Recovery_Time_Authority_Agent_Brief.md`. Base: `main` `9f335df` (merge commit della PR #5; HEAD della PR `a5ec3ac` con `stable` e `fuzz-smoke` verdi sullo SHA). Branch `claude/project-thread-uymxzt`, PR verso `main` **senza merge** (review tecnica indipendente). Decisioni: ADR 0013, ADR 0014 (scritti prima delle modifiche strutturali, commit `d396bd9`); misure: `docs/benchmarks/vs006.md` e `docs/benchmarks/results/vs006/`; esercizio: `docs/operations/vs006-playbook.md`. Percorsi: `j/` = `crates/scada-journal/tests/journal.rs`, `j:codec` / `j:reconcile` = test unitari di `scada-journal`, `core/recovery.rs`, `rt/vs006.rs`, `rt:persist` / `rt:time` = test unitari di `persist.rs` / `time_authority.rs`.
+
+Legenda della matrice T01–T30: **PASS** = eseguito e superato in questo repository; **PARTIAL** = eseguito, ma prova solo una parte della proprietà (motivo indicato); **SKIPPED** = non eseguibile qui (motivo indicato). Nessuna riga è FAIL alla consegna.
+
+### Gate §0
+
+| Voce | Stato | Evidenza |
+|---|---|---|
+| PR #5: HEAD, CI, review | ✅ | HEAD `a5ec3ac`; check run `stable` e `fuzz-smoke` `success`; nessun blocker aperto |
+| Merge di #5 e base registrata | ✅ | merge commit `9f335df`; binario `9f335df` usato come baseline A/B (`results/vs006/ab.txt`, variante `A`) |
+| ADR 0013/0014 prima del codice strutturale | ✅ | `d396bd9` precede `2c6bc35` (primo commit di codice) |
+| Nessun merge autonomo di VS-006 | ✅ | PR aperta per review |
+
+### Invarianti J1–J12
+
+| # | Stato | Evidenza |
+|---|---|---|
+| J1 autorità del commit | ✅ | `rt/vs006.rs::durable_receipts_follow_the_commit`, `slow_disk_delays_durable_receipts`, `crash_at_every_fault_point_recovers_a_coherent_prefix` (nessuna receipt durevole persa in 24 crash), `kill9_during_a_storm_recovers_coherently_every_time`; `normal_durability_is_benchmark_only` (NORMAL non emette mai receipt durevoli) |
+| J2 totalità causale | ✅ | una transazione per gruppo di operazioni intere (writer); `j/recovery_equals_live_kernel`, `missing_operation_or_event_is_fail_closed`; T05 |
+| J3 ring protetto | ✅ | watermark solo dal writer dopo `COMMIT`; `rt/vs006.rs::journal_releases_the_outbox_ring`, `disk_full_refuses_and_publishes_nothing`; sink simulato rifiutato con `[persistence]` |
+| J4 ammissione prima della mutazione | ✅ | `rt:persist::admission_at_the_exact_queue_edge`, `disk_floor_and_fault_refuse_before_apply`; `rt/vs006.rs::stalled_disk_backpressure_then_recovery`, `disk_full_refuses_and_publishes_nothing`, `eio_is_a_fault_until_restart` |
+| J5 recovery ≠ verifica | ✅ | `core/recovery.rs::fence_semantics_no_false_events`, `recovered_unverified_has_top_precedence`; `rt/vs006.rs::restart_recovers_unverified_then_reconciles`, `partial_reconnect_verifies_only_that_source` |
+| J6 nessun falso evento | ✅ | `fence_semantics_no_false_events`; `rt/vs006.rs::replay_emits_nothing`; rientri marcati `reconciliation` (`restart_recovers_unverified_then_reconciles`) |
+| J7 tempo non causale | ✅ | `rt/vs006.rs::clock_steps_are_diagnosed_not_causal`, `cross_boot_regression_is_detected`, `time_zone_does_not_change_stored_times`; `rt:time::clock_steps_are_flagged_and_logical_is_monotonic` |
+| J8 buco storico esplicito | ✅ | `rt/vs006.rs::continuity_gap_and_new_epoch`; `j:reconcile::legacy_rules`, `buffered_complete_only_with_proof`, `buffered_without_baseline_is_unknown_and_overflow_is_gap` |
+| J9 recupero bounded | ✅ | `j/recovery_equals_live_kernel` (replay < 60 op con checkpoint), `historian_pages_beyond_the_ring`; recovery dopo milioni di operazioni misurato (`vs006.md`) |
+| J10 compatibilità / default-off | ✅ | `rt/vs006.rs::default_off_is_the_vs005_contract`, `driver_versions_against_a_journaling_kernel`; suite VS-001…VS-005 invariate; A/B `B` vs `A` (`vs006.md` §2) |
+| J11 operatori e identità | ✅ | `rt/vs006.rs::durable_operator_ack_is_idempotent_across_restart`, `require_durable_without_journal_is_refused`; `actor_uid` resta uid di processo |
+| J12 nessun falso garante end-to-end | ✅ | nessuna continuità `Complete` per driver legacy (`legacy_rules`); `SourceEventEnvelope` solo schema (ingest nativo differito, dichiarato) |
+
+### Matrice T01–T30
+
+| ID | Esito | Evidenza / motivo |
+|---|---|---|
+| T01 PR #5, base, default-off | PASS | gate §0; `default_off_is_the_vs005_contract`; golden digest VS-004/005 (suite `vs004.rs`, `vs005.rs` invariate); A/B `B` vs `A` (`vs006.md` §2) |
+| T02 commit 1 op / 0 eventi | PASS | `j/recovery_equals_live_kernel`, `genesis_replay_and_resume`; `rt/vs006.rs::restart_recovers_unverified_then_reconciles` (FullState/delta restaurati dopo crash); bench journal E=0 |
+| T03 fan-out 20 000 | PASS | bench journal `F20000_disk_full` (`results/vs006/journal.txt`): 20 000 eventi per operazione in una transazione, recovery con digest uguale al live; atomicità core VS-005 `t07` |
+| T04 ACK + ReturnedUnacked dopo replay | PASS | `core/recovery.rs::checkpoint_restore_is_transparent` (proptest 256 casi), `rt/vs006.rs::durable_operator_ack_is_idempotent_across_restart`, `restart_recovers_unverified_then_reconciles` |
+| T05 kill -9 prima/durante/dopo COMMIT | PASS | `crash_at_every_fault_point_recovers_a_coherent_prefix`: 8 punti (`before_apply`, `after_apply_before_enqueue`, `after_enqueue`, `before_transaction`, `during_transaction`, `after_commit_before_watermark`, `during_checkpoint`, `after_durable_ack_before_socket_write`) × 3 posizioni; `kill9_during_a_storm_recovers_coherently_every_time` (5 cicli) |
+| T06 power-cut simulato / fault injection | PARTIAL | `torn_wal_tail_gives_a_prefix_or_a_refusal` (WAL troncato/corrotto dopo kill -9 ⇒ prefisso o rifiuto), `j/corruption_is_fail_closed`. **Simulazione**: nessun taglio di corrente reale; la durabilità reale dipende dal rispetto del flush da parte di disco/hypervisor |
+| T07 writer lento/fermo, ENOSPC, EIO | PASS | `slow_disk_delays_durable_receipts`, `stalled_disk_backpressure_then_recovery`, `disk_full_refuses_and_publishes_nothing`, `eio_is_a_fault_until_restart`; `j/sqlite_full_publishes_nothing_and_recovers`, `eio_is_a_fault`; storm 60 s lenta/ferma (`results/vs006/storm.txt`) |
+| T08 operazione al bordo di ring/coda | PASS | coda journal: `rt:persist::admission_at_the_exact_queue_edge` (ops e byte esatti, rifiuto intero senza prenotazione); ring: VS-005 `t07`/`alarms-core` D (C e C+1) |
+| T09 replay oltre C eventi, checkpoint | PASS | `j/recovery_equals_live_kernel` (ring 8, centinaia di eventi); bench `journal-recovery` con milioni di eventi e ring 65 536 (`digest_equal=true`) |
+| T10 checkpoint interrotto/corrotto/incompatibile | PASS | `j/corruption_is_fail_closed` (fallback al precedente, poi rifiuto), `incompatible_store_is_refused`, `replay_payload_compaction_is_explicit_and_fail_closed`; fault `during_checkpoint` (T05); `configuration_change_needs_an_explicit_new_timeline` |
+| T11 restart con Good e ActiveUnacked/ActiveAcked | PASS | `fence_semantics_no_false_events`; `restart_recovers_unverified_then_reconciles` |
+| T12 sorgente 1 rientra, 2 offline | PASS | `partial_reconnect_verifies_only_that_source` |
+| T13 FullState senza buffer storico | PASS | `continuity_gap_and_new_epoch` (Unknown/Gap persistiti, mai Complete); `legacy_rules` |
+| T14 buffered replay con progressivi e duplicati | PARTIAL | `j:reconcile::buffered_complete_only_with_proof`, `buffered_without_baseline_is_unknown_and_overflow_is_gap` (tracker di componente). Ingest wire di eventi nativi **differito** (ADR 0013 D10): non c'è ancora un driver che invii uno stream bufferizzato |
+| T15 clock −1 s, −1 h, +24 h sotto carico | PASS | `clock_steps_are_diagnosed_not_causal` (orologio iniettato: **NOT TESTED WITH A REAL OS CLOCK STEP**); `rt:time::clock_steps_are_flagged_and_logical_is_monotonic`, `idle_is_not_a_jump` |
+| T16 DST e UTC a offset | PASS | `time_zone_does_not_change_stored_times` (TZ diversi ⇒ stessi tempi raw e digest); DST è solo visualizzazione (ADR 0014 §4) |
+| T17 RTC arretrato al reboot, monotonic reset | PASS | `cross_boot_regression_is_detected`, `rt:time::cross_boot_regression` (logical non regredisce, `boot` cambia, nessuna sottrazione fra boot) |
+| T18 timestamp di sorgente fuori ordine/tardivi/assenti | PASS | `source_timestamps_are_kept_unchanged` (ordine per sequenza, originali invariati, `null` = assente, duplicato non sostituisce); `INVALID_TIMESTAMP` |
+| T19 skew NTP e watchdog | PASS | `watchdog_is_independent_of_the_wall_clock` (orologio iniettato) |
+| T20 driver 1.0/1.1/1.2 | PASS | `driver_versions_against_a_journaling_kernel`; `apps/scada-sim-driver/tests/negotiation.rs` |
+| T21 ACK durevole perso dopo commit, retry stesso id | PASS | `durable_operator_ack_is_idempotent_across_restart` (stesso esito ed `event_seq`, un solo evento storico) |
+| T22 historian 10 M+ eventi, ring 64k | PASS | bench `rows10M_*` (`results/vs006/journal.txt`): pagine keyset bounded, query per allarme con indice; `historian_pages_beyond_the_ring` |
+| T23 disco e WAL a cap / compaction | PASS | WAL troncato oltre `wal_max_bytes`; `disk_full_refuses_and_publishes_nothing`; compattazione esplicita `replay_payload_compaction_is_explicit_and_fail_closed`. Nessuna retention automatica dello storico (dichiarato) |
+| T24 soak 30–60 min e ripartenza durante storm | PASS | `kill9_during_a_storm_recovers_coherently_every_time`; soak (`results/vs006/soak.txt`, `vs006.md`) |
+| T25 replay deterministico con TimeAuthority iniettato | PASS | `checkpoint_restore_is_transparent`; `replay_emits_nothing`; `time_zone_does_not_change_stored_times` (stessi digest e tempi raw dal journal) |
+| T26 driver non-buffering durante crash | PASS | `continuity_gap_and_new_epoch`, `restart_recovers_unverified_then_reconciles` (Unknown osservabile, nessun Complete) |
+| T27 recovery senza Logic Engine/comandi | PASS | `replay_emits_nothing` (nessun evento, nessun messaggio ai driver durante il recovery); nessun Logic Engine esiste in VS-006 |
+| T28 socket, path, lock, owner, permessi | PASS | `single_writer_and_private_store`, `j/single_writer_and_permissions`; socket historian 0660 + allowlist uid |
+| T29 property/fuzz | PASS | `j:codec` proptest (`op_roundtrip_and_strict`, `decoded_is_canonical`, `decoders_never_panic`), `checkpoint_restore_is_transparent`; fuzz `journal_decode` 300 s, 0 crash (`results/vs006/fuzz_journal_decode.md`), 60 s in CI |
+| T30 ARM64 | PARTIAL | `cargo check --target aarch64-unknown-linux-gnu` in `check.sh`; **NOT TESTED ON HARDWARE** (nessun hardware Micro disponibile) |
+
+### Limiti e rischi residui (VS-006)
+
+1. **Power loss reale non provato**: kill -9 e WAL troncato simulato sì; un taglio di corrente su hardware no. Le misure sono su un disco di VM: il costo e il valore dell'fsync sono quelli dell'hypervisor.
+2. **ARM64 / Micro NOT TESTED ON HARDWARE**: la capacità del journal (μ) su SD/eMMC va misurata sul campo (`scripts/alarm_capacity.py` livello A).
+3. Con persistenza attiva il throughput è limitato dal journal (ogni osservazione è registrata): costo misurato in `vs006.md`; oltre la capacità i driver ricevono `JOURNAL_QUEUE_FULL` (backpressure esplicita, mai perdita silenziosa nel kernel).
+4. Ingest di eventi nativi bufferizzati differito: `Complete` non è mai dichiarato per i driver attuali.
+5. Nessuna retention automatica dello storico allarmi; compattazione dei payload di replay solo esplicita.
+6. Prove di salto d'orologio con orologio iniettato, non con uno step reale del clock del SO.
+7. `actor_uid` resta l'identità di un processo; `principal` autenticato non implementato.
+

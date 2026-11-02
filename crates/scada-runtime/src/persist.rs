@@ -618,3 +618,106 @@ impl std::fmt::Debug for PersistInit {
         f.debug_struct("PersistInit").field("boot_generation", &self.boot_generation).finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time_authority::TimeShared;
+
+    const CFG: &str = r#"
+[ipc]
+socket_path = "/run/scada/driver.sock"
+[[tags]]
+id = 101
+name = "t"
+type = "i64"
+[[sources]]
+id = 1001
+name = "s"
+channels = [ { channel = 1, tag = 101, type = "i64" } ]
+[persistence]
+path = "/var/lib/scada/journal/kernel.db"
+journal_queue_operations = 16
+journal_queue_bytes = 65536
+min_disk_free_bytes = 1000
+"#;
+
+    fn persist() -> (Persist, std::sync::mpsc::Receiver<WriterMsg>) {
+        let c = crate::config::parse(CFG).unwrap();
+        let k = Kernel::new_recoverable(Arc::new(c.core.clone()));
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let shared = Arc::new(JournalShared::new(0, 0));
+        shared.disk_free.store(u64::MAX, Relaxed);
+        let time = TimeAuthority::new(&c.time, i64::MIN, Arc::new(TimeShared::new(String::new())), None);
+        let p = Persist::new(
+            &k,
+            PersistInit {
+                tx,
+                shared,
+                time,
+                settings: c.persistence.clone().unwrap(),
+                boot_generation: 1,
+                track: Vec::new(),
+                actions: ActionCache::new(16),
+                last_checkpoint_op: 0,
+                wake_queued: Arc::new(AtomicBool::new(false)),
+                timeline_id: [0; 16],
+                recovered_op: 0,
+            },
+        );
+        (p, rx)
+    }
+
+    fn reserved(p: &Persist) -> (u64, u64) {
+        (p.shared.reserved_ops.load(Relaxed), p.shared.reserved_bytes.load(Relaxed))
+    }
+
+    /// T08 / J4 (journal queue): the operation that exactly fills the queue (operations
+    /// or bytes) is admitted whole; the next one is refused whole and the refusal reserves
+    /// nothing; a cancel gives the room back.
+    #[test]
+    fn admission_at_the_exact_queue_edge() {
+        let (p, _rx) = persist();
+        // Operations bound: 16.
+        let rs: Vec<Reservation> = (0..16).map(|_| p.admit(10, false).unwrap()).collect();
+        assert_eq!(reserved(&p), (16, 160));
+        assert_eq!(p.admit(10, false).err(), Some(Refusal::QueueFull));
+        assert_eq!(reserved(&p), (16, 160), "a refusal reserves nothing");
+        for r in rs {
+            p.cancel(r);
+        }
+        assert_eq!(reserved(&p), (0, 0));
+        // Bytes bound: 65 536 exactly fills, one more byte does not.
+        let a = p.admit(65_536 - 100, false).unwrap();
+        let b = p.admit(100, false).unwrap();
+        assert_eq!(reserved(&p), (2, 65_536));
+        assert_eq!(p.admit(1, false).err(), Some(Refusal::QueueFull));
+        assert_eq!(p.shared.refused_queue_full.load(Relaxed), 2);
+        p.cancel(a);
+        p.cancel(b);
+        // A single record larger than the whole queue can never be admitted.
+        assert_eq!(p.admit(65_537, false).err(), Some(Refusal::QueueFull));
+        assert_eq!(reserved(&p), (0, 0));
+    }
+
+    /// J4 / D13: under the disk floor ordinary operations are refused before apply, the
+    /// internal watermark is not (it frees RAM, not disk) but still respects the queue;
+    /// a FAULT refuses everything.
+    #[test]
+    fn disk_floor_and_fault_refuse_before_apply() {
+        let (p, _rx) = persist();
+        p.shared.disk_free.store(999, Relaxed);
+        assert_eq!(p.admit(10, false).err(), Some(Refusal::DiskFull));
+        let w = p.admit(0, true).unwrap();
+        p.cancel(w);
+        p.shared.disk_free.store(1000, Relaxed);
+        let r = p.admit(10, false).unwrap();
+        p.cancel(r);
+        p.shared.state.store(JournalState::DiskFull as u8, Relaxed);
+        assert_eq!(p.admit(10, false).err(), Some(Refusal::DiskFull));
+        assert!(p.admit(0, true).is_ok());
+        p.shared.state.store(JournalState::Fault as u8, Relaxed);
+        assert_eq!(p.admit(0, true).err(), Some(Refusal::Fault));
+        assert_eq!(p.admit(10, false).err(), Some(Refusal::Fault));
+    }
+}
