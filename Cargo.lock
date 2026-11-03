@@ -802,6 +802,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-driver-sdk"
+version = "0.1.0"
+dependencies = [
+ "scada-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "scada-journal"
 version = "0.1.0"
 dependencies = [
