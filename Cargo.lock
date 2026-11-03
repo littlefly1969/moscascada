@@ -802,6 +802,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-driver-modbus-tcp"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "scada-driver-sdk",
+ "scada-journal",
+ "scada-modbus",
+ "scada-modbus-sim",
+ "scada-protocol",
+ "scada-sim-driver",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "scada-driver-sdk"
+version = "0.1.0"
+dependencies = [
+ "scada-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "scada-journal"
 version = "0.1.0"
 dependencies = [
@@ -811,6 +835,20 @@ dependencies = [
  "rustix",
  "scada-core",
  "tempfile",
+]
+
+[[package]]
+name = "scada-modbus"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "scada-modbus-sim"
+version = "0.1.0"
+dependencies = [
+ "scada-modbus",
 ]
 
 [[package]]

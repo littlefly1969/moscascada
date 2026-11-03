@@ -40,3 +40,9 @@ jobs:
         run: mkdir -p fuzz/corpus/alarm_transitions && cd fuzz && cargo +nightly fuzz run -O alarm_transitions corpus/alarm_transitions -- -max_total_time=60
       - name: journal_decode (60 s, VS-006)
         run: mkdir -p fuzz/corpus/journal_decode && cd fuzz && cargo +nightly fuzz run -O journal_decode corpus/journal_decode -- -max_total_time=60
+      - name: modbus_decode (60 s, VS-007)
+        run: mkdir -p fuzz/corpus/modbus_decode && cd fuzz && cargo +nightly fuzz run -O modbus_decode corpus/modbus_decode -- -max_total_time=60
+      - name: value_decode (60 s, VS-007)
+        run: mkdir -p fuzz/corpus/value_decode && cd fuzz && cargo +nightly fuzz run -O value_decode corpus/value_decode -- -max_total_time=60
+      - name: catalog_parse (60 s, VS-007)
+        run: mkdir -p fuzz/corpus/catalog_parse && cd fuzz && cargo +nightly fuzz run -O catalog_parse corpus/catalog_parse -- -max_total_time=60

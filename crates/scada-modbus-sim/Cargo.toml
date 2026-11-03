@@ -1,0 +1,18 @@
+[package]
+name = "scada-modbus-sim"
+description = "VS-007: Modbus TCP server simulator with reproducible fault injection (tests, benchmarks, soak). Not a production server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "scada-modbus-sim"
+path = "src/main.rs"
+
+[dependencies]
+scada-modbus.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,109 @@
+# Generic Modbus TCP test profile (VS-007, ADR 0015 D11).
+#
+# NOT A REAL PRODUCT. No manufacturer, model or official register map is implied: this
+# profile is the fixture of the simulator (crates/scada-modbus-sim) and of the tests. A real
+# product gets its own file, with the document and revision its register map comes from.
+#
+# Addresses are Modbus PDU addresses, ZERO-BASED. A vendor table that says "40001" or
+# "30001" means PDU address 0 of the holding/input register area: convert it once, here,
+# by hand; the driver never adds or subtracts offsets.
+schema = "moscada.driver-catalog/1"
+
+[profile]
+id = "generic-io"
+version = 1
+title = "Generic I/O test profile (simulator fixture)"
+manufacturer = "none (test fixture, not a product)"
+transport = "tcp"
+protocol = "modbus"
+source_document = "docs/driver-catalog/generic-io.v1.toml (this file is the specification)"
+description = "Two discrete inputs, one coil, a temperature, a status word with a flag bit, a 32-bit counter, a float level and a signed 32-bit value."
+# Upper bound of read requests per scan for this product.
+max_requests_per_scan = 8
+
+# Readable ranges. The planner never reads outside them and never merges two of them.
+[[blocks]]
+area = "coil"
+start = 0
+count = 16
+
+[[blocks]]
+area = "discrete_input"
+start = 0
+count = 16
+
+[[blocks]]
+area = "holding_register"
+start = 0
+count = 16
+# Some devices answer fewer registers per request than the protocol maximum (125).
+max_per_request = 16
+
+[[blocks]]
+area = "input_register"
+start = 0
+count = 16
+
+[[points]]
+name = "di_0"
+area = "discrete_input"
+address = 0
+type = "bit"
+
+[[points]]
+name = "di_1"
+area = "discrete_input"
+address = 1
+type = "bit"
+
+[[points]]
+name = "coil_0"
+area = "coil"
+address = 0
+type = "bit"
+
+[[points]]
+name = "temperature_centi"
+area = "input_register"
+address = 0
+type = "i16"
+unit = "centi_degC"
+valid_min = -5000
+valid_max = 15000
+
+[[points]]
+name = "status_word"
+area = "holding_register"
+address = 0
+type = "u16"
+
+[[points]]
+name = "status_alarm_bit"
+area = "holding_register"
+address = 0
+type = "register_bit"
+bit = 3
+
+[[points]]
+name = "counter"
+area = "input_register"
+address = 2
+type = "u32"
+word_order = "high_first"
+
+[[points]]
+name = "level_milli"
+area = "input_register"
+address = 4
+type = "f32"
+word_order = "high_first"
+scale_numerator = 1000
+rounding = "half_even"
+unit = "milli_m"
+
+[[points]]
+name = "signed_i32"
+area = "holding_register"
+address = 2
+type = "i32"
+word_order = "low_first"

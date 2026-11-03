@@ -1,0 +1,101 @@
+# Kernel configuration matching config/examples/modbus-tcp.toml (VS-007): one source fed by
+# the Modbus driver, alarms on two of its points, durable journal. Unchanged kernel
+# (VS-006): this is ordinary configuration.
+[ipc]
+socket_path = "/run/scada/driver.sock"
+max_frame_bytes = 65536
+max_driver_connections = 16
+input_queue_capacity = 64
+max_inflight_per_connection = 32
+handshake_timeout_ms = 2000
+frame_timeout_ms = 2000
+
+[core]
+max_observations_per_batch = 128
+
+[[tags]]
+id = 101
+name = "enclosure_di_0"
+type = "bool"
+[[tags]]
+id = 102
+name = "enclosure_di_1"
+type = "bool"
+[[tags]]
+id = 103
+name = "enclosure_coil_0"
+type = "bool"
+[[tags]]
+id = 104
+name = "enclosure_temperature_centi_c"
+type = "i64"
+[[tags]]
+id = 105
+name = "enclosure_status_word"
+type = "i64"
+[[tags]]
+id = 106
+name = "enclosure_status_alarm"
+type = "bool"
+[[tags]]
+id = 107
+name = "enclosure_counter"
+type = "i64"
+[[tags]]
+id = 108
+name = "enclosure_level_milli_m"
+type = "i64"
+[[tags]]
+id = 109
+name = "enclosure_signed"
+type = "i64"
+
+[[sources]]
+id = 1001
+name = "modbus-enclosure-1"
+# authorized_uids = [990]   # uid of the driver process
+channels = [
+  { channel = 1, tag = 101, type = "bool" },
+  { channel = 2, tag = 102, type = "bool" },
+  { channel = 3, tag = 103, type = "bool" },
+  { channel = 4, tag = 104, type = "i64" },
+  { channel = 5, tag = 105, type = "i64" },
+  { channel = 6, tag = 106, type = "bool" },
+  { channel = 7, tag = 107, type = "i64" },
+  { channel = 8, tag = 108, type = "i64" },
+  { channel = 9, tag = 109, type = "i64" },
+]
+
+[alarms]
+outbox_capacity_events = 65536
+control_socket_path = "/run/scada/alarm.sock"
+control_authorized_uids = [1000]
+
+[[alarms.rules]]
+id = 1
+name = "enclosure_door_open"
+tag_id = 101
+kind = "bool_equals"
+expected = true
+severity = "major"
+
+[[alarms.rules]]
+id = 2
+name = "enclosure_temperature_high"
+tag_id = 104
+kind = "high"
+trip = 4500
+reset = 4300
+severity = "warning"
+
+[[alarms.rules]]
+id = 3
+name = "enclosure_signal_lost"
+tag_id = 104
+kind = "bad_quality"
+severity = "info"
+
+[persistence]
+path = "/var/lib/scada/journal/kernel.db"
+history_socket_path = "/run/scada/history.sock"
+history_authorized_uids = [1000]

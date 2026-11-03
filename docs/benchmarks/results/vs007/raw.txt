@@ -1,0 +1,10 @@
+# vs007 raw 2026-11-03T03:42:42Z host=Linux 6.18.44-fc-v230 x86_64 commit=6ee4403 runs=3 secs=10
+kind=modbus_raw area=input_register qty=1 secs=5.00 reads=146911 errors=0 reads_per_s=29382 items_per_s=29382 p50_us=31 p99_us=60 p999_us=118
+kind=modbus_raw area=input_register qty=16 secs=5.00 reads=148366 errors=0 reads_per_s=29673 items_per_s=474769 p50_us=32 p99_us=57 p999_us=94
+kind=modbus_raw area=input_register qty=125 secs=5.00 reads=149723 errors=0 reads_per_s=29944 items_per_s=3743058 p50_us=32 p99_us=57 p999_us=97
+kind=modbus_raw area=input_register qty=1 secs=5.00 reads=146318 errors=0 reads_per_s=29264 items_per_s=29264 p50_us=32 p99_us=60 p999_us=120
+kind=modbus_raw area=input_register qty=16 secs=5.00 reads=143478 errors=0 reads_per_s=28696 items_per_s=459129 p50_us=33 p99_us=62 p999_us=108
+kind=modbus_raw area=input_register qty=125 secs=5.00 reads=145618 errors=0 reads_per_s=29124 items_per_s=3640448 p50_us=33 p99_us=60 p999_us=107
+kind=modbus_raw area=input_register qty=1 secs=5.00 reads=156013 errors=0 reads_per_s=31202 items_per_s=31202 p50_us=31 p99_us=56 p999_us=104
+kind=modbus_raw area=input_register qty=16 secs=5.00 reads=151158 errors=0 reads_per_s=30232 items_per_s=483705 p50_us=31 p99_us=60 p999_us=126
+kind=modbus_raw area=input_register qty=125 secs=5.00 reads=148791 errors=0 reads_per_s=29758 items_per_s=3719766 p50_us=32 p99_us=60 p999_us=110
