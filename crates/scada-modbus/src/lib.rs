@@ -1,9 +1,10 @@
-//! VS-007 (ADR 0015): read-only Modbus TCP for MoScada drivers.
+//! VS-007/VS-008: read-only Modbus TCP and RTU protocol components for MoScada drivers.
 //!
 //! Layers, each usable alone:
 //! * [`pdu`]: the four read functions of the Modbus Application Protocol V1.1b3
 //!   (FC01 Read Coils, FC02 Read Discrete Inputs, FC03 Read Holding Registers, FC04 Read
 //!   Input Registers): request encoding and strict response validation;
+//! * [`rtu`]: Modbus serial RTU CRC16 wire framing and t1.5/t3.5 timing (VS-008);
 //! * [`mbap`]: Modbus TCP framing (MBAP header, Messaging Implementation Guide V1.0b) with an
 //!   incremental, bounded decoder that tolerates TCP segmentation and coalescing;
 //! * [`client`]: a blocking client, one outstanding request per connection;
@@ -23,6 +24,7 @@ pub mod client;
 pub mod mbap;
 pub mod pdu;
 pub mod plan;
+pub mod rtu;
 pub mod scan;
 pub mod value;
 
