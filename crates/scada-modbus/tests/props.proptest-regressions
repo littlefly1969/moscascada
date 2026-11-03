@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 86861b79b14e879b0ebf07c5595037cb355373048601553035ae4c43894fb2d0 # shrinks to frames = [(0, 0, ReadRequest { area: Coil, address: 0, quantity: 1 }), (0, 0, ReadRequest { area: Coil, address: 0, quantity: 1 })], cuts = [1]
+cc 82b33ab2cf8dfb421faabc0990ca1fe11a47b5f9704c655029e2f6f90f9ad448 # shrinks to blk = [(HoldingRegister, 0, 34, 1)], pts = [(0, 0, 2)]
+cc ffedc79a6e4440b6bb85738533656422c5267d5115ace4c231445d68c4443b56 # shrinks to blk = [(HoldingRegister, 0, 50, 25), (Coil, 0, 1, 1)], pts = [(0, 48, 2), (2, 24, 1), (0, 47, 2)]

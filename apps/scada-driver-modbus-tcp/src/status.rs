@@ -36,7 +36,8 @@ pub fn status_line(s: &DeviceStatus) -> String {
          pending_high_water={} next_seq={} durable_seq={} acks_volatile={} acks_durable={} acks_not_durable={} \
          acks_duplicate={} rejected_retryable={} rejected_collateral={} rejected_fatal={} lost_kernel_restart={} \
          connects={} connect_failures={} disconnects={} heartbeats={} continuity={} modbus_requests={} \
-         modbus_timeouts={} modbus_exceptions={} last_error=\"{}\" kernel_error=\"{}\" fatal=\"{}\"",
+         modbus_timeouts={} modbus_exceptions={} observations={} ack_n={} ack_p50_us={} ack_p99_us={} ack_p999_us={} \
+         ack_max_us={} last_error=\"{}\" kernel_error=\"{}\" fatal=\"{}\"",
         s.name,
         s.source_id,
         s.epoch,
@@ -80,6 +81,12 @@ pub fn status_line(s: &DeviceStatus) -> String {
         s.client.requests,
         s.client.timeouts,
         s.client.exceptions,
+        p.observations_published,
+        s.ack_latency.map_or(0, |l| l.n),
+        opt(s.ack_latency.map(|l| l.p50_us)),
+        opt(s.ack_latency.map(|l| l.p99_us)),
+        opt(s.ack_latency.map(|l| l.p999_us)),
+        opt(s.ack_latency.map(|l| l.max_us)),
         esc(s.last_error.as_deref().unwrap_or("")),
         esc(s.last_publisher_error.as_deref().unwrap_or("")),
         esc(s.fatal.as_deref().unwrap_or("")),

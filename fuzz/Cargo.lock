@@ -573,12 +573,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-driver-modbus-tcp"
+version = "0.1.0"
+dependencies = [
+ "scada-driver-sdk",
+ "scada-modbus",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "scada-driver-sdk"
+version = "0.1.0"
+dependencies = [
+ "scada-protocol",
+]
+
+[[package]]
 name = "scada-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "scada-core",
+ "scada-driver-modbus-tcp",
  "scada-journal",
+ "scada-modbus",
  "scada-protocol",
  "scada-runtime",
 ]
@@ -592,6 +611,10 @@ dependencies = [
  "rustix",
  "scada-core",
 ]
+
+[[package]]
+name = "scada-modbus"
+version = "0.1.0"
 
 [[package]]
 name = "scada-protocol"

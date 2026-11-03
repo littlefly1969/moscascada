@@ -38,6 +38,9 @@ if sed 's/"alarm_id": 5,/"alarm_id": 55,/' docs/catalog/alarm-catalog.example.js
    && python3 scripts/check_alarm_catalog.py target/bad-catalog.json config/examples/alarms.toml >/dev/null; then
   echo "catalog checker accepted an unknown alarm_id" >&2; exit 1
 fi
+echo "== Modbus driver example configuration (VS-007, --check-config opens no socket)"
+cargo run -q --release -p scada-driver-modbus-tcp -- --config config/examples/modbus-tcp.toml \
+  --kernel-config config/examples/modbus-kernel.toml --check-config >/dev/null
 echo "== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)"
 hits=$(grep -rln --include=*.rs -E '\bunsafe\b *(\{|fn|impl)' crates apps | grep -v '^apps/scada-bench/src/alloc.rs$' || true)
 if [ -n "$hits" ]; then echo "unexpected unsafe in: $hits" >&2; exit 1; fi
@@ -67,8 +70,10 @@ if rustup target list --installed | grep -q aarch64-unknown-linux-gnu; then
     cargo check -p scada-bench --bins --target aarch64-unknown-linux-gnu
   else
     cargo check --workspace --all-targets --exclude scada-bench --exclude scada-runtime --exclude scada-journal \
-      --target aarch64-unknown-linux-gnu
-    echo "aarch64: scada-journal, scada-runtime, scada-bench NOT CHECKED (no aarch64 C cross compiler for SQLite)"
+      --exclude scada-driver-modbus-tcp --target aarch64-unknown-linux-gnu
+    # VS-007: the Modbus driver is pure Rust; only its tests pull SQLite (dev-dependency).
+    cargo check -p scada-driver-modbus-tcp --lib --bins --target aarch64-unknown-linux-gnu
+    echo "aarch64: scada-journal, scada-runtime, scada-bench and the Modbus driver tests NOT CHECKED (no aarch64 C cross compiler for SQLite)"
   fi
 fi
 echo "ALL CHECKS PASSED"

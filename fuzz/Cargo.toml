@@ -4,6 +4,9 @@
 #   cargo +nightly fuzz run batch_validation
 #   cargo +nightly fuzz run supervision_transitions   (VS-004)
 #   cargo +nightly fuzz run journal_decode            (VS-006)
+#   cargo +nightly fuzz run modbus_decode             (VS-007)
+#   cargo +nightly fuzz run value_decode              (VS-007)
+#   cargo +nightly fuzz run catalog_parse             (VS-007)
 [package]
 name = "scada-fuzz"
 version = "0.0.0"
@@ -19,6 +22,8 @@ scada-core = { path = "../crates/scada-core" }
 scada-protocol = { path = "../crates/scada-protocol" }
 scada-runtime = { path = "../crates/scada-runtime" }
 scada-journal = { path = "../crates/scada-journal" }
+scada-modbus = { path = "../crates/scada-modbus" }
+scada-driver-modbus-tcp = { path = "../apps/scada-driver-modbus-tcp" }
 
 [workspace]
 members = ["."]
@@ -68,6 +73,27 @@ bench = false
 [[bin]]
 name = "journal_decode"
 path = "fuzz_targets/journal_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modbus_decode"
+path = "fuzz_targets/modbus_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_decode"
+path = "fuzz_targets/value_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog_parse"
+path = "fuzz_targets/catalog_parse.rs"
 test = false
 doc = false
 bench = false

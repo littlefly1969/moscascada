@@ -15,6 +15,7 @@ use scada_protocol::frame::{self, FrameError};
 use scada_protocol::{MINOR_DURABLE_RECEIPTS, MINOR_HEARTBEAT, PROTOCOL_MAJOR, PROTOCOL_MINOR};
 
 use crate::frames::{Fill, FrameReader};
+use crate::latency::LatencyHistogram;
 use crate::{ChannelType, Value};
 
 /// Bound on any frame read from the kernel (its messages are small).
@@ -215,6 +216,8 @@ pub struct Counters {
     pub pending_high_water: u64,
     /// State transitions recorded since creation (the ring keeps the last ones).
     pub transitions: u64,
+    /// Observations in batches built (FullState + Delta), each counted once.
+    pub observations_published: u64,
 }
 
 /// One recorded state transition.
@@ -251,6 +254,8 @@ struct Pending {
     ever_sent: bool,
     /// In flight when an earlier batch was refused: its own refusal is collateral.
     collateral: Option<Collateral>,
+    /// When `publish_scan` built it (start of the scan→ACK latency).
+    created: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +310,9 @@ pub struct SourcePublisher {
     last_continuity: Option<Continuity>,
     last_operation: Option<u64>,
     durable_confirmed_seq: Option<u64>,
+    /// publish_scan → successful ACK of that batch (APPLIED_VOLATILE, APPLIED_DURABLE or
+    /// DUPLICATE). On a durable link this includes the journal commit and fsync.
+    ack_latency: LatencyHistogram,
 }
 
 fn is_retryable(code: ErrorCode) -> bool {
@@ -359,6 +367,7 @@ impl SourcePublisher {
             last_continuity: None,
             last_operation: None,
             durable_confirmed_seq: None,
+            ack_latency: LatencyHistogram::default(),
         })
     }
 
@@ -376,6 +385,11 @@ impl SourcePublisher {
 
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// Latency from `publish_scan` to the successful ACK of the batch it built.
+    pub fn ack_latency(&self) -> &LatencyHistogram {
+        &self.ack_latency
     }
 
     pub fn pending_len(&self) -> usize {
@@ -732,6 +746,7 @@ impl SourcePublisher {
         }
         self.next_seq += 1;
         let changed = observations.len();
+        self.counters.observations_published += changed as u64;
         let with_time = minor >= MINOR_DURABLE_RECEIPTS && acquired_at_utc_ns.is_some();
         let batch = ObservationBatch {
             mode: if full { BatchMode::FullState } else { BatchMode::Delta } as i32,
@@ -754,6 +769,7 @@ impl SourcePublisher {
             not_durable: false,
             ever_sent: false,
             collateral: None,
+            created: Instant::now(),
         });
         self.counters.pending_high_water = self.counters.pending_high_water.max(self.pending.len() as u64);
         if full {
@@ -940,6 +956,7 @@ impl SourcePublisher {
         let seq = a.source_sequence;
         let was_full = front.full;
         let collateral = front.collateral;
+        let created = front.created;
         let status = AckStatus::try_from(a.status).unwrap_or(AckStatus::Unspecified);
         let code = ErrorCode::try_from(a.error_code).unwrap_or(ErrorCode::Unspecified);
         let durable_link = self.link.as_ref().is_some_and(|l| l.durable);
@@ -962,6 +979,7 @@ impl SourcePublisher {
                     AckStatus::AppliedDurable => self.counters.acks_applied_durable += 1,
                     _ => self.counters.acks_duplicate += 1,
                 }
+                self.ack_latency.record_us(created.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
                 if collateral.is_some() {
                     // Applied after a refused earlier batch: only a FullState could, and
                     // none is sent with a batch in flight. Defensive: resynchronise.

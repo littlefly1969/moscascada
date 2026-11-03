@@ -24,8 +24,10 @@
 
 pub mod epoch;
 pub mod frames;
+pub mod latency;
 pub mod publisher;
 
+pub use latency::LatencyHistogram;
 pub use publisher::{Backoff, Counters, LinkState, Publish, PublisherConfig, SdkError, SourcePublisher, Transition};
 
 /// Value of one channel (the two types the RTDB accepts).

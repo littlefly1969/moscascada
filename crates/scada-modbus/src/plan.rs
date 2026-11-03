@@ -179,7 +179,11 @@ pub fn build(blocks: &[Block], points: &[PointSpan], max_requests: usize) -> Res
             if requests.len() > max_requests {
                 return Err(PlanError::TooManyRequests { needed: requests.len(), max: max_requests });
             }
-            next = used.iter().map(|u| u.0).filter(|s| *s >= end).min();
+            // Every point ending at or before `end` is now covered. The next request starts
+            // at the first point still uncovered, which may start before `end` when points
+            // overlap (a 16-bit point inside a 32-bit one): those registers are read twice
+            // rather than skipping the straddling point. `end` strictly increases.
+            next = used.iter().filter(|(_, e)| *e > end).map(|u| u.0).min();
         }
     }
     let mut locations = Vec::with_capacity(points.len());
@@ -205,6 +209,18 @@ mod tests {
 
     fn pt(area: Area, address: u16, width: u16) -> PointSpan {
         PointSpan { area, address, width }
+    }
+
+    #[test]
+    fn overlapping_point_straddling_the_window_is_not_skipped() {
+        // Found by the property test: u16 at 24, u16 at 48, u32 at 48..50, window 25.
+        let blocks = [blk(Area::HoldingRegister, 0, 50, 25)];
+        let points =
+            [pt(Area::HoldingRegister, 24, 1), pt(Area::HoldingRegister, 48, 1), pt(Area::HoldingRegister, 48, 2)];
+        let p = build(&blocks, &points, 16).unwrap();
+        assert_eq!(p.locations.len(), 3);
+        let r = p.requests[p.locations[2].request];
+        assert!(r.address() <= 48 && u32::from(r.address()) + u32::from(r.quantity()) >= 50);
     }
 
     #[test]

@@ -67,6 +67,17 @@ pub struct DeviceStatus {
     /// New transitions since the last status read: (from, to, reason).
     pub transitions: Vec<(String, String, String)>,
     pub fatal: Option<String>,
+    /// publish_scan → successful ACK (µs, bucket upper bounds): count, p50, p99, p99.9, max.
+    pub ack_latency: Option<AckLatency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AckLatency {
+    pub n: u64,
+    pub p50_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub max_us: u64,
 }
 
 impl DeviceStatus {
@@ -100,6 +111,7 @@ impl DeviceStatus {
             client: ClientCounters::default(),
             transitions: Vec::new(),
             fatal: None,
+            ack_latency: None,
         }
     }
 }
@@ -185,6 +197,13 @@ impl Worker {
             add(&mut c, &cl.counters);
         }
         self.local.client = c;
+        let h = p.ack_latency();
+        self.local.ack_latency = match (h.quantile_us(0.5), h.quantile_us(0.99), h.quantile_us(0.999)) {
+            (Some(p50_us), Some(p99_us), Some(p999_us)) => {
+                Some(AckLatency { n: h.count(), p50_us, p99_us, p999_us, max_us: h.max_us() })
+            }
+            _ => None,
+        };
         let total = p.counters().transitions;
         let new = total.saturating_sub(self.seen_transitions) as usize;
         let ts: Vec<_> = p.transitions().collect();
