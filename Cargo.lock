@@ -822,6 +822,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-modbus"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "scada-modbus-sim"
+version = "0.1.0"
+dependencies = [
+ "scada-modbus",
+]
+
+[[package]]
 name = "scada-protocol"
 version = "0.1.0"
 dependencies = [

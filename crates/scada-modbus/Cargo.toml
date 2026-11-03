@@ -1,0 +1,16 @@
+[package]
+name = "scada-modbus"
+description = "VS-007: read-only Modbus TCP codec (MBAP + PDU FC01..FC04), blocking client, read planner, scanner and value decoder. No product mappings, no MoScada protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

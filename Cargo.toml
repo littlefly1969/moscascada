@@ -6,6 +6,8 @@ members = [
     "crates/scada-runtime",
     "crates/scada-sched",
     "crates/scada-journal",
+    "crates/scada-modbus",
+    "crates/scada-modbus-sim",
     "crates/scada-driver-sdk",
     "apps/scada-sim-driver",
     "apps/scada-bench",
@@ -33,6 +35,8 @@ scada-protocol = { path = "crates/scada-protocol" }
 scada-runtime = { path = "crates/scada-runtime" }
 scada-sched = { path = "crates/scada-sched" }
 scada-journal = { path = "crates/scada-journal" }
+scada-modbus = { path = "crates/scada-modbus" }
+scada-modbus-sim = { path = "crates/scada-modbus-sim" }
 scada-driver-sdk = { path = "crates/scada-driver-sdk" }
 blake3 = { version = "1.8.7", default-features = false, features = ["pure"] }
 prost = { version = "0.14.4", default-features = false, features = ["std", "derive"] }
