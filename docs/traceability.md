@@ -1,6 +1,6 @@
-# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004 + VS-005 + VS-006
+# Matrice di tracciabilità VS-001 + VS-002 + VS-003 + VS-004 + VS-005 + VS-006 + VS-007
 
-La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003), [§VS-004](#vs-004), [§VS-005](#vs-005) e [§VS-006](#vs-006); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
+La parte VS-002 è in fondo ([§VS-002](#vs-002)), seguita da [§VS-003](#vs-003), [§VS-004](#vs-004), [§VS-005](#vs-005), [§VS-006](#vs-006) e [§VS-007](#vs-007); le sezioni VS-001 sono conservate, con i limiti noti aggiornati dove VS-002 li ha chiusi.
 
 Legenda: **✅ verificato** = implementato e coperto da un test o da una misura eseguiti (risultati in questo repository); **🟡 parziale** = implementato, verifica incompleta (motivo indicato); **❌ non soddisfatto** = non implementato o non verificabile qui (motivo indicato).
 
@@ -583,3 +583,52 @@ Legenda della matrice T01–T30: **PASS** = eseguito e superato in questo reposi
 6. Prove di salto d'orologio con orologio iniettato, non con uno step reale del clock del SO.
 7. `actor_uid` resta l'identità di un processo; `principal` autenticato non implementato.
 
+
+## VS-007
+
+Specifica: `docs/vertical-slices/vs007-driver-sdk-modbus-tcp.md`. Base: branch VS-006 `claude/project-thread-uymxzt` (`3a409ca`, PR #6 **non mergiata**); branch `feature/vs007-driver-sdk-modbus-tcp`, PR #9 **senza merge** (review tecnica indipendente). Decisioni: ADR 0015; misure: `docs/benchmarks/vs007.md` e `docs/benchmarks/results/vs007/`; esercizio: `docs/operations/vs007-modbus-playbook.md`. Percorsi: `e2e/` = `apps/scada-driver-modbus-tcp/tests/e2e.rs` (kernel VS-006 reale + processo driver + simulatore), `sdk/` = `crates/scada-driver-sdk/tests/publisher.rs` (kernel finto, per perdere ACK a comando), `sim/` = `crates/scada-modbus-sim/tests/client.rs`, `props/` = `crates/scada-modbus/tests/props.rs`, `modbus:` = test unitari di `scada-modbus`, `drv:` = test unitari del driver.
+
+Legenda: **DONE** = implementato e verificato da un test o una misura eseguiti qui; **PARTIAL** = implementato, verifica incompleta (motivo indicato); **NOT TESTED** = non verificabile qui (motivo indicato).
+
+### Vincoli della slice
+
+| Vincolo | Stato | Evidenza |
+|---|---|---|
+| Kernel deterministico, runtime, journal, protocollo, proto invariati | DONE | `git diff 3a409ca -- crates/scada-core crates/scada-runtime crates/scada-journal crates/scada-protocol proto` vuoto; `buf breaking` contro la baseline v1.0 ok (`results/vs007/proto.log`) |
+| Driver come processo separato, niente plugin dinamici | DONE | binario `scada-driver-modbus-tcp`; SDK dipende solo da `scada-protocol`; nessun `dlopen`/`libloading` |
+| Sola lettura (FC01–FC04), nessun FC05/06/15/16 | DONE | `scada_modbus::Area` ha solo le quattro aree di lettura; nessun encoder di scrittura nel crate |
+| Nessun open-wal, nessun PostgreSQL | DONE | nessuna dipendenza nuova di questo tipo (`cargo tree`), `cargo deny` invariato rispetto a VS-006 (`results/vs007/cargo-deny.log`: stessi 5 warning preesistenti, nessuno nuovo) |
+| Nessuna continuità `Complete`, nessun timestamp inventato | DONE | `e2e/t11_only_driver_acquisition_time_is_recorded`, `e2e/t09_driver_restart_is_a_new_epoch_with_baseline_and_unknown_history` |
+| Tutto bounded, nessuna perdita silenziosa | DONE | `sdk/t08_no_premature_durable_confirmation_and_bounded_pending`, `e2e/t08_…bounded_pending`, contatori `deferred`/`lost_kernel_restart` |
+
+### Matrice T01–T16
+
+| ID | Esito | Evidenza / motivo |
+|---|---|---|
+| T01 config/catalogo invalidi, `--check-config` senza socket | DONE | `e2e/t01_check_config_is_fail_closed_and_opens_no_socket` (casi invalidi, nessuna connessione al simulatore né al kernel); `drv:rejects_invalid_profiles`, `accepts_a_valid_profile`; esempio in `check.sh` |
+| T02 FC01–04, MBAP, zero-based, eccezioni, byte count | DONE | `sim/t02_all_four_functions_exact_zero_based`, `sim/t02_exceptions_keep_the_connection_byte_count_poisons_it`; `props/response_round_trip`; test unitari `modbus:pdu`/`mbap` |
+| T03 frammentazione, coalescing, transaction/unit errati, timeout, EOF | DONE | `sim/t03_*` (5 test); `props/mbap_any_split` (ogni spezzatura di un flusso di ADU validi dà gli stessi frame); connessione avvelenata a ogni errore non-eccezione |
+| T04 un device, 3+ tipi, più blocchi → FullState completo | DONE | `e2e/t04_t05_full_state_exact_channels_then_minimal_deltas` (9 canali, 7 tipi, 4 blocchi, valori esatti in RTDB) |
+| T05 Delta dopo FullState, scan senza cambi | DONE | stesso test e2e; `sdk/t04_t05_full_state_then_minimal_deltas_and_no_superfluous_batch` (sequenza monotona, nessun batch per scan invariato) |
+| T06 crash/disconnect del server a metà scan | DONE | `e2e/t06_device_failure_mid_scan_degrades_and_never_publishes_a_partial_scan` (tag `Uncertain(SourceUnavailable)`, nessun FullState parziale, recupero con FullState); `e2e/t06_mutation_during_scan_and_truncated_frames_are_handled` |
+| T07 riavvio kernel con journal VS-006 | DONE | `e2e/t07_kernel_crash_with_journal_recovered_unverified_until_driver_full_state` (SIGKILL del kernel; `RecoveredUnverified` fino al FullState del driver, poi `Good`/verified) |
+| T08 ACK persi, receipt durevoli bloccate | DONE | `e2e/t08_stalled_journal_no_premature_durable_receipt_bounded_pending` (writer fermo con `--test-journal-stall-file`); `sdk/t08_lost_ack_on_durable_link_replays_and_proves_durability_by_duplicate`, `sdk/t08_retryable_refusal_resends_the_same_sequence_in_order`, `sdk/t08_no_premature_durable_confirmation_and_bounded_pending`. La perdita di un ACK a comando è provata solo contro il kernel finto (il kernel reale non ha un hook per perderlo) |
+| T09 reconnect, nuovo epoch dopo restart del processo | DONE | `e2e/t09_driver_restart_is_a_new_epoch_with_baseline_and_unknown_history`, `e2e/t09_volatile_kernel_restart_reconnects_with_full_state`, `sdk/t09_kernel_restart_without_baseline_reports_lost_batches_and_resends_full_state` |
+| T10 allarme su punto Modbus + disconnessione/recovery | DONE | `e2e/t10_alarm_on_a_modbus_point_survives_disconnection_without_false_return` (indeterminato durante il fermo, nessun rientro falso, id/occurrence/ACK conservati) |
+| T11 timestamp | DONE | `e2e/t11_only_driver_acquisition_time_is_recorded` (`acquired_at` del driver entro la finestra di scan, `clock_quality = Unknown`, nessun timestamp di sorgente) |
+| T12 fuzz MBAP/PDU, catalogo, decoder | DONE | target `modbus_decode`, `value_decode`, `catalog_parse`: 60 s ciascuno, 0 crash (2,9 M / 6,3 M / 164 k esecuzioni, `results/vs007/fuzz.md`), in CI `fuzz-smoke`; property test stabili `props/*` (4). Il property test del planner ha trovato un difetto reale (punto a 32 bit a cavallo della finestra con punti sovrapposti), corretto con test di regressione |
+| T13 backpressure: SQLite lento, coda journal / outbox pieni | DONE | `e2e/t13_journal_queue_full_is_a_typed_refusal_retried_with_the_same_sequence`, `e2e/t13_full_outbox_is_a_typed_refusal_and_nothing_is_silently_dropped`, `e2e/t08_stalled_journal_…` |
+| T14 compatibilità protocollo e default-off | DONE | proto e kernel invariati (sopra); `./scripts/check.sh` completo (suite VS-001..006 e golden digest invariati): `results/vs007/check.log` |
+| T15 soak 30 min con journal e disconnessioni pilotate | SOAK_STATUS | SOAK_EVIDENCE |
+| T16 x86_64 e aarch64 | PARTIAL | x86_64: tutto sopra. aarch64: `cargo check` dei crate pure-Rust e di lib/bin del driver (`check.sh`); test del driver, runtime e journal non compilati per aarch64 (SQLite C, nessun cross compiler). **NOT TESTED ON HARDWARE** (né Micro né Raspberry Pi) |
+| Performance §7 | PARTIAL | `docs/benchmarks/vs007.md`: matrice 1/8/16 device × 1/16/125 registri, journal off / FULL+durable, FIFO/source_fair, current_thread/multi_thread(2), scan d'impianto; solo loopback e simulatore, nessun dispositivo reale (i tempi di risposta reali dominano il budget: modello di capacità) |
+
+### Limiti e rischi residui (VS-007)
+
+1. **Nessun dispositivo Modbus reale**: tutto è provato contro il simulatore su loopback. Profili di prodotti reali da verificare su banco (playbook §9).
+2. **Nessuno spool durevole nel driver**: un crash del driver perde i batch non confermati; la storia della sorgente diventa `Unknown` (dichiarato, non nascosto).
+3. **Polling**: eventi più brevi dell'intervallo di scansione non sono visti; nessun timestamp del dispositivo.
+4. Una richiesta per connessione alla volta; nessun pipelining Modbus.
+5. Nessuna sicurezza di trasporto (Modbus TCP non autentica né cifra): solo segmentazione di rete (playbook §1).
+6. La perdita di un singolo ACK è provata contro un kernel finto; contro il kernel reale sono provati crash, stall del journal e code piene.
+7. aarch64 solo `cargo check`; **NOT TESTED ON HARDWARE**.

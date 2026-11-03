@@ -1,0 +1,3 @@
+1.75.0
+buf lint: ok; buf breaking vs baseline v1.0: ok
+buf breaking detects a renumbered field: ok
