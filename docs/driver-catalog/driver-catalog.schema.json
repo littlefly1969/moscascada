@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moscada.invalid/schema/driver-catalog/1",
+  "title": "MoScada driver catalog profile (moscada.driver-catalog/1, VS-007)",
+  "description": "Documentation schema of a product profile file (TOML). The normative validator is `scada-driver-modbus-tcp --check-config`, which additionally checks blocks overlap, points inside blocks, scale overflow and ambiguous mappings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "profile",
+    "blocks",
+    "points"
+  ],
+  "properties": {
+    "schema": {
+      "const": "moscada.driver-catalog/1"
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "title",
+        "manufacturer",
+        "transport",
+        "protocol",
+        "source_document"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "manufacturer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "transport": {
+          "const": "tcp"
+        },
+        "protocol": {
+          "const": "modbus"
+        },
+        "source_document": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "description": {
+          "type": "string"
+        },
+        "max_requests_per_scan": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 32
+        }
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area",
+          "start",
+          "count"
+        ],
+        "properties": {
+          "area": {
+            "enum": [
+              "coil",
+              "discrete_input",
+              "holding_register",
+              "input_register"
+            ]
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "max_per_request": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "description": "<= 125 for register areas, <= 2000 for bit areas"
+          }
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "area",
+          "address",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "area": {
+            "enum": [
+              "coil",
+              "discrete_input",
+              "holding_register",
+              "input_register"
+            ]
+          },
+          "address": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "Modbus PDU address, zero-based"
+          },
+          "type": {
+            "enum": [
+              "bit",
+              "register_bit",
+              "u16",
+              "i16",
+              "u32",
+              "i32",
+              "f32"
+            ]
+          },
+          "bit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15
+          },
+          "word_order": {
+            "enum": [
+              "high_first",
+              "low_first"
+            ]
+          },
+          "byte_swap": {
+            "type": "boolean"
+          },
+          "scale_numerator": {
+            "type": "integer",
+            "not": {
+              "const": 0
+            }
+          },
+          "scale_denominator": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "rounding": {
+            "enum": [
+              "exact",
+              "half_even",
+              "truncate"
+            ]
+          },
+          "valid_min": {
+            "type": "integer"
+          },
+          "valid_max": {
+            "type": "integer"
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+# VS-007 driver example (ADR 0015). Validate without any network access:
+#   scada-driver-modbus-tcp --config config/examples/modbus-tcp.toml --check-config \
+#       --kernel-config config/examples/modbus-kernel.toml
+#
+# Modbus TCP has no authentication and no encryption: run it on a segmented OT network,
+# with a firewall that lets only this host reach the devices on port 502 (playbook
+# docs/operations/vs007-modbus-playbook.md). The driver never writes to a device and never
+# listens on a socket.
+schema = "moscada.driver.modbus-tcp/1"
+
+[driver]
+driver_id = "modbus-tcp-1"                 # diagnostic, <= 64 bytes
+kernel_socket = "/run/scada/driver.sock"   # [ipc] socket_path of the kernel
+catalog_dir = "../../docs/driver-catalog"  # every *.toml is a product profile (relative to this file)
+# catalog_files = ["/etc/scada/profiles/other.v2.toml"]
+request_durable_receipts = true            # ask for APPLIED_DURABLE (granted only by a journaling kernel, 1.2)
+require_durable_receipts = false           # true = refuse to stream on a volatile link
+max_pending_batches = 64                   # bound of unconfirmed batches per device (then scans are deferred, counted)
+max_inflight_batches = 8                   # sent and unanswered (also bounded by the kernel)
+heartbeat_interval_ms = 1000               # 0 = never; only sent when the kernel negotiated minor >= 1
+handshake_timeout_ms = 5000
+write_timeout_ms = 5000
+kernel_reconnect_min_ms = 100              # exponential backoff towards the kernel
+kernel_reconnect_max_ms = 10000
+retry_min_ms = 20                          # resend of a batch refused with a retryable code
+retry_max_ms = 5000
+drain_timeout_ms = 1000                    # wait for in-flight ACKs before closing a link
+status_interval_ms = 10000                 # STATUS lines on stdout
+# health_file = "/run/scada/modbus-tcp-1.health.json"
+max_devices = 64                           # one thread and one kernel connection per device
+
+[[devices]]
+name = "enclosure-1"
+source_id = 1001                           # [[sources]] id of the kernel
+host = "192.0.2.10"                        # IPv4, IPv6 or host name (TEST-NET-1 example address)
+port = 502
+unit_id = 1                                # gateways (TCP/RTU) route by unit id
+profile = "generic-io"
+profile_version = 1
+scan_interval_ms = 1000
+connect_timeout_ms = 2000
+response_timeout_ms = 1000
+inter_request_delay_ms = 0                 # rate limit between the requests of one scan
+device_backoff_min_ms = 500                # retry of a failed device
+device_backoff_max_ms = 30000
+channels = [
+  { channel = 1, point = "di_0" },
+  { channel = 2, point = "di_1" },
+  { channel = 3, point = "coil_0" },
+  { channel = 4, point = "temperature_centi" },
+  { channel = 5, point = "status_word" },
+  { channel = 6, point = "status_alarm_bit" },
+  { channel = 7, point = "counter" },
+  { channel = 8, point = "level_milli" },
+  { channel = 9, point = "signed_i32" },
+]

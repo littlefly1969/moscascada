@@ -213,6 +213,8 @@ pub struct Counters {
     pub continuity_resynchronized: u64,
     /// Highest number of batches simultaneously pending.
     pub pending_high_water: u64,
+    /// State transitions recorded since creation (the ring keeps the last ones).
+    pub transitions: u64,
 }
 
 /// One recorded state transition.
@@ -392,6 +394,11 @@ impl SourcePublisher {
         self.transitions.iter()
     }
 
+    /// Whether a connection attempt is allowed now (connected, or the backoff elapsed).
+    pub fn connect_due(&self) -> bool {
+        self.link.is_some() || Instant::now() >= self.connect_at
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -431,6 +438,7 @@ impl SourcePublisher {
             self.transitions.pop_front();
         }
         self.transitions.push_back(t);
+        self.counters.transitions += 1;
         self.state = to;
     }
 

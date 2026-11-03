@@ -9,6 +9,7 @@ members = [
     "crates/scada-modbus",
     "crates/scada-modbus-sim",
     "crates/scada-driver-sdk",
+    "apps/scada-driver-modbus-tcp",
     "apps/scada-sim-driver",
     "apps/scada-bench",
 ]

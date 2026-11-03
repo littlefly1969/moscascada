@@ -802,6 +802,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "scada-driver-modbus-tcp"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "scada-driver-sdk",
+ "scada-journal",
+ "scada-modbus",
+ "scada-modbus-sim",
+ "scada-protocol",
+ "scada-sim-driver",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "scada-driver-sdk"
 version = "0.1.0"
 dependencies = [
