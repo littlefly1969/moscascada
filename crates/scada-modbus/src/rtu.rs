@@ -77,16 +77,18 @@ pub fn decode_adu(frame: &[u8], expected_slave: u8) -> Result<RtuAdu<'_>, RtuErr
         return Err(RtuError::FrameLength(frame.len()));
     }
     let (data, received) = frame.split_at(frame.len() - 2);
-    let actual_crc = u16::from_le_bytes([received[0], received[1]]);
+    let actual_crc = <[u8; 2]>::try_from(received)
+        .map(u16::from_le_bytes)
+        .map_err(|_| RtuError::FrameLength(frame.len()))?;
     let expected_crc = crc16(data);
     if actual_crc != expected_crc {
         return Err(RtuError::CrcMismatch { expected: expected_crc, got: actual_crc });
     }
-    let address = data[0];
+    let (&address, pdu) = data.split_first().ok_or(RtuError::FrameLength(frame.len()))?;
     if address != expected_slave {
         return Err(RtuError::AddressMismatch { expected: expected_slave, got: address });
     }
-    Ok(RtuAdu { slave: address, pdu: &data[1..] })
+    Ok(RtuAdu { slave: address, pdu })
 }
 
 /// Strict RTU response decoding using the existing read-only PDU implementation.
