@@ -599,6 +599,7 @@ Legenda: **DONE** = implementato e verificato da un test o una misura eseguiti q
 | Sola lettura (FC01–FC04), nessun FC05/06/15/16 | DONE | `scada_modbus::Area` ha solo le quattro aree di lettura; nessun encoder di scrittura nel crate |
 | Nessun open-wal, nessun PostgreSQL | DONE | nessuna dipendenza nuova di questo tipo (`cargo tree`), `cargo deny` invariato rispetto a VS-006 (`results/vs007/cargo-deny.log`: stessi 5 warning preesistenti, nessuno nuovo) |
 | Nessuna continuità `Complete`, nessun timestamp inventato | DONE | `e2e/t11_only_driver_acquisition_time_is_recorded`, `e2e/t09_driver_restart_is_a_new_epoch_with_baseline_and_unknown_history` |
+| Receipt durevoli obbligatorie e non concesse: fail-closed | DONE | `sdk/required_durable_receipts_not_granted_is_not_a_connection_and_publishes_nothing` (review PR #9, P2: `ensure_connected` = `false`, nessun batch inviato, `connects` non incrementato, backoff, recupero quando il kernel concede la durabilità) |
 | Tutto bounded, nessuna perdita silenziosa | DONE | `sdk/t08_no_premature_durable_confirmation_and_bounded_pending`, `e2e/t08_…bounded_pending`, contatori `deferred`/`lost_kernel_restart` |
 
 ### Matrice T01–T16

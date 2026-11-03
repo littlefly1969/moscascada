@@ -489,10 +489,18 @@ impl SourcePublisher {
         self.set_state(LinkState::Connecting, "connect");
         match self.handshake() {
             Ok(link) => {
-                self.connect_attempts = 0;
-                self.counters.connects += 1;
+                // `on_welcome` may refuse the session (durable receipts required but not
+                // granted): the link is then dropped and this is not a connection.
                 self.on_welcome(link)?;
-                Ok(true)
+                if self.link.is_some() {
+                    self.connect_attempts = 0;
+                    self.counters.connects += 1;
+                    Ok(true)
+                } else {
+                    self.counters.handshakes_rejected += 1;
+                    self.connect_attempts = self.connect_attempts.saturating_add(1);
+                    Ok(false)
+                }
             }
             Err(e) => {
                 self.counters.connect_failures += 1;
@@ -569,6 +577,8 @@ impl SourcePublisher {
     }
 
     /// Reconcile the pending window with the kernel's view (contract §5, §5.1, §7, §10.4).
+    /// Refuses the session (drops `link`, leaves `self.link` empty, state `Disconnected`,
+    /// maximum backoff) when durable receipts are required and not granted.
     fn on_welcome(&mut self, link: Link) -> Result<(), SdkError> {
         let w = link.welcome.clone();
         if self.cfg.require_durable_receipts && !link.durable {

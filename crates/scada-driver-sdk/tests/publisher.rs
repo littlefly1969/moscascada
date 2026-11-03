@@ -505,3 +505,46 @@ fn incomplete_or_mistyped_scans_are_refused_before_any_io() {
     bad.channels = vec![(2, ChannelType::Bool), (1, ChannelType::Bool)];
     assert!(SourcePublisher::new(bad, 1).is_err());
 }
+
+#[test]
+fn required_durable_receipts_not_granted_is_not_a_connection_and_publishes_nothing() {
+    let k = FakeKernel::new();
+    // Volatile kernel: the Welcome does not grant durable receipts.
+    let refused = k.serve(WelcomeSpec { durable: false, ..Default::default() }, |c, h| {
+        assert!(h.request_durable_receipts);
+        // The driver must close the session without sending anything.
+        c.recv().map(|m| format!("{m:?}"))
+    });
+    let mut cf = cfg(&k);
+    cf.request_durable_receipts = true;
+    cf.require_durable_receipts = true;
+    cf.reconnect_backoff.max = Duration::from_millis(300);
+    let mut p = SourcePublisher::new(cf, 9).unwrap();
+    assert!(!p.ensure_connected().unwrap(), "a refused session is not connected");
+    assert_eq!(p.state(), LinkState::Disconnected);
+    assert!(!p.durable_receipts_active());
+    let c = p.counters();
+    assert_eq!(c.connects, 0, "a refused session is not counted as a connection");
+    assert_eq!(c.handshakes_rejected, 1);
+    assert!(p.last_error().unwrap_or_default().contains("durable receipts required"));
+    assert!(matches!(p.publish_scan(&vals(true, 1, 2), None), Err(scada_driver_sdk::SdkError::NotConnected)));
+    assert_eq!(p.pending_len(), 0);
+    assert_eq!(refused.join().unwrap(), None, "nothing was sent on the refused session");
+    // Backoff: no new attempt before reconnect_backoff.max.
+    assert!(!p.connect_due());
+    assert!(!p.ensure_connected().unwrap());
+    // The kernel now journals: the next attempt after the backoff succeeds, FullState first.
+    let granted = k.serve(WelcomeSpec { durable: true, ..Default::default() }, |c, _| {
+        let b = c.recv_batch();
+        c.applied(b.source_sequence, true);
+        b
+    });
+    std::thread::sleep(Duration::from_millis(320));
+    connect(&mut p);
+    assert!(p.durable_receipts_active());
+    assert_eq!(p.counters().connects, 1);
+    assert_eq!(p.publish_scan(&vals(true, 1, 2), None).unwrap(), Publish::FullState { seq: 1 });
+    p.drain(Duration::from_secs(5));
+    assert_eq!(p.durable_confirmed_sequence(), Some(1));
+    assert_eq!(granted.join().unwrap().mode(), BatchMode::FullState);
+}
