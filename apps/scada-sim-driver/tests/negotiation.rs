@@ -52,6 +52,7 @@ fn fake_kernel(minor: u32) -> (std::path::PathBuf, tempfile::TempDir, mpsc::Rece
                             }),
                             full_state_required: true,
                             last_accepted_source_sequence: None,
+                            ..Default::default()
                         })),
                     };
                     frame::write_message(&mut s, &welcome, 65_536, &mut w).unwrap();
@@ -98,7 +99,11 @@ fn updated_driver_sends_no_heartbeat_to_a_1_0_kernel() {
     assert!(!negotiated);
     assert_eq!(sent, 0);
     let seen = rx.recv().unwrap();
-    assert_eq!(seen.hello_minor, 1, "the updated driver announces 1.1");
+    assert_eq!(
+        seen.hello_minor,
+        scada_protocol::PROTOCOL_MINOR,
+        "the updated driver announces its highest minor (1.2 since VS-006)"
+    );
     assert_eq!((seen.batches, seen.heartbeats), (5, 0), "{seen:?}");
 }
 

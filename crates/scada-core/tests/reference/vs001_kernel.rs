@@ -116,6 +116,7 @@ impl RefKernel {
             last_accepted_source_sequence: s.last_accepted,
             silent: false,
             last_batch_operation: 0,
+            unverified: false,
         })
     }
 
@@ -147,6 +148,8 @@ impl RefKernel {
             Operation::AlarmAcknowledge { .. } | Operation::AdvanceDurableWatermark { .. } => {
                 return Err(ApplyError::AlarmsNotConfigured);
             }
+            // VS-006: a non-recoverable kernel (Kernel::new) refuses the recovery fence.
+            Operation::RecoveryFence { .. } => return Err(ApplyError::RecoveryNotEnabled),
         };
         if let TransitionOutcome::Applied { .. } = outcome {
             self.last_operation_sequence = expected;
@@ -383,7 +386,7 @@ impl RefKernel {
         }
         Ok(TransitionOutcome::Applied {
             operation_sequence: op,
-            kind: AppliedKind::Batch { continuity, changed_tags: changed },
+            kind: AppliedKind::Batch { continuity, changed_tags: changed, reconciled: false },
         })
     }
 
@@ -414,6 +417,7 @@ impl RefKernel {
                     supervision: m.supervision,
                     silent: false,
                     last_batch_operation: 0,
+                    unverified: false,
                 })
                 .collect(),
             tags: tags

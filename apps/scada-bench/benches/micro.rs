@@ -42,6 +42,7 @@ fn wire_batch(n: u32, seq: u64) -> Vec<u8> {
                     value: Some(pb::observation::Value::I64Value(i64::from(c) * 1_000_003)),
                 })
                 .collect(),
+            ..Default::default()
         })),
     }
     .encode_to_vec()

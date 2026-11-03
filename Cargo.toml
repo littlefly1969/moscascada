@@ -5,6 +5,7 @@ members = [
     "crates/scada-protocol",
     "crates/scada-runtime",
     "crates/scada-sched",
+    "crates/scada-journal",
     "apps/scada-sim-driver",
     "apps/scada-bench",
 ]
@@ -30,6 +31,7 @@ scada-core = { path = "crates/scada-core" }
 scada-protocol = { path = "crates/scada-protocol" }
 scada-runtime = { path = "crates/scada-runtime" }
 scada-sched = { path = "crates/scada-sched" }
+scada-journal = { path = "crates/scada-journal" }
 blake3 = { version = "1.8.7", default-features = false, features = ["pure"] }
 prost = { version = "0.14.4", default-features = false, features = ["std", "derive"] }
 prost-build = "0.14.4"
@@ -39,6 +41,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
+# VS-006 (ADR 0013 D1): SQLite compiled from the bundled amalgamation (no system library).
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "time", "process"] }
 
 [profile.release]
 debug = "line-tables-only"

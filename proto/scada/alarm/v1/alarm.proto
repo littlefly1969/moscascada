@@ -16,6 +16,14 @@
 // ACK_STATUS_APPLIED_VOLATILE is lost with the process. Reading events never frees outbox
 // slots and never makes anything durable.
 //
+// VS-006 (ADR 0013 D11), additive, alarm_api_version stays 1: with [persistence] an
+// AcknowledgeAlarm that carries an action_id and require_durable=true is answered once,
+// after the journal transaction containing it committed (ACK_STATUS_APPLIED_DURABLE). A
+// retry with the same action_id returns the same outcome (same event_seq) without a new
+// event. Without action_id the semantics stay those of VS-005 (APPLIED_VOLATILE = RAM
+// only), even when the kernel journals. Reading events still never frees outbox slots:
+// only the journal commit does.
+//
 // Evolution rules: never reuse or renumber a field or enum value; reserve removed numbers.
 syntax = "proto3";
 
@@ -143,6 +151,13 @@ message EventPage {
 message AcknowledgeAlarm {
   uint32 alarm_id = 1;
   uint64 activation_token = 2;
+  // VS-006: idempotency key chosen by the client (exactly 16 bytes, e.g. a UUID), stable
+  // across retries of the same operator action. Empty = no idempotency (VS-005).
+  bytes action_id = 3;
+  // VS-006: operator note, at most 256 bytes UTF-8, stored with the action (audit).
+  string note = 4;
+  // VS-006: answer only after the journal commit (requires action_id and [persistence]).
+  bool require_durable = 5;
 }
 
 enum AckStatus {
@@ -163,6 +178,17 @@ enum AckStatus {
   ACK_STATUS_NOT_ACKNOWLEDGEABLE = 7;
   ACK_STATUS_OPERATION_SEQUENCE_EXHAUSTED = 8;
   ACK_STATUS_INTERNAL = 9;
+  // VS-006: applied and committed durably (require_durable with [persistence]).
+  ACK_STATUS_APPLIED_DURABLE = 10;
+  // VS-006: the journal refused the action before it was applied (queue full, disk full,
+  // fault); nothing changed. Retry with the same action_id.
+  ACK_STATUS_JOURNAL_UNAVAILABLE = 11;
+  // VS-006: the action_id was already used for a different alarm or token.
+  ACK_STATUS_ACTION_ID_CONFLICT = 12;
+  // VS-006: require_durable without [persistence], or an invalid action_id/note.
+  ACK_STATUS_DURABILITY_UNAVAILABLE = 13;
+  // VS-006: applied in RAM but the journal commit failed: NOT durable.
+  ACK_STATUS_APPLIED_NOT_DURABLE = 14;
 }
 
 message AckResult {
@@ -173,6 +199,11 @@ message AckResult {
   // OUTBOX_CAPACITY_EXCEEDED: slots the operation needed and the free ones.
   uint64 required = 5;
   uint64 free = 6;
+  // VS-006: the action_id of the request, echoed.
+  bytes action_id = 7;
+  // VS-006: this answer is the stored outcome of an earlier request with the same
+  // action_id (no new operation, no new event).
+  bool deduplicated = 8;
 }
 
 message GetCapacityStatus {}
@@ -183,6 +214,11 @@ enum Durability {
   DURABILITY_NONE_VOLATILE = 1;
   // --test-simulated-durable-sink: a TEST harness moves the watermark. Not durability.
   DURABILITY_SIMULATED_TEST_ONLY = 2;
+  // VS-006: SQLite journal, WAL + synchronous=FULL: the watermark moves only after a
+  // committed transaction (subject to honest storage flushes).
+  DURABILITY_JOURNAL_POWER_LOSS_DURABLE = 3;
+  // VS-006 benchmarks only (synchronous=NORMAL): NOT durable on power loss.
+  DURABILITY_JOURNAL_NOT_DURABLE_BENCHMARK_ONLY = 4;
 }
 
 enum OverloadState {

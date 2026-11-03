@@ -22,6 +22,220 @@ struct FileConfig {
     sources: Vec<FileSource>,
     /// VS-005: absent = alarms disabled, VS-004 behaviour unchanged.
     alarms: Option<FileAlarms>,
+    /// VS-006 (ADR 0013): absent = volatile VS-005 behaviour, nothing opened (J10).
+    persistence: Option<FilePersistence>,
+    /// VS-006 (ADR 0014): time authority settings; only with `[persistence]`.
+    time: Option<FileTime>,
+}
+
+/// VS-006 `[persistence]` (ADR 0013 D1, D4, D5, D7, D12, D13).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilePersistence {
+    /// `false` = the section is ignored (VS-005 volatile kernel); default `true`.
+    enabled: Option<bool>,
+    path: PathBuf,
+    /// `"full"` (default, the only durable mode) or `"normal"` (benchmarks only, needs
+    /// `--test-allow-non-durable`).
+    durability: Option<String>,
+    journal_queue_operations: Option<u32>,
+    journal_queue_bytes: Option<u64>,
+    commit_max_operations: Option<u32>,
+    commit_max_delay_ms: Option<u64>,
+    checkpoint_every_operations: Option<u64>,
+    checkpoints_keep: Option<u32>,
+    compact_replay_payloads: Option<bool>,
+    /// `"quick"` (default), `"full"` or `"none"`.
+    startup_check: Option<String>,
+    sqlite_cache_kib: Option<u32>,
+    wal_max_bytes: Option<u64>,
+    min_disk_free_bytes: Option<u64>,
+    max_db_bytes: Option<u64>,
+    operator_actions_cache: Option<u32>,
+    history_socket_path: Option<PathBuf>,
+    history_authorized_uids: Option<Vec<u32>>,
+    max_history_connections: Option<u32>,
+    max_history_page: Option<u32>,
+    history_max_scan: Option<u64>,
+}
+
+/// VS-006 `[time]` (ADR 0014).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileTime {
+    clock_regression_alert_ms: Option<u64>,
+    clock_jump_alert_ms: Option<u64>,
+    /// `"none"` (default), `"chronyc"` or `"timedatectl"`.
+    host_sync_probe: Option<String>,
+    host_sync_probe_period_ms: Option<u64>,
+}
+
+/// Integrity check at startup (`[persistence] startup_check`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupCheck {
+    None,
+    Quick,
+    Full,
+}
+
+/// VS-006: validated `[persistence]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistenceSettings {
+    pub path: PathBuf,
+    /// false = `"normal"` (benchmark only, NOT durable).
+    pub durable: bool,
+    pub journal_queue_operations: u32,
+    pub journal_queue_bytes: u64,
+    pub commit_max_operations: u32,
+    pub commit_max_delay_ms: u64,
+    pub checkpoint_every_operations: u64,
+    pub checkpoints_keep: u32,
+    /// ADR 0013 D13: explicit retention of replay payloads (default off).
+    pub compact_replay_payloads: bool,
+    pub startup_check: StartupCheck,
+    pub sqlite_cache_kib: u32,
+    pub wal_max_bytes: u64,
+    pub min_disk_free_bytes: u64,
+    pub max_db_bytes: Option<u64>,
+    pub operator_actions_cache: u32,
+    pub history_socket_path: Option<PathBuf>,
+    /// Sorted; non-empty when the history socket is configured.
+    pub history_authorized_uids: Vec<u32>,
+    pub max_history_connections: u32,
+    pub max_history_page: u32,
+    pub history_max_scan: u64,
+}
+
+/// VS-006: host clock probe (ADR 0014 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSyncProbe {
+    None,
+    Chronyc,
+    Timedatectl,
+}
+
+/// VS-006: validated `[time]` (defaults when absent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSettings {
+    pub clock_regression_alert_ms: u64,
+    pub clock_jump_alert_ms: u64,
+    pub host_sync_probe: HostSyncProbe,
+    pub host_sync_probe_period_ms: u64,
+}
+
+impl Default for TimeSettings {
+    fn default() -> Self {
+        TimeSettings {
+            clock_regression_alert_ms: 1,
+            clock_jump_alert_ms: 60_000,
+            host_sync_probe: HostSyncProbe::None,
+            host_sync_probe_period_ms: 60_000,
+        }
+    }
+}
+
+fn parse_persistence(
+    p: Option<FilePersistence>,
+    t: Option<FileTime>,
+) -> Result<(Option<PersistenceSettings>, TimeSettings), LoadError> {
+    let e = |m: String| LoadError::Persistence(m);
+    // `enabled = false`: the whole VS-006 configuration (and its [time]) is ignored.
+    if p.as_ref().is_some_and(|p| p.enabled == Some(false)) {
+        return Ok((None, TimeSettings::default()));
+    }
+    let time = match t {
+        None => TimeSettings::default(),
+        Some(_) if p.is_none() => return Err(LoadError::Persistence("[time] requires [persistence]".into())),
+        Some(t) => {
+            let d = TimeSettings::default();
+            let probe = match t.host_sync_probe.as_deref().unwrap_or("none") {
+                "none" => HostSyncProbe::None,
+                "chronyc" => HostSyncProbe::Chronyc,
+                "timedatectl" => HostSyncProbe::Timedatectl,
+                other => return Err(e(format!("[time] host_sync_probe {other:?} (none | chronyc | timedatectl)"))),
+            };
+            let ts = TimeSettings {
+                clock_regression_alert_ms: t.clock_regression_alert_ms.unwrap_or(d.clock_regression_alert_ms),
+                clock_jump_alert_ms: t.clock_jump_alert_ms.unwrap_or(d.clock_jump_alert_ms),
+                host_sync_probe: probe,
+                host_sync_probe_period_ms: t.host_sync_probe_period_ms.unwrap_or(d.host_sync_probe_period_ms),
+            };
+            if !(1_000..=3_600_000).contains(&ts.host_sync_probe_period_ms) {
+                return Err(e("[time] host_sync_probe_period_ms outside 1000..=3600000".into()));
+            }
+            ts
+        }
+    };
+    let Some(p) = p else { return Ok((None, time)) };
+    let durable = match p.durability.as_deref().unwrap_or("full") {
+        "full" => true,
+        "normal" => false,
+        other => return Err(e(format!("durability {other:?} (full | normal)"))),
+    };
+    let startup_check = match p.startup_check.as_deref().unwrap_or("quick") {
+        "quick" => StartupCheck::Quick,
+        "full" => StartupCheck::Full,
+        "none" => StartupCheck::None,
+        other => return Err(e(format!("startup_check {other:?} (quick | full | none)"))),
+    };
+    let range = |name: &str, v: u64, lo: u64, hi: u64| {
+        if v < lo || v > hi { Err(e(format!("{name}={v} outside {lo}..={hi}"))) } else { Ok(v) }
+    };
+    let s = PersistenceSettings {
+        path: p.path,
+        durable,
+        journal_queue_operations: range(
+            "journal_queue_operations",
+            p.journal_queue_operations.unwrap_or(65_536).into(),
+            16,
+            1 << 20,
+        )? as u32,
+        journal_queue_bytes: range("journal_queue_bytes", p.journal_queue_bytes.unwrap_or(64 << 20), 1 << 16, 4 << 30)?,
+        commit_max_operations: range(
+            "commit_max_operations",
+            p.commit_max_operations.unwrap_or(1024).into(),
+            1,
+            1 << 20,
+        )? as u32,
+        commit_max_delay_ms: range("commit_max_delay_ms", p.commit_max_delay_ms.unwrap_or(0), 0, 1_000)?,
+        checkpoint_every_operations: range(
+            "checkpoint_every_operations",
+            p.checkpoint_every_operations.unwrap_or(100_000),
+            1,
+            1 << 40,
+        )?,
+        checkpoints_keep: range("checkpoints_keep", p.checkpoints_keep.unwrap_or(2).into(), 1, 16)? as u32,
+        compact_replay_payloads: p.compact_replay_payloads.unwrap_or(false),
+        startup_check,
+        sqlite_cache_kib: range("sqlite_cache_kib", p.sqlite_cache_kib.unwrap_or(8192).into(), 256, 1 << 20)? as u32,
+        wal_max_bytes: range("wal_max_bytes", p.wal_max_bytes.unwrap_or(64 << 20), 1 << 20, 16 << 30)?,
+        min_disk_free_bytes: p.min_disk_free_bytes.unwrap_or(256 << 20),
+        max_db_bytes: p.max_db_bytes,
+        operator_actions_cache: range(
+            "operator_actions_cache",
+            p.operator_actions_cache.unwrap_or(16_384).into(),
+            16,
+            1 << 20,
+        )? as u32,
+        history_socket_path: p.history_socket_path,
+        history_authorized_uids: Vec::new(),
+        max_history_connections: range("max_history_connections", p.max_history_connections.unwrap_or(4).into(), 1, 64)?
+            as u32,
+        max_history_page: range("max_history_page", p.max_history_page.unwrap_or(1000).into(), 1, 65_536)? as u32,
+        history_max_scan: range("history_max_scan", p.history_max_scan.unwrap_or(100_000), 1_000, 100_000_000)?,
+    };
+    let mut s = s;
+    match (&s.history_socket_path, p.history_authorized_uids) {
+        (Some(_), Some(u)) if !u.is_empty() => {
+            s.history_authorized_uids = u;
+            s.history_authorized_uids.sort_unstable();
+            s.history_authorized_uids.dedup();
+        }
+        (Some(_), _) => return Err(e("history_socket_path requires a non-empty history_authorized_uids".into())),
+        (None, Some(_)) => return Err(e("history_authorized_uids without history_socket_path".into())),
+        (None, None) => {}
+    }
+    Ok((Some(s), time))
 }
 
 /// VS-005 `[alarms]` (ADR 0012).
@@ -551,6 +765,10 @@ pub struct RuntimeConfig {
     pub supervision: Option<SupervisionConfig>,
     /// VS-005: `None` unless `[alarms]` is present (the rules are in `core`).
     pub alarms: Option<AlarmSettings>,
+    /// VS-006: `None` unless `[persistence]` is present (default: volatile, J10).
+    pub persistence: Option<PersistenceSettings>,
+    /// VS-006: time authority settings (defaults when `[time]` is absent).
+    pub time: TimeSettings,
 }
 
 impl RuntimeConfig {
@@ -573,6 +791,8 @@ pub enum LoadError {
     Runtime(String),
     /// VS-005: `[alarms]` (runtime part; rule semantics are `Core` errors).
     Alarms(String),
+    /// VS-006: `[persistence]` / `[time]`.
+    Persistence(String),
     Core(ConfigError),
 }
 
@@ -584,6 +804,7 @@ impl fmt::Display for LoadError {
             LoadError::Ipc(e) => write!(f, "invalid [ipc] section: {e}"),
             LoadError::Runtime(e) => write!(f, "invalid [runtime] section: {e}"),
             LoadError::Alarms(e) => write!(f, "invalid [alarms] section: {e}"),
+            LoadError::Persistence(e) => write!(f, "invalid [persistence] section: {e}"),
             LoadError::Core(e) => write!(f, "invalid configuration: {e}"),
         }
     }
@@ -682,6 +903,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
             .collect(),
     };
     let (alarm_spec, alarms) = parse_alarms(f.alarms)?;
+    let (persistence, time) = parse_persistence(f.persistence, f.time)?;
     let core = ValidatedConfig::validate_with_alarms(spec, alarm_spec).map_err(LoadError::Core)?;
     let mut authorization: Vec<(SourceId, Option<Vec<u32>>)> =
         f.sources.into_iter().map(|s| (SourceId(s.id), s.authorized_uids)).collect();
@@ -698,5 +920,7 @@ pub fn parse(text: &str) -> Result<RuntimeConfig, LoadError> {
         authorization,
         supervision,
         alarms,
+        persistence,
+        time,
     })
 }

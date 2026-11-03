@@ -18,61 +18,55 @@ fn main() {
             ObservationBatch {
                 mode: BatchMode::FullState as i32,
                 source_sequence: 5,
-                observations: vec![obs(1, B(true)), obs(2, B(false)), obs(3, I(2150))],
-            },
+                observations: vec![obs(1, B(true)), obs(2, B(false)), obs(3, I(2150))], ..Default::default() },
         ),
         (
             "delta_next",
-            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 6, observations: vec![obs(3, I(-40))] },
+            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 6, observations: vec![obs(3, I(-40))], ..Default::default()  },
         ),
         (
             "delta_dup",
             ObservationBatch {
                 mode: BatchMode::FullState as i32,
                 source_sequence: 5,
-                observations: vec![obs(3, I(2150)), obs(2, B(false)), obs(1, B(false))],
-            },
+                observations: vec![obs(3, I(2150)), obs(2, B(false)), obs(1, B(false))], ..Default::default() },
         ),
         (
             "delta_gap",
-            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 9, observations: vec![obs(1, B(true))] },
+            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 9, observations: vec![obs(1, B(true))], ..Default::default()  },
         ),
         (
             "unknown_channel",
             ObservationBatch {
                 mode: BatchMode::Delta as i32,
                 source_sequence: 6,
-                observations: vec![obs(1, B(true)), obs(99, B(true))],
-            },
+                observations: vec![obs(1, B(true)), obs(99, B(true))], ..Default::default() },
         ),
         (
             "dup_channel",
             ObservationBatch {
                 mode: BatchMode::Delta as i32,
                 source_sequence: 6,
-                observations: vec![obs(1, B(true)), obs(1, B(false))],
-            },
+                observations: vec![obs(1, B(true)), obs(1, B(false))], ..Default::default() },
         ),
         (
             "type_mismatch",
-            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 6, observations: vec![obs(3, B(true))] },
+            ObservationBatch { mode: BatchMode::Delta as i32, source_sequence: 6, observations: vec![obs(3, B(true))], ..Default::default()  },
         ),
         (
             "missing_value",
             ObservationBatch {
                 mode: BatchMode::Delta as i32,
                 source_sequence: 6,
-                observations: vec![Observation { channel_id: 1, value: None }],
-            },
+                observations: vec![Observation { channel_id: 1, value: None }], ..Default::default() },
         ),
-        ("bad_mode", ObservationBatch { mode: 7, source_sequence: 6, observations: vec![obs(1, B(true))] }),
+        ("bad_mode", ObservationBatch { mode: 7, source_sequence: 6, observations: vec![obs(1, B(true))], ..Default::default()  }),
         (
             "incomplete_full",
             ObservationBatch {
                 mode: BatchMode::FullState as i32,
                 source_sequence: 6,
-                observations: vec![obs(1, B(true))],
-            },
+                observations: vec![obs(1, B(true))], ..Default::default() },
         ),
     ];
     fs::create_dir_all("seeds/batch_validation").unwrap();
@@ -87,8 +81,7 @@ fn main() {
             source_id: 1001,
             source_epoch: 9,
             supported_protocol_majors: vec![1],
-            protocol_minor: 0,
-        })),
+            protocol_minor: 0, ..Default::default() })),
     };
     let mut stream = vec![255u8];
     let mut f = Vec::new();

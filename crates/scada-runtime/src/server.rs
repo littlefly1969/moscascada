@@ -15,7 +15,8 @@ use scada_protocol::driver_v1::{
 use scada_protocol::frame::{self, FrameError, HEADER_LEN};
 use scada_protocol::introspect_v1 as ipb;
 use scada_protocol::{
-    KERNEL_INSTANCE_ID_LEN, MAX_DRIVER_ID_BYTES, MINOR_HEARTBEAT, Message, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    KERNEL_INSTANCE_ID_LEN, MAX_DRIVER_ID_BYTES, MINOR_DURABLE_RECEIPTS, MINOR_HEARTBEAT, Message, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -26,7 +27,7 @@ use tokio::time::timeout;
 use crate::config::RuntimeConfig;
 use crate::convert;
 use crate::diag::{self, Diag, Stage};
-use crate::sequencer::{BatchReply, ConnectReply, Counters, Request};
+use crate::sequencer::{BatchExt, BatchReply, ConnectReply, Counters, Request};
 
 /// Shared, immutable state of the I/O side.
 #[derive(Debug)]
@@ -38,6 +39,16 @@ pub struct Server {
     pub requests: crate::ingress::Ingress,
     /// Stage timings (`--diag`); `None` in production.
     pub diag: Option<Arc<Diag>>,
+    /// VS-006: `Some` with `[persistence]`: timeline and whether durable receipts can be
+    /// granted (only with `durability = "full"`).
+    pub journal: Option<JournalInfo>,
+}
+
+/// VS-006: what the I/O side needs to know about the journal.
+#[derive(Debug, Clone, Copy)]
+pub struct JournalInfo {
+    pub timeline_id: [u8; 16],
+    pub durable: bool,
 }
 
 /// Generate the kernel instance id (16 random bytes from the OS).
@@ -413,6 +424,15 @@ async fn session(server: &Server, stream: UnixStream) {
             return;
         }
     };
+    // VS-006 (ADR 0013 D11): durable receipts only when asked, negotiated (1.2) and backed
+    // by a `synchronous=FULL` journal. Otherwise ACKs stay APPLIED_VOLATILE (J10).
+    let durable = hello.request_durable_receipts
+        && negotiated_minor >= MINOR_DURABLE_RECEIPTS
+        && server.journal.is_some_and(|j| j.durable);
+    let timeline_id = match server.journal {
+        Some(j) if negotiated_minor >= MINOR_DURABLE_RECEIPTS => j.timeline_id.to_vec(),
+        _ => Vec::new(),
+    };
     let welcome = KernelMessage {
         body: Some(kernel_message::Body::Welcome(pb::Welcome {
             kernel_instance_id: id.to_vec(),
@@ -426,12 +446,14 @@ async fn session(server: &Server, stream: UnixStream) {
             }),
             full_state_required,
             last_accepted_source_sequence: last_accepted,
+            durable_receipts: durable,
+            timeline_id,
         })),
     };
     let write_timeout = Duration::from_millis(limits.ack_write_timeout_ms);
     if matches!(timeout(write_timeout, write_msg(&mut wr, &welcome, max, &mut scratch)).await, Ok(Ok(()))) {
         // ---- Data phase ----
-        let link = Link { source_id, link_generation, negotiated_minor, heartbeats };
+        let link = Link { source_id, link_generation, negotiated_minor, heartbeats, durable };
         data_phase(server, rd, wr, link, buf, superseded_rx).await;
     }
     // Every Connected link gets exactly one Disconnected, queued after all of its batches.
@@ -456,6 +478,8 @@ struct Link {
     negotiated_minor: u32,
     /// VS-004: per-link heartbeat counter read by the watchdog (liveness supervision only).
     heartbeats: Option<crate::supervision::HeartbeatCounter>,
+    /// VS-006: ACKs wait for the journal commit (APPLIED_DURABLE).
+    durable: bool,
 }
 
 /// VS-004: validate one heartbeat of the link. `Err` is the fatal answer. A valid one only
@@ -637,11 +661,24 @@ async fn data_phase(
                         }
                         let source_sequence = b.source_sequence;
                         let converted = convert::batch_from_wire(source_id, link_generation, b, max_obs);
+                        // VS-006: the aligned timestamp vector is never retained across frames
+                        // (its transient size is bounded by the frame, like the generic
+                        // decode), so the per-connection bound is the VS-005 one (J10).
+                        if wire.source_timestamps_utc_ns.capacity() != 0 {
+                            wire.source_timestamps_utc_ns = Vec::new();
+                        }
                         if let (Some(d), Some(t)) = (diag, t_conv) {
                             d.since(Stage::Convert, t);
                         }
                         let pending = match converted {
-                            Ok(batch) => {
+                            Ok((batch, times)) => {
+                                // VS-006: source timestamps are honoured only on a 1.2 link
+                                // (ADR 0014 §6); the journal samples the receive time.
+                                // Without a journal they are dropped at once (J10).
+                                let times = times.filter(|_| {
+                                    server.journal.is_some() && link.negotiated_minor >= MINOR_DURABLE_RECEIPTS
+                                });
+                                let received_at = server.journal.map(|_| scada_journal::realtime_ns());
                                 let (tx, rx) = oneshot::channel();
                                 // Reserve the ACK slot first (bounded in-flight per connection),
                                 // then enqueue for the sequencer (bounded global queue).
@@ -654,7 +691,15 @@ async fn data_phase(
                                 let submitted = diag::now(diag);
                                 if or_superseded!(submit(
                                     server,
-                                    Request::Batch { batch, reply: tx, submitted, permits: Default::default() }
+                                    Request::Batch {
+                                        batch,
+                                        reply: tx,
+                                        submitted,
+                                        permits: Default::default(),
+                                        ext: received_at.map(|received_at| {
+                                            Box::new(BatchExt { times, received_at, durable: link.durable })
+                                        }),
+                                    }
                                 ))
                                 .is_err()
                                 {
@@ -830,6 +875,9 @@ async fn writer_task(
             loop {
                 match next {
                     Next::Ack { source_sequence, reply, frame_done } => {
+                        if reply.status == AckStatus::AppliedDurable {
+                            scada_journal::fault::hit("after_durable_ack_before_socket_write");
+                        }
                         // C2: one ACK message per connection, every per-batch field overwritten.
                         if let Some(kernel_message::Body::Ack(a)) = &mut ack.body {
                             set_ack(a, source_sequence, &reply);

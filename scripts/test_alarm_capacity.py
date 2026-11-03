@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VS-005 T15: tests of the alarm capacity model (scripts/alarm_capacity.py)."""
+"""VS-005 T15 / VS-006 §7: tests of the alarm capacity model (scripts/alarm_capacity.py)."""
 import io
 import json
 import math
@@ -21,6 +21,19 @@ kind=alarm-storm label=s sink=stopped interval_us=0 events_s=999999 storm60=FAIL
 kind=alarms-core case=storm n=1 ops_s=1 events_s=2500000 p50_ns=1
 kind=alarms-cold rules=100 per_rule_b=192.7
 kind=alarms-cold rules=1000 per_rule_b=150.3
+"""
+
+JOURNAL = """# vs006
+kind=journal label=E0_disk durability=FULL fs=/dev/vda:ext4 events_per_op=0 events=0 commit_max=1024 ops_per_s=120000 events_per_s=0 fsync_per_s=110 bytes_per_event=0.0 bytes_per_op=60.0 event_table_bytes=n/a write_amplification=2.0 checkpoint_pause_us_p99=900 checkpoint_write_us_max=5000
+kind=journal label=E1_disk durability=FULL fs=/dev/vda:ext4 events_per_op=1 events=1000 commit_max=1024 ops_per_s=100000 events_per_s=100000 fsync_per_s=100 bytes_per_event=150.0 bytes_per_op=150.0 event_table_bytes=50000 write_amplification=2.5 checkpoint_pause_us_p99=1000 checkpoint_write_us_max=6000
+kind=journal label=E1_disk_rep durability=FULL fs=/dev/vda:ext4 events_per_op=1 events=1000 commit_max=1024 ops_per_s=90000 events_per_s=90000 fsync_per_s=90 bytes_per_event=150.0 bytes_per_op=150.0 event_table_bytes=50000 write_amplification=2.5
+kind=journal label=E100_disk durability=FULL fs=/dev/vda:ext4 events_per_op=100 events=100000 commit_max=1024 ops_per_s=3000 events_per_s=300000 fsync_per_s=30 bytes_per_event=60.0 bytes_per_op=6000.0 event_table_bytes=4000000 write_amplification=3.0
+kind=journal label=E1_tmpfs durability=FULL fs=tmpfs:tmpfs events_per_op=1 events=1000 commit_max=1024 ops_per_s=900000 events_per_s=900000 fsync_per_s=900 bytes_per_event=150.0 bytes_per_op=150.0 event_table_bytes=50000 write_amplification=2.5
+kind=journal label=E1_NORMAL durability=NORMAL_NOT_DURABLE fs=/dev/vda:ext4 events_per_op=1 events=1000 commit_max=1024 ops_per_s=800000 events_per_s=800000 fsync_per_s=0 bytes_per_event=150.0 bytes_per_op=150.0 event_table_bytes=50000 write_amplification=2.5
+kind=journal label=E1_c1 durability=FULL fs=/dev/vda:ext4 events_per_op=1 events=1000 commit_max=1 ops_per_s=500 events_per_s=500 fsync_per_s=500 bytes_per_event=150.0 bytes_per_op=150.0 event_table_bytes=50000 write_amplification=9.0
+kind=journal-recovery label=E1_disk total_ops=1000000 recover_ms=850.0 replayed_ops=1000
+kind=alarm-storm label=J1 sink=journal interval_us=0 events_s=70000 released_s=60000 storm60=PASS safety=PASS
+kind=alarm-storm label=J3_slow sink=journal interval_us=0 events_s=7000 released_s=500 storm60=PASS safety=PASS
 """
 
 
@@ -111,6 +124,50 @@ class Model(unittest.TestCase):
         self.assertIn("exceeds the measured sustained kernel rate", w)
         self.assertIn("first transition is refused", w)
         self.assertIn("NON PRODUCTION-READY", o["limitation"])
+
+    def test_vs006_journal_level_a_excludes_tmpfs_normal_and_uses_the_conservative_cell(self):
+        fd, raw = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as f:
+            f.write(JOURNAL)
+        try:
+            o = run("--bench-results", raw, "--outbox-slots", "65536", "--event-rate", "1000", "--events-per-op", "10",
+                    "--disk-free-mib", "1280", "--min-disk-free-mib", "256", "--storm-seconds", "600")
+        finally:
+            os.unlink(raw)
+        a = o["level_A_measured"]
+        # events_per_op=10: the closest measured fan-out not above it is E1; the slowest repetition.
+        self.assertEqual(a["journal_cell_used"], "E1_disk_rep")
+        self.assertEqual(a["journal_events_s_in_process"], 90000.0)
+        self.assertEqual(sorted(a["journal_cells_ignored_not_durable_or_tmpfs"]), ["E1_NORMAL", "E1_tmpfs"])
+        # mu = min(process storm PASS (slow/stall excluded), in-process) = 60000.
+        self.assertEqual(a["journal_events_s_process_storm_pass"], 60000.0)
+        self.assertEqual(a["mu_events_s_measured"], 60000.0)
+        self.assertEqual(a["recovery_ms_worst"], 850.0)
+        c = o["level_C_computed"]
+        self.assertTrue(math.isinf(c["vs006_journal_measured"]["time_to_full_s"]))  # 1000 < 60000
+        self.assertEqual(c["vs006_journal_measured"]["storm_verdict"], "PASS")
+        self.assertEqual(c["vs005_mu_0"]["storm_verdict"], "FAIL")  # 600 000 events > 65 536 slots with mu = 0
+        j = c["journal"]
+        # ops_rate = 1000 / 10 = 100/s; growth = 100*60 + 1000*50 = 56000 B/s.
+        self.assertAlmostEqual(j["disk_growth_bytes_s"], 56000.0)
+        self.assertAlmostEqual(j["time_to_disk_floor_s"], 1024 * (1 << 20) / 56000.0)
+        self.assertTrue(math.isinf(j["queue_time_to_full_s"]))
+
+    def test_vs006_rates_above_the_journal_warn(self):
+        fd, raw = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as f:
+            f.write(JOURNAL)
+        try:
+            o = run("--bench-results", raw, "--outbox-slots", "1000", "--event-rate", "70000", "--events-per-op", "0",
+                    "--ops-rate", "130000", "--journal-queue-operations", "10000")
+        finally:
+            os.unlink(raw)
+        w = " ".join(o["warnings"])
+        self.assertIn("exceeds the measured durable journal rate", w)
+        self.assertIn("JOURNAL_QUEUE_FULL", w)
+        self.assertAlmostEqual(o["level_C_computed"]["journal"]["queue_time_to_full_s"], 10000 / 10000.0)
+        s = o["level_C_computed"]["vs006_journal_measured"]
+        self.assertAlmostEqual(s["time_to_full_s"], 1000 / 10000.0)
 
     def test_invalid_inputs_are_refused(self):
         for bad in (["--event-rate", "-1", "--outbox-slots", "1"], ["--event-rate", "1"],

@@ -3,6 +3,7 @@
 #   cargo +nightly fuzz run frame_decode
 #   cargo +nightly fuzz run batch_validation
 #   cargo +nightly fuzz run supervision_transitions   (VS-004)
+#   cargo +nightly fuzz run journal_decode            (VS-006)
 [package]
 name = "scada-fuzz"
 version = "0.0.0"
@@ -17,6 +18,7 @@ libfuzzer-sys = "0.4.13"
 scada-core = { path = "../crates/scada-core" }
 scada-protocol = { path = "../crates/scada-protocol" }
 scada-runtime = { path = "../crates/scada-runtime" }
+scada-journal = { path = "../crates/scada-journal" }
 
 [workspace]
 members = ["."]
@@ -59,6 +61,13 @@ bench = false
 [[bin]]
 name = "alarm_transitions"
 path = "fuzz_targets/alarm_transitions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_decode"
+path = "fuzz_targets/journal_decode.rs"
 test = false
 doc = false
 bench = false

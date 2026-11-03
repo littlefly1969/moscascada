@@ -83,8 +83,8 @@ impl Value {
 /// observation of the tag is applied (it is not the current link or liveness status of the
 /// source, which the source snapshot reports).
 ///
-/// Precedence when causes combine (VS-004, ADR 0011): `SourceUnavailable` >
-/// `SourceSilent` > `StaleData`. A tag is moved only to a cause of strictly higher
+/// Precedence when causes combine (VS-004, ADR 0011; VS-006 ADR 0013):
+/// `RecoveredUnverified` > `SourceUnavailable` > `SourceSilent` > `StaleData`. A tag is moved only to a cause of strictly higher
 /// precedence than its current one; nothing but a new applied observation makes it `Good`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UncertainReason {
@@ -96,6 +96,12 @@ pub enum UncertainReason {
     /// VS-004: no new observation of this tag was applied within the source's
     /// `freshness_timeout`. Only with freshness supervision.
     StaleData,
+    /// VS-006 (ADR 0013 D9): the value was restored from the durable journal after a
+    /// restart and the field has not been verified since (no `FullState` of the source
+    /// applied after the `RecoveryFence`). Highest precedence: no later degradation
+    /// replaces it; only a new applied observation of the tag makes it `Good`. Only in a
+    /// recoverable kernel.
+    RecoveredUnverified,
 }
 
 impl UncertainReason {
@@ -105,6 +111,7 @@ impl UncertainReason {
             UncertainReason::StaleData => 1,
             UncertainReason::SourceSilent => 2,
             UncertainReason::SourceUnavailable => 3,
+            UncertainReason::RecoveredUnverified => 4,
         }
     }
 
@@ -114,6 +121,7 @@ impl UncertainReason {
             UncertainReason::SourceUnavailable => 1,
             UncertainReason::SourceSilent => 2,
             UncertainReason::StaleData => 3,
+            UncertainReason::RecoveredUnverified => 4,
         }
     }
 }

@@ -87,6 +87,8 @@ pub fn decode_driver_message<'a>(
             if scratch.observations.capacity() > retained_capacity_bound(max_observations) {
                 scratch.observations = Vec::new();
             }
+            // VS-006: the aligned timestamps are never retained (bounded by the frame).
+            scratch.source_timestamps_utc_ns = Vec::new();
             merged?;
             return Ok(Decoded::Oversized {
                 mode: scratch.mode,
@@ -180,7 +182,7 @@ enum Body {
 #[cold]
 #[inline(never)]
 fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
-    use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, skip_field, uint64};
+    use prost::encoding::{DecodeContext, WireType, check_wire_type, decode_key, int32, sfixed64, skip_field, uint64};
     let mut top = bytes;
     let mut body = Body::None;
     while !top.is_empty() {
@@ -220,6 +222,28 @@ fn scan_exact(bytes: &[u8]) -> Result<Body, Malformed> {
                             let o = take_len(&mut inner).ok_or(Malformed)?;
                             pb::Observation::decode(o)?; // no heap fields: no allocation
                             n = n.saturating_add(1);
+                        }
+                        // VS-006 (wire 1.2) batch fields: validated with the same wire-type
+                        // rules as the generic decoder, without retaining anything (found by
+                        // fuzz `decode_equivalence`: skipping them as unknown accepted a
+                        // varint where `acquired_at_utc_ns` must be fixed64).
+                        4 => sfixed64::merge(w, &mut 0i64, &mut inner, DecodeContext::default())?,
+                        5 => int32::merge(w, &mut 0i32, &mut inner, DecodeContext::default())?,
+                        6 => {
+                            check_wire_type(WireType::LengthDelimited, w)?;
+                            let id = take_len(&mut inner).ok_or(Malformed)?;
+                            std::str::from_utf8(id).map_err(|_| Malformed)?;
+                        }
+                        7 => {
+                            if w == WireType::LengthDelimited {
+                                // Packed: a whole number of 8-byte values.
+                                let packed = take_len(&mut inner).ok_or(Malformed)?;
+                                if packed.len() % 8 != 0 {
+                                    return Err(Malformed);
+                                }
+                            } else {
+                                sfixed64::merge(w, &mut 0i64, &mut inner, DecodeContext::default())?;
+                            }
                         }
                         _ => skip_field(w, t, &mut inner, DecodeContext::default())?,
                     }
@@ -308,27 +332,59 @@ pub fn as_batch(msg: &pb::DriverMessage) -> Option<&pb::ObservationBatch> {
     }
 }
 
+/// VS-006 (ADR 0014 §6): source time sidecar of one batch (wire 1.2). Never part of the
+/// core value, of the deduplication or of the digest: carried to the journal unchanged.
+pub use scada_journal::{MAX_CLOCK_ID_BYTES, SourceTimes};
+
+/// Entry of `source_timestamps_utc_ns` meaning "not available for this observation".
+pub const NO_SOURCE_TIMESTAMP: i64 = i64::MIN;
+
 /// Convert a decoded wire batch into a core batch. Structural problems that the core
 /// type system cannot even represent (unknown mode, missing value) are rejected here,
 /// before the sequencer, and therefore also without any state change.
+///
+/// VS-006: the source time sidecar is returned separately (`None` when the batch carries
+/// no time field, the 1.0/1.1 case: no allocation). A timestamp outside `0 <= t < 2^63`
+/// or a clock id over 64 bytes rejects the batch (`INVALID_TIMESTAMP`).
 pub fn batch_from_wire(
     source_id: SourceId,
     link_generation: u64,
     b: &pb::ObservationBatch,
     max_observations: u32,
-) -> Result<ObservationBatch, ErrorCode> {
+) -> Result<(ObservationBatch, Option<Box<SourceTimes>>), ErrorCode> {
     // Size checked again by the core; done here to avoid converting oversized vectors.
     let mode = check_batch_header(b.mode, b.observations.len() as u64, max_observations)?;
     let mut observations = Vec::with_capacity(b.observations.len());
-    for o in &b.observations {
+    let mut times: Option<Box<SourceTimes>> = None;
+    let valid = |t: i64| if t >= 0 { Ok(t) } else { Err(ErrorCode::InvalidTimestamp) };
+    let stamps = &b.source_timestamps_utc_ns;
+    if !stamps.is_empty() && stamps.len() != b.observations.len() {
+        return Err(ErrorCode::InvalidTimestamp);
+    }
+    for (i, o) in b.observations.iter().enumerate() {
         let value = match o.value {
             Some(pb::observation::Value::BoolValue(v)) => Value::Bool(v),
             Some(pb::observation::Value::I64Value(v)) => Value::I64(v),
             None => return Err(ErrorCode::MissingValue),
         };
-        observations.push(Observation { channel_id: ChannelId(o.channel_id), value });
+        let channel_id = ChannelId(o.channel_id);
+        if let Some(&t) = stamps.get(i)
+            && t != NO_SOURCE_TIMESTAMP
+        {
+            times.get_or_insert_default().observations.push((o.channel_id, valid(t)?));
+        }
+        observations.push(Observation { channel_id, value });
     }
-    Ok(ObservationBatch { source_id, link_generation, mode, source_sequence: b.source_sequence, observations })
+    if b.acquired_at_utc_ns.is_some() || b.source_clock_quality != 0 || !b.source_clock_id.is_empty() {
+        if b.source_clock_id.len() > MAX_CLOCK_ID_BYTES {
+            return Err(ErrorCode::InvalidTimestamp);
+        }
+        let t = times.get_or_insert_default();
+        t.acquired_at_utc_ns = b.acquired_at_utc_ns.map(valid).transpose()?;
+        t.clock_quality = u8::try_from(b.source_clock_quality).unwrap_or(0);
+        t.clock_id.clone_from(&b.source_clock_id);
+    }
+    Ok((ObservationBatch { source_id, link_generation, mode, source_sequence: b.source_sequence, observations }, times))
 }
 
 /// Error code reported to the driver for a core rejection.
@@ -366,7 +422,8 @@ pub fn error_code(e: &ApplyError) -> ErrorCode {
         | ApplyError::AlarmCounterOverflow(_)
         | ApplyError::AlarmFanoutExceeded { .. }
         | ApplyError::WatermarkBeyondCommitted { .. }
-        | ApplyError::WatermarkRegression { .. } => ErrorCode::Internal,
+        | ApplyError::WatermarkRegression { .. }
+        | ApplyError::RecoveryNotEnabled => ErrorCode::Internal,
     }
 }
 
@@ -420,6 +477,7 @@ mod tests {
                 mode,
                 source_sequence,
                 observations: o.into_iter().map(|(c, v)| obs(c, v)).collect(),
+                ..Default::default()
             })
     }
 
@@ -451,6 +509,7 @@ mod tests {
                             source_epoch: 2,
                             supported_protocol_majors: vec![1],
                             protocol_minor: 0,
+                            ..Default::default()
                         })),
                     }
                     .encode_to_vec(),
@@ -562,6 +621,7 @@ mod tests {
                 mode: 2,
                 source_sequence: 9,
                 observations: (1..=128).map(|c| obs(c, Some(pb::observation::Value::I64Value(1)))).collect(),
+                ..Default::default()
             })),
         }
         .encode_to_vec();
@@ -618,6 +678,51 @@ mod adversarial {
         assert_eq!(check_batch_header(7, 1_000, 128), Err(ErrorCode::InvalidMode));
         assert_eq!(check_batch_header(2, 1_000, 128), Err(ErrorCode::BatchTooLarge));
         assert_eq!(check_batch_header(2, 128, 128), Ok(BatchMode::Delta));
+    }
+
+    /// VS-006 (fuzz `decode_equivalence`, CI of PR #6): an oversized batch whose wire 1.2
+    /// sidecar fields have the wrong wire type, or a bad packed length / UTF-8, is malformed
+    /// for both decoders; well-typed sidecar fields leave it `Oversized`.
+    #[test]
+    fn oversized_with_sidecar_fields_agrees_with_the_generic_decoder() {
+        let with = |extra: &[u8]| {
+            let mut inner = Vec::new();
+            prost::encoding::int32::encode(1, &2, &mut inner);
+            for _ in 0..10 {
+                inner.extend_from_slice(&[(3 << 3) | 2, 0]);
+            }
+            inner.extend_from_slice(extra);
+            let mut out = vec![BATCH_KEY];
+            prost::encoding::encode_varint(inner.len() as u64, &mut out);
+            out.extend_from_slice(&inner);
+            out
+        };
+        let bad: [&[u8]; 5] = [
+            &[4 << 3, 1],                          // acquired_at as varint
+            &[5 << 3 | 1, 0, 0, 0, 0, 0, 0, 0, 0], // clock quality as fixed64
+            &[6 << 3 | 2, 1, 0xff],                // clock id not UTF-8
+            &[7 << 3 | 2, 3, 1, 2, 3],             // packed timestamps not a multiple of 8
+            &[7 << 3, 1],                          // timestamp as varint
+        ];
+        for b in bad {
+            let frame = with(b);
+            assert!(pb::DriverMessage::decode(frame.as_slice()).is_err(), "{b:?}");
+            let mut scratch = pb::ObservationBatch::default();
+            assert_eq!(decode_driver_message(&frame, &mut scratch, 4).unwrap_err(), Malformed, "{b:?}");
+        }
+        let mut good = Vec::new();
+        prost::encoding::sfixed64::encode(4, &5, &mut good);
+        prost::encoding::int32::encode(5, &1, &mut good);
+        prost::encoding::string::encode(6, &"gps".to_owned(), &mut good);
+        prost::encoding::sfixed64::encode_packed(7, &[1, 2], &mut good);
+        prost::encoding::sfixed64::encode_repeated(7, &[3], &mut good);
+        let frame = with(&good);
+        assert!(pb::DriverMessage::decode(frame.as_slice()).is_ok());
+        let mut scratch = pb::ObservationBatch::default();
+        assert!(matches!(
+            decode_driver_message(&frame, &mut scratch, 4),
+            Ok(Decoded::Oversized { observations: 10, .. })
+        ));
     }
 
     #[test]

@@ -1,0 +1,84 @@
+{
+  "level_A_measured": {
+    "event_record_bytes": 48,
+    "alarm_state_bytes": 32,
+    "compiled_rule_bytes": 24,
+    "per_rule_bytes_measured": null,
+    "kernel_events_s_process_drain_pass": null,
+    "kernel_events_s_in_memory_max": null,
+    "bench_results": [
+      "docs/benchmarks/results/vs006/journal.txt",
+      "docs/benchmarks/results/vs006/storm.txt"
+    ],
+    "journal_cells_ignored_not_durable_or_tmpfs": [
+      "E0_tmpfs_full",
+      "E1000_tmpfs_full",
+      "E100_tmpfs_full",
+      "E1_disk_NORMAL_NOT_DURABLE",
+      "E1_tmpfs_full"
+    ],
+    "journal_cell_used": "rows10M_E1_disk_full",
+    "journal_events_s_in_process": 131071.0,
+    "journal_ops_s_in_process_at_fanout": 131199.0,
+    "journal_ops_s_zero_event": 294562.0,
+    "journal_fsync_s_at_fanout": 128.0,
+    "bytes_per_event": 156.9,
+    "event_table_bytes_per_event": 45.520900552090055,
+    "bytes_per_op_zero_event": 108.1,
+    "write_amplification_max": 11.25,
+    "checkpoint_pause_us_p99_max": 20.0,
+    "checkpoint_write_us_max": 2589.0,
+    "journal_events_s_process_storm_pass": 193681.0,
+    "recovery_ms_worst": 2417.5,
+    "recovery_worst_label": "F20000_disk_full",
+    "mu_events_s_measured": 131071.0
+  },
+  "level_B_assumed": {
+    "event_rate_per_s": 1000.0,
+    "ops_rate_per_s": 100.0,
+    "events_per_op": 10.0,
+    "disk_free_mib": 20000.0,
+    "min_disk_free_mib": 256.0,
+    "journal_queue_operations": 65536,
+    "op_queue_bytes": null,
+    "durable_rate_per_s_projection": 0.0,
+    "durable_rate_per_s_vs005": 0.0,
+    "storm_seconds": 600.0,
+    "reserve_slots": 4096,
+    "initial_backlog": 0,
+    "rules": 0,
+    "ram_budget_mib": null,
+    "outbox_slots": 65536,
+    "burst_profile": null
+  },
+  "level_C_computed": {
+    "slots_from_ram_budget": null,
+    "slots": 65536,
+    "outbox_bytes": 3145728,
+    "rule_bytes_estimate": 0,
+    "usable_slots": 61440,
+    "vs005_mu_0": {
+      "net_growth_per_s": 1000.0,
+      "time_to_full_s": 61.44,
+      "required_slots_for_storm": 604096,
+      "storm_verdict": "FAIL",
+      "backlog_drain_time_s": 0.0
+    },
+    "vs006_journal_measured": {
+      "net_growth_per_s": -130071.0,
+      "time_to_full_s": null,
+      "required_slots_for_storm": 4096,
+      "storm_verdict": "PASS",
+      "backlog_drain_time_s": 0.0
+    },
+    "journal": {
+      "mu_ops_s_measured": 131199.0,
+      "queue_time_to_full_s": null,
+      "disk_growth_bytes_s": 56330.900552090054,
+      "disk_growth_gib_day": 4.532737478334997,
+      "time_to_disk_floor_s": 367526.24831295817
+    }
+  },
+  "warnings": [],
+  "limitation": "NON PRODUCTION-READY FOR LONG-RUN ALARM RETENTION without [persistence]: no slot is ever released (vs005_mu_0). With the VS-006 journal, mu is what was MEASURED on the benchmark storage: a different disk (SD card, eMMC, ARM64 Micro: NOT TESTED ON HARDWARE) needs its own level-A run. The alarm history has no automatic retention: the disk floor stops admission (DISK_FULL)."
+}

@@ -388,7 +388,9 @@ fn replay(capture: &std::path::Path, cfg_path: &std::path::Path) -> ([u8; 32], s
 // their global admission order legitimately differs.)
 #[test]
 fn captured_streams_replay_to_the_live_digest_in_every_mode() {
-    let limits = Limits { max_driver_connections: 40, ..Limits::default() };
+    // The VS-001 reference model knows no journal operation (durable watermark): the
+    // journal stays off here; replay with the journal is tested in vs006.rs.
+    let limits = Limits { max_driver_connections: 40, persistence: None, ..Limits::default() };
     for workers in modes() {
         let dir = tempfile::Builder::new().prefix("scada-cap").tempdir().unwrap();
         let cap = dir.path().join("inputs.txt");

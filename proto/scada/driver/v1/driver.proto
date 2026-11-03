@@ -25,6 +25,19 @@
 //        A 1.0 kernel ignores the unknown Hello field and answers minor 0, so an updated
 //        driver falls back to 1.0 without any other change; a 1.0 driver never sets the
 //        field and keeps working unchanged with a 1.1 kernel.
+//   1.2  VS-006 (ADR 0013 D11, ADR 0014 §6), all optional and additive:
+//        * durable receipts: Hello.request_durable_receipts; Welcome.durable_receipts is
+//          true only when the kernel journals with power-loss durability. Then every
+//          applied batch gets ONE final InputAck, sent only after the journal transaction
+//          that contains it committed: ACK_STATUS_APPLIED_DURABLE (or
+//          ACK_STATUS_APPLIED_NOT_DURABLE if that commit failed). Without the request (or
+//          with a 1.0/1.1 driver) the ACK stays ACK_STATUS_APPLIED_VOLATILE, which keeps
+//          meaning "RAM only" even when the kernel journals.
+//        * source timestamps: ObservationBatch.source_timestamps_utc_ns (aligned),
+//          ObservationBatch.acquired_at_utc_ns / source_clock_quality / source_clock_id.
+//          Sidecar data: never part of the value, of the deduplication or of the digest;
+//          preserved unchanged in the journal. Absent = not available (never "now").
+//        A driver MUST NOT rely on 1.2 features unless the negotiated minor is >= 2.
 syntax = "proto3";
 
 package scada.driver.v1;
@@ -43,6 +56,9 @@ message Hello {
   repeated uint32 supported_protocol_majors = 4;
   // VS-004: highest minor version of major 1 the driver implements (absent = 0, i.e. 1.0).
   uint32 protocol_minor = 5;
+  // VS-006, minor 1.2: ask for durable receipts (see the header). Ignored unless the
+  // negotiated minor is >= 2 and the kernel journals durably (Welcome.durable_receipts).
+  bool request_durable_receipts = 6;
 }
 
 // Limits the kernel enforces on this connection.
@@ -67,6 +83,12 @@ message Welcome {
   // Last accepted source_sequence of the same epoch, when a baseline exists. A driver
   // that reconnects without restarting resends batches after this sequence.
   optional uint64 last_accepted_source_sequence = 7;
+  // VS-006, minor 1.2: durable receipts are active on this link.
+  bool durable_receipts = 8;
+  // VS-006: identity of the durable timeline (16 bytes) when the kernel journals; empty
+  // otherwise. operation_sequence values are durable identities only together with it
+  // and only once acknowledged ACK_STATUS_APPLIED_DURABLE.
+  bytes timeline_id = 9;
 }
 
 // Negative handshake answer; the kernel closes the connection after sending it.
@@ -93,12 +115,37 @@ message Observation {
   }
 }
 
+// VS-006, minor 1.2: quality of the clock that produced the source timestamps.
+enum ClockQuality {
+  CLOCK_QUALITY_UNSPECIFIED = 0;
+  CLOCK_QUALITY_UNKNOWN = 1;
+  CLOCK_QUALITY_SYNCHRONIZED = 2;
+  CLOCK_QUALITY_HOLDOVER = 3;
+  CLOCK_QUALITY_FAULT = 4;
+}
+
 message ObservationBatch {
   BatchMode mode = 1;
   // Per-source, per-epoch batch counter, starting at any value >= 1 for the baseline.
   uint64 source_sequence = 2;
   // Each channel_id at most once; one invalid observation rejects the whole batch.
   repeated Observation observations = 3;
+  // VS-006, minor 1.2: when the driver acquired (or recovered) this batch, UTC ns.
+  optional sfixed64 acquired_at_utc_ns = 4;
+  ClockQuality source_clock_quality = 5;
+  // Identity of the clock of the source timestamps (diagnostic, max 64 bytes UTF-8).
+  string source_clock_id = 6;
+  // VS-006, minor 1.2: per-observation source timestamps, ALIGNED with `observations`:
+  // either empty (no source timestamp in this batch) or exactly one entry per
+  // observation, in the same order. Entry = time at which the ORIGINATING device declares
+  // the observed value occurred, UTC nanoseconds since the Unix epoch, 0 <= t < 2^63;
+  // INT64_MIN = not available for that observation. Reported, not authenticated;
+  // forwarded unchanged (OPC UA SourceTimestamp principle). Any other negative value or a
+  // length mismatch rejects the batch (ERROR_CODE_INVALID_TIMESTAMP).
+  // A parallel packed field (not a field of Observation) keeps the decoded Observation of
+  // 1.0/1.1 drivers at its VS-005 size, so the configured memory bound of a kernel
+  // without [persistence] does not change (J10).
+  repeated sfixed64 source_timestamps_utc_ns = 7;
 }
 
 // VS-004, minor 1.1: liveness evidence of the driver on this link. Not a measurement:
@@ -132,6 +179,13 @@ enum AckStatus {
   ACK_STATUS_DUPLICATE = 2;
   // No effect on kernel state; see error_code.
   ACK_STATUS_REJECTED = 3;
+  // VS-006, minor 1.2 with durable receipts only: applied AND the journal transaction
+  // containing it committed with power-loss durability (synchronous=FULL). Final.
+  ACK_STATUS_APPLIED_DURABLE = 4;
+  // VS-006, durable receipts only: applied in RAM but the journal commit failed
+  // (error_code JOURNAL_FAULT / DISK_FULL). NOT durable: after a kernel restart, resend
+  // from Welcome.last_accepted_source_sequence.
+  ACK_STATUS_APPLIED_NOT_DURABLE = 5;
 }
 
 enum Continuity {
@@ -148,7 +202,8 @@ enum Continuity {
 message InputAck {
   uint64 source_sequence = 1;
   AckStatus status = 2;
-  // Global applied-transition number; present only for ACK_STATUS_APPLIED_VOLATILE.
+  // Global applied-transition number; present for ACK_STATUS_APPLIED_VOLATILE and (VS-006)
+  // ACK_STATUS_APPLIED_DURABLE / ACK_STATUS_APPLIED_NOT_DURABLE.
   optional uint64 operation_sequence = 3;
   ErrorCode error_code = 4;
   bytes kernel_instance_id = 5;
@@ -217,4 +272,15 @@ enum ErrorCode {
   // last_accepted_source_sequence). Kernels without [alarms] never send it; a legacy
   // driver treats it as any other unknown rejection code.
   ERROR_CODE_OUTBOX_CAPACITY_EXCEEDED = 44;
+  // VS-006 (ADR 0013 D4), only from a kernel with [persistence]: refused BEFORE any state
+  // change (status REJECTED, source_sequence not consumed); resend the same batch later.
+  // The journal queue (operations or bytes) is full.
+  ERROR_CODE_JOURNAL_QUEUE_FULL = 45;
+  // Free disk space under the configured minimum, database at its cap, or the journal
+  // could not commit for lack of space.
+  ERROR_CODE_DISK_FULL = 46;
+  // The journal failed (I/O error): admission is stopped until the kernel restarts.
+  ERROR_CODE_JOURNAL_FAULT = 47;
+  // VS-006, minor 1.2: a timestamp outside 0 <= t < 2^63 ns. Nothing applied.
+  ERROR_CODE_INVALID_TIMESTAMP = 48;
 }

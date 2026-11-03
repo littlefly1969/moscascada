@@ -168,7 +168,7 @@ fn every_policy_keeps_per_source_order_and_replays_to_the_live_digest() {
             });
             let inputs = scada_runtime::capture::read(&cap).unwrap();
             let cfg = scada_runtime::config::load(&k.dir.path().join("kernel.toml")).unwrap();
-            let mut kernel = scada_core::Kernel::new(std::sync::Arc::new(cfg.core.clone()));
+            let mut kernel = replay_kernel(&cfg);
             for i in inputs {
                 let _ = kernel.apply(i);
             }

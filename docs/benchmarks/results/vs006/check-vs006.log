@@ -1,0 +1,2722 @@
+== toolchain
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+== fmt
+== clippy
+    Checking scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.62s
+== test
+   Compiling scada-runtime v0.1.0 (/home/claude/moscascada/crates/scada-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/main.rs (target/debug/deps/scada_bench-22650d17be7bbcf8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_core-dd39634a3ec3519a)
+
+running 13 tests
+test alarm::tests::high_hysteresis_and_limits ... ok
+test alarm::tests::layout ... ok
+test alarm::tests::occurrence_counter_never_wraps ... ok
+test alarm::tests::quiet_window_is_exact ... ok
+test kernel::tests::event_sequence_exhaustion_is_atomic ... ok
+test kernel::tests::alarm_apply_never_grows_internal_storage ... ok
+test kernel::tests::operation_sequence_exhaustion_is_explicit ... ok
+test alarm::tests::listed_index_next_matches_a_scan ... ok
+test kernel::tests::source_sequence_overflow_is_explicit ... ok
+test kernel::tests::revision_overflow_is_rejected_without_mutation ... ok
+test kernel::tests::supervision_revision_overflow_is_atomic ... ok
+test kernel::tests::apply_never_grows_internal_storage ... ok
+test kernel::tests::supervised_apply_never_grows_internal_storage ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/alarms.rs (target/debug/deps/alarms-29d992f80bbacbcf)
+
+running 15 tests
+test t01_no_alarms_keeps_v1_v2_encodings ... ok
+test t02_fingerprint_is_order_independent_and_semantic ... ok
+test t04_bad_quality_arms_only_after_first_good ... ok
+test t03_high_low_hysteresis_and_boundaries ... ok
+test t02_config_validation_fails_fast ... ok
+test t04_quality_is_orthogonal_and_never_returns_to_normal ... ok
+test t05_episode_automaton_tokens_and_stale_acks ... ok
+test t06_events_of_one_operation_are_ordered_by_alarm_id_whatever_the_input_order ... ok
+test t07_errors_ignored_and_duplicates_change_nothing ... ok
+test t08_ring_wraps_physically_never_logically_and_never_overwrites_undurable_events ... ok
+test t07_outbox_full_refuses_whole_operation_without_any_change ... ok
+test t08_snapshot_pages_list_active_or_unacked_in_id_order ... ok
+test t11_replay_reproduces_events_and_digest ... ok
+test t07_twenty_thousand_events_in_one_operation_all_or_nothing ... ok
+test t12_model_atomicity_and_replay ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.53s
+
+     Running tests/config_validation.rs (target/debug/deps/config_validation-4b3e408d2fcae485)
+
+running 11 tests
+test channel_bound_to_unknown_tag ... ok
+test duplicate_source_id ... ok
+test duplicate_channel ... ok
+test demo_config_is_valid_and_sorted ... ok
+test duplicate_tag_id ... ok
+test duplicate_tag_name ... ok
+test incompatible_types ... ok
+test reserved_zero_ids_and_empty_sets ... ok
+test source_with_more_channels_than_a_full_state_can_carry ... ok
+test tag_bound_twice ... ok
+test tag_without_binding ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (target/debug/deps/determinism-1a06a2c4d8ffb7be)
+
+running 6 tests
+test digest_v1_golden_value ... ok
+test replaying_the_same_stream_gives_the_same_final_digest ... ok
+test prop_one_bad_observation_rejects_whole_batch ... ok
+test prop_observation_order_irrelevant ... ok
+test prop_two_kernels_same_stream ... ok
+test seeded_random_streams_are_deterministic ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.58s
+
+     Running tests/equivalence.rs (target/debug/deps/equivalence-ad99fbeac9b69038)
+
+running 3 tests
+test dense_index_only_for_compact_numbering_and_lookup_matches_binary_search ... ok
+test prop_optimized_kernel_matches_vs001 ... ok
+test optimized_kernel_matches_vs001_on_seeded_streams ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-db21422919cc6793)
+
+running 4 tests
+test recovered_unverified_has_top_precedence ... ok
+test fence_semantics_no_false_events ... ok
+test fence_needs_a_recoverable_kernel ... ok
+test checkpoint_restore_is_transparent ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+
+     Running tests/supervision.rs (target/debug/deps/supervision-7a50f85e50c0878d)
+
+running 11 tests
+test freshness_is_per_tag ... ok
+test identical_observation_renews_the_marker_and_defeats_an_older_token ... ok
+test liveness_restoration_never_makes_a_tag_good ... ok
+test precedence_and_link_generations ... ok
+test silence_degrades_values_and_keeps_the_link ... ok
+test supervision_kind_and_token_are_validated ... ok
+test unsupervised_config_keeps_v1_and_refuses_supervision_operations ... ok
+test unsupervised_source_in_a_supervised_config_has_no_markers ... ok
+test generator_covers_every_supervised_transition ... ok
+test prop_digest_v2_tracks_the_snapshot ... ok
+test prop_supervision_invariants ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.56s
+
+     Running tests/transitions.rs (target/debug/deps/transitions-af2e00c3949069bc)
+
+running 16 tests
+test batch_with_unknown_channel_changes_nothing ... ok
+test disconnect_preserves_value_reconnect_stays_uncertain ... ok
+test digest_excludes_nothing_logical ... ok
+test first_full_state_may_start_at_any_positive_sequence ... ok
+test initial_state_is_unknown ... ok
+test gap_stale_type_and_resync ... ok
+test identical_duplicate_of_last_batch ... ok
+test never_observed_tags_stay_unknown_on_disconnect ... ok
+test invalid_connect_inputs ... ok
+test new_epoch_requires_full_state ... ok
+test late_disconnect_of_old_generation_is_ignored ... ok
+test rejected_and_duplicate_inputs_do_not_consume_operation_sequence ... ok
+test out_of_order_operation_sequence_is_rejected ... ok
+test other_validation_errors_change_nothing ... ok
+test same_sequence_different_payload_is_a_conflict ... ok
+test value_quality_revision_and_identical_reacquisition ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_journal-2a3a28efb3350f34)
+
+running 8 tests
+test codec::tests::checkpoint_roundtrip ... ok
+test codec::tests::decoders_never_panic ... ok
+test reconcile::tests::buffered_complete_only_with_proof ... ok
+test reconcile::tests::buffered_without_baseline_is_unknown_and_overflow_is_gap ... ok
+test reconcile::tests::legacy_rules ... ok
+test codec::tests::decoded_is_canonical ... ok
+test codec::tests::op_roundtrip_and_strict ... ok
+test codec::tests::source_times_roundtrip ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src/bin/scada-journal.rs (target/debug/deps/scada_journal-112a92b91da11dcf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/journal.rs (target/debug/deps/journal-8bfe6459a8ed6008)
+
+running 10 tests
+test eio_is_a_fault ... ok
+test incompatible_store_is_refused ... ok
+test genesis_replay_and_resume ... ok
+test corruption_is_fail_closed ... ok
+test historian_pages_beyond_the_ring ... ok
+test missing_operation_or_event_is_fail_closed ... ok
+test single_writer_and_permissions ... ok
+test recovery_equals_live_kernel ... ok
+test replay_payload_compaction_is_explicit_and_fail_closed ... ok
+test sqlite_full_publishes_nothing_and_recovers ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_protocol-7dc6de7db5a0cd37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frame.rs (target/debug/deps/frame-f908bb57b40c627e)
+
+running 9 tests
+test corrupt_payload_is_a_decode_error ... ok
+test encode_refuses_messages_above_limit ... ok
+test oversize_length_rejected_before_allocation ... ok
+test roundtrip ... ok
+test truncated_header_and_payload ... ok
+test wire_format_anchor ... ok
+test zero_length_is_invalid ... ok
+test roundtrip_arbitrary_batches ... ok
+test arbitrary_bytes_never_panic ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_runtime-e9bfe284c0aa248c)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test capture::tests::round_trip ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.26s
+
+     Running unittests src/bin/scada-kernel.rs (target/debug/deps/scada_kernel-0548b273fe75c975)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/debug/deps/config_file-e7e3337d1eb6e49e)
+
+running 13 tests
+test invalid_supervision_settings_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test invalid_files_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test shipped_alarm_example_is_valid ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/debug/deps/ipc-021d6e394a5e707b)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/socket_security.rs (target/debug/deps/socket_security-bf95b54390062a9b)
+
+running 7 tests
+test guard_removes_only_its_own_socket ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test missing_directory_is_created_private ... ok
+test own_stale_socket_is_replaced ... ok
+test symlinked_directory_is_refused ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/debug/deps/vs002-6a54487a926da4a6)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test malformed_input_unbuffered ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_with_read_buffer ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.31s
+
+     Running tests/vs003.rs (target/debug/deps/vs003-0ae4c6b1730dd474)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.05s
+
+     Running tests/vs004.rs (target/debug/deps/vs004-5d4b8bc0d4f909a4)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s
+
+     Running tests/vs005.rs (target/debug/deps/vs005-94f36e6b3939717e)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/vs006.rs (target/debug/deps/vs006-6c2f9c22ec4ab3b0)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test replay_emits_nothing ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test time_zone_does_not_change_stored_times ... ok
+test slow_disk_delays_durable_receipts ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.80s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_sched-236ebefcd29e1b7a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/model.rs (target/debug/deps/model-87a69ba3d6f017d3)
+
+running 6 tests
+test control_event_is_admitted_on_a_full_lane_and_ordered_after_its_data ... ok
+test params_are_validated ... ok
+test the_wakeup_test_detects_a_protocol_without_stored_permits ... ok
+test rare_lane_admitted_while_others_full_and_served_within_bound ... ok
+test no_lost_wakeups ... ok
+test matches_oracle_and_keeps_invariants ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+
+     Running tests/sim.rs (target/debug/deps/sim-73272cbbdfade49a)
+
+running 3 tests
+test model_is_deterministic ... ok
+test every_rare_request_is_served ... ok
+test requests_ahead_of_the_rare_source_follow_the_policy_bounds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/lib.rs (target/debug/deps/scada_sim_driver-1bd37942b7b2660f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/scada_sim_driver-28de20bb7d2543d9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-0b00bb06375175f9)
+
+running 2 tests
+test missing_arguments_exit_with_usage ... ok
+test unreachable_socket_is_reported_not_panicked ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/negotiation.rs (target/debug/deps/negotiation-a258d5eeb4a404dc)
+
+running 4 tests
+test legacy_hello_is_byte_identical_to_v1_0 ... ok
+test updated_driver_sends_heartbeats_when_1_1_is_negotiated ... ok
+test legacy_driver_against_1_0_kernel ... ok
+test updated_driver_sends_no_heartbeat_to_a_1_0_kernel ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_journal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_sched
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scada_sim_driver
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, runtime under multi_thread(2))
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_supervision_settings_are_refused ... ok
+test invalid_files_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test non_socket_and_live_socket_are_not_replaced ... ok
+test missing_directory_is_created_private ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test guard_removes_only_its_own_socket ... ok
+test own_stale_socket_is_replaced ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test malformed_input_unbuffered ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.94s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.94s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test replay_emits_nothing ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, VS-001/VS-002/VS-003 runtime suite under the VS-003 ingress policies, ADR 0010)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_supervision_settings_are_refused ... ok
+test invalid_files_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test non_socket_and_live_socket_are_not_replaced ... ok
+test guard_removes_only_its_own_socket ... ok
+test own_stale_socket_is_replaced ... ok
+test missing_directory_is_created_private ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test symlinked_directory_is_refused ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test malformed_input_unbuffered ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.74s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.81s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test restart_is_a_new_instance ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test replay_emits_nothing ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.38s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test invalid_alarm_sections_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test shipped_alarm_example_is_valid ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test missing_directory_is_created_private ... ok
+test guard_removes_only_its_own_socket ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test malformed_input_unbuffered ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.77s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.87s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test default_off_has_no_alarm_surface ... ok
+test check_config_reports_alarm_capacity ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test restart_is_a_new_instance ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test replay_emits_nothing ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.37s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, VS-001..VS-003 runtime suite with VS-004 supervision enabled on source 1001, ADR 0011)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test guard_removes_only_its_own_socket ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test missing_directory_is_created_private ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_unbuffered ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.79s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.93s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.28s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, VS-001..VS-004 runtime suite with VS-005 alarms enabled on every tag, ADR 0012)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_supervision_settings_are_refused ... ok
+test invalid_files_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test kernel_survives_driver_kill ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test backpressure_when_queue_is_full ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test missing_directory_is_created_private ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test guard_removes_only_its_own_socket ... ok
+test symlinked_directory_is_refused ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_unbuffered ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test malformed_input_with_read_buffer ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.95s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test cross_boot_regression_is_detected ... ok
+test default_off_is_the_vs005_contract ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.36s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_alarm_sections_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test kernel_survives_driver_kill ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test backpressure_when_queue_is_full ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test guard_removes_only_its_own_socket ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test missing_directory_is_created_private ... ok
+test own_stale_socket_is_replaced ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test malformed_input_unbuffered ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test malformed_input_with_read_buffer ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.04s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.98s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test control_plane_security ... ok
+test restart_is_a_new_instance ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test cross_boot_regression_is_detected ... ok
+test default_off_is_the_vs005_contract ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.35s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test invalid_alarm_sections_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test guard_removes_only_its_own_socket ... ok
+test missing_directory_is_created_private ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test own_stale_socket_is_replaced ... ok
+test symlinked_directory_is_refused ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test malformed_input_unbuffered ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test malformed_input_with_read_buffer ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.10s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.06s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test control_plane_security ... ok
+test default_off_has_no_alarm_surface ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test restart_is_a_new_instance ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test cross_boot_regression_is_detected ... ok
+test default_off_is_the_vs005_contract ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.39s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test capture::tests::round_trip ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test shipped_alarm_example_is_valid ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test kernel_survives_driver_kill ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test backpressure_when_queue_is_full ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test missing_directory_is_created_private ... ok
+test guard_removes_only_its_own_socket ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test symlinked_directory_is_refused ... ok
+test own_stale_socket_is_replaced ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test malformed_input_unbuffered ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test sequencer_failure_stops_the_host ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test malformed_input_with_read_buffer ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.05s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test control_plane_security ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test durable_receipts_follow_the_commit ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.41s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== test (release, VS-001..VS-005 runtime suite with the VS-006 durable journal enabled, ADR 0013)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test non_socket_and_live_socket_are_not_replaced ... ok
+test missing_directory_is_created_private ... ok
+test guard_removes_only_its_own_socket ... ok
+test own_stale_socket_is_replaced ... ok
+test symlinked_directory_is_refused ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_unbuffered ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.82s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.05s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test restart_is_a_new_instance ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test replay_emits_nothing ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_supervision_settings_are_refused ... ok
+test invalid_files_are_refused ... ok
+test invalid_alarm_sections_are_refused ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test shipped_alarm_example_is_valid ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test non_socket_and_live_socket_are_not_replaced ... ok
+test own_stale_socket_is_replaced ... ok
+test guard_removes_only_its_own_socket ... ok
+test missing_directory_is_created_private ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test group_or_world_writable_directory_is_refused ... ok
+test symlinked_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test malformed_input_unbuffered ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.07s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test replay_emits_nothing ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/scada_runtime-204007a9837322f2)
+
+running 35 tests
+test budget::tests::budget_limit_is_enforced ... ok
+test budget::tests::bound_is_monotonic_in_the_limits_and_never_overflows ... ok
+test budget::tests::invalid_ingress_settings_are_refused ... ok
+test capture::tests::round_trip ... ok
+test convert::adversarial::oversized_batch_replaced_by_hello_is_not_a_batch ... ok
+test convert::adversarial::oversized_batch_is_not_retained ... ok
+test convert::adversarial::oversized_with_invalid_mode_reports_invalid_mode_first ... ok
+test convert::adversarial::small_batch_after_discarded_oversized_one_is_decoded_within_the_limit ... ok
+test convert::adversarial::oversized_then_corrupt_is_malformed_without_retention ... ok
+test convert::tests::fast_decode_equals_generic_on_raw_bytes ... ok
+test convert::tests::limited_decode_agrees_on_mixed_bodies ... ok
+test convert::tests::scratch_capacity_is_reused ... ok
+test diag::tests::buckets_are_monotonic_and_cover_their_values ... ok
+test budget::tests::ingress_policy_is_in_the_bound ... ok
+test diag::tests::percentiles_are_within_resolution ... ok
+test diag::tests::stage_discriminants_match_table ... ok
+test persist::tests::admission_at_the_exact_queue_edge ... ok
+test persist::tests::disk_floor_and_fault_refuse_before_apply ... ok
+test server::tests::reused_ack_encodes_identically ... ok
+test supervision::tests::disconnection_stops_supervision ... ok
+test supervision::tests::freshness_per_tag_with_partial_deltas ... ok
+test supervision::tests::freshness_sample_count ... ok
+test supervision::tests::heartbeats_keep_alive_and_restore_without_good ... ok
+test supervision::tests::late_ticks_and_evidence_stamping ... ok
+test supervision::tests::liveness_boundaries_are_never_early ... ok
+test supervision::tests::recoveries_count_heartbeats_and_batches_not_disconnections ... ok
+test supervision::tests::renewal_just_before_the_deadline_wins ... ok
+test supervision::tests::takeover_isolates_the_old_link ... ok
+test time_authority::tests::chronyc_parsing ... ok
+test supervision::tests::sample_ring_is_bounded ... ok
+test time_authority::tests::cross_boot_regression ... ok
+test time_authority::tests::clock_steps_are_flagged_and_logical_is_monotonic ... ok
+test convert::tests::fast_decode_equals_generic ... ok
+test time_authority::tests::idle_is_not_a_jump ... ok
+test convert::tests::limited_decode_agrees_with_generic ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/bin/scada-kernel.rs (target/release/deps/scada_kernel-91c076e55984e11f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/config_file.rs (target/release/deps/config_file-4567af8836b356ff)
+
+running 13 tests
+test invalid_files_are_refused ... ok
+test invalid_supervision_settings_are_refused ... ok
+test runtime_section_selects_scheduler_explicitly ... ok
+test micro_alarm_profile_fits_its_budget_and_the_2mib_budget_refuses_it ... ok
+test invalid_alarm_sections_are_refused ... ok
+test shipped_alarm_example_is_valid ... ok
+test shipped_demo_config_is_valid ... ok
+test shipped_profiles_are_valid_and_fit_their_budget ... ok
+test shipped_persistence_example_is_valid ... ok
+test shipped_profiles_fit_their_budget_with_the_vs003_ingress_policies ... ok
+test shipped_profiles_fit_their_budget_with_vs004_supervision ... ok
+test kernel_binary_exits_with_error_on_invalid_config ... ok
+test scheduler_override_on_command_line_is_validated ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ipc.rs (target/release/deps/ipc-5f5c7593d91ff4e1)
+
+running 9 tests
+test demo_scenario_with_separate_driver_process ... ok
+test concurrent_reconnects_do_not_corrupt_state ... ok
+test kernel_restart_loses_volatile_state_explicitly ... ok
+test kernel_survives_driver_kill ... ok
+test connection_limit_is_enforced_with_explicit_refusal ... ok
+test superseded_link_cannot_overwrite_new_generation ... ok
+test handshake_rejections_are_explicit ... ok
+test malformed_frames_do_not_crash_or_allocate ... ok
+test backpressure_when_queue_is_full ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/socket_security.rs (target/release/deps/socket_security-e7db9cae74ac9f76)
+
+running 7 tests
+test guard_removes_only_its_own_socket ... ok
+test missing_directory_is_created_private ... ok
+test non_socket_and_live_socket_are_not_replaced ... ok
+test own_stale_socket_is_replaced ... ok
+test stale_socket_of_another_user_is_not_removed ... ok
+test symlinked_directory_is_refused ... ok
+test group_or_world_writable_directory_is_refused ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vs002.rs (target/release/deps/vs002-ba04bcda7c8d6485)
+
+running 12 tests
+test continuous_replay_vs_sequence_loss ... ok
+test captured_streams_replay_to_the_live_digest_in_every_mode ... ok
+test ingestion_modes_preserve_order_and_give_the_same_normalized_state ... ok
+test malformed_input_unbuffered ... ok
+test adversarial_many_small_observations_are_rejected_without_retained_memory ... ok
+test reconnection_with_partial_deltas_then_fresh_full_state ... ok
+test malformed_input_with_read_buffer ... ok
+test simulator_resume_procedure_reasserts_all_channels ... ok
+test sequencer_failure_stops_the_host ... ok
+test non_reading_peer_is_closed_and_reconciles_by_reconnect ... ok
+test repeated_takeovers_do_not_exhaust_connection_slots ... ok
+test takeover_of_a_backpressured_non_reading_link_releases_its_slot_promptly ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.95s
+
+     Running tests/vs003.rs (target/release/deps/vs003-727d9c680bd98a93)
+
+running 7 tests
+test disconnect_is_never_applied_before_the_same_links_batches ... ok
+test policy_is_reported_and_check_config_counts_it ... ok
+test every_policy_keeps_per_source_order_and_replays_to_the_live_digest ... ok
+test takeover_with_a_full_lane_under_fair_policy ... ok
+test shutdown_with_sessions_waiting_for_permits ... ok
+test cancelled_and_superseded_waiters_leak_no_permit ... ok
+test fair_policy_bounds_the_rare_source_wait_in_turns ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.06s
+
+     Running tests/vs004.rs (target/release/deps/vs004-32d3bf920cb88480)
+
+running 10 tests
+test heartbeat_flood_is_bounded_and_does_not_starve ... ok
+test default_off_is_the_vs003_contract ... ok
+test heartbeat_after_silence_restores_communication_only ... ok
+test invalid_heartbeat_closes_the_link ... ok
+test capture_replay_reproduces_supervised_state ... ok
+test heartbeats_keep_the_source_alive_but_never_refresh_data ... ok
+test partial_deltas_refresh_only_their_tags ... ok
+test silent_open_socket_is_silent_not_disconnected ... ok
+test takeover_old_link_cannot_keep_or_degrade_the_new_one ... ok
+test identical_values_refresh_duplicates_do_not ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/vs005.rs (target/release/deps/vs005-ae8512c25d36a156)
+
+running 8 tests
+test check_config_reports_alarm_capacity ... ok
+test default_off_has_no_alarm_surface ... ok
+test control_plane_security ... ok
+test full_outbox_refuses_whole_batch_then_recovers ... ok
+test episode_and_ack_over_ipc_and_replay ... ok
+test disconnection_is_deferred_until_slots_are_released ... ok
+test restart_is_a_new_instance ... ok
+test supervision_silence_drives_bad_quality_but_never_auto_normal ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/vs006.rs (target/release/deps/vs006-ded5c7ed9214a73f)
+
+running 27 tests
+test check_config_reports_persistence_memory ... ok
+test continuity_gap_and_new_epoch ... ok
+test configuration_change_needs_an_explicit_new_timeline ... ok
+test default_off_is_the_vs005_contract ... ok
+test cross_boot_regression_is_detected ... ok
+test driver_versions_against_a_journaling_kernel ... ok
+test clock_steps_are_diagnosed_not_causal ... ok
+test durable_operator_ack_is_idempotent_across_restart ... ok
+test eio_is_a_fault_until_restart ... ok
+test disk_full_refuses_and_publishes_nothing ... ok
+test durable_receipts_follow_the_commit ... ok
+test normal_durability_is_benchmark_only ... ok
+test partial_reconnect_verifies_only_that_source ... ok
+test journal_releases_the_outbox_ring ... ok
+test require_durable_without_journal_is_refused ... ok
+test restart_recovers_unverified_then_reconciles ... ok
+test sigterm_drains_the_journal ... ok
+test single_writer_and_private_store ... ok
+test slow_disk_delays_durable_receipts ... ok
+test source_timestamps_are_kept_unchanged ... ok
+test replay_emits_nothing ... ok
+test time_zone_does_not_change_stored_times ... ok
+test stalled_disk_backpressure_then_recovery ... ok
+test crash_at_every_fault_point_recovers_a_coherent_prefix ... ok
+test torn_wal_tail_gives_a_prefix_or_a_refusal ... ok
+test kill9_during_a_storm_recovers_coherently_every_time ... ok
+test watchdog_is_independent_of_the_wall_clock ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.32s
+
+   Doc-tests scada_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== alarm capacity model (VS-005 T15)
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.010s
+
+OK
+== alarm catalog example (VS-005, docs/alarm-catalog.md)
+catalog ok: 5 entries, version 2026-11-01.1
+== unsafe audit (only the benchmark allocator may contain unsafe, ADR 0003)
+ok
+== core dependency audit (no tokio/prost/toml/serde in scada-core)
+ok
+== core purity audit (no clocks, sockets, threads, randomness in scada-core/src)
+ok
+== proto
+1.75.0
+buf lint: ok; buf breaking vs baseline v1.0: ok
+buf breaking detects a renumbered field: ok
+== aarch64 compile check (not a runtime proof: NOT TESTED ON HARDWARE)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+    Checking cfg-if v1.0.5
+    Checking rand_core v0.10.1
+   Compiling libc v0.2.191
+   Compiling getrandom v0.4.3
+   Compiling anyhow v1.0.104
+    Checking bitflags v2.13.2
+   Compiling syn v2.0.119
+   Compiling aho-corasick v1.1.5
+   Compiling itertools v0.14.0
+   Compiling autocfg v1.5.1
+   Compiling regex-automata v0.4.18
+   Compiling rustix v1.1.6
+   Compiling num-traits v0.2.19
+   Compiling fnv v1.0.7
+    Checking rand v0.10.3
+    Checking chacha20 v0.10.2
+    Checking rand_xorshift v0.5.0
+   Compiling syn v3.0.9
+    Checking unarray v0.1.4
+    Checking regex-syntax v0.8.11
+   Compiling logos-codegen v0.16.1
+   Compiling prost-derive v0.14.4
+   Compiling miette-derive v7.6.0
+   Compiling prost v0.14.4
+   Compiling prost-types v0.14.4
+   Compiling thiserror v2.0.21
+   Compiling logos-derive v0.16.1
+    Checking core_detect v1.0.0
+   Compiling unicode-width v0.1.14
+    Checking proptest v1.12.0
+   Compiling miette v7.6.0
+   Compiling logos v0.16.1
+   Compiling thiserror-impl v2.0.21
+   Compiling equivalent v1.0.3
+   Compiling foldhash v0.1.5
+   Compiling prettyplease v0.2.37
+   Compiling hashbrown v0.17.1
+   Compiling hashbrown v0.15.5
+   Compiling indexmap v2.14.2
+   Compiling shlex v2.0.1
+   Compiling fixedbitset v0.5.7
+   Compiling find-msvc-tools v0.1.15
+   Compiling cc v1.10.0
+   Compiling protox-parse v0.10.0
+   Compiling petgraph v0.8.3
+   Compiling tempfile v3.27.0
+   Compiling prost-reflect v0.16.5
+   Compiling regex v1.13.1
+   Compiling multimap v0.10.1
+   Compiling heck v0.5.0
+   Compiling log v0.4.35
+   Compiling prost-build v0.14.4
+   Compiling blake3 v1.8.7
+    Checking constant_time_eq v0.4.2
+    Checking bytes v1.12.1
+    Checking arrayvec v0.7.8
+    Checking scada-core v0.1.0 (/home/claude/moscascada/crates/scada-core)
+   Compiling protox v0.10.0
+    Checking linux-raw-sys v0.12.1
+    Checking once_cell v1.21.4
+    Checking fastrand v2.5.0
+    Checking scada-sched v0.1.0 (/home/claude/moscascada/crates/scada-sched)
+   Compiling scada-protocol v0.1.0 (/home/claude/moscascada/crates/scada-protocol)
+    Checking scada-sim-driver v0.1.0 (/home/claude/moscascada/apps/scada-sim-driver)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.59s
+aarch64: scada-journal, scada-runtime, scada-bench NOT CHECKED (no aarch64 C cross compiler for SQLite)
+ALL CHECKS PASSED
+EXIT 0

@@ -17,7 +17,7 @@ jobs:
       - name: Checks (includes runtime tests in release under multi_thread(2))
         run: ./scripts/check.sh
       - name: Runtime tests in release, current_thread
-        run: cargo build --release -p scada-sim-driver && cargo test --release -p scada-runtime
+        run: cargo build --release -p scada-sim-driver -p scada-journal && cargo test --release -p scada-runtime
 
   fuzz-smoke:
     # Separate from the stable gate: cargo-fuzz needs nightly (libFuzzer + sanitizers).
@@ -38,3 +38,5 @@ jobs:
         run: mkdir -p fuzz/corpus/supervision_transitions && cd fuzz && cargo +nightly fuzz run -O supervision_transitions corpus/supervision_transitions -- -max_total_time=60
       - name: alarm_transitions (60 s, VS-005)
         run: mkdir -p fuzz/corpus/alarm_transitions && cd fuzz && cargo +nightly fuzz run -O alarm_transitions corpus/alarm_transitions -- -max_total_time=60
+      - name: journal_decode (60 s, VS-006)
+        run: mkdir -p fuzz/corpus/journal_decode && cd fuzz && cargo +nightly fuzz run -O journal_decode corpus/journal_decode -- -max_total_time=60

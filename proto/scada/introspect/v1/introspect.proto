@@ -23,6 +23,8 @@ enum Quality {
   QUALITY_UNCERTAIN_SOURCE_SILENT = 4;
   // VS-004 (freshness supervision): no new observation within the freshness timeout.
   QUALITY_UNCERTAIN_STALE_DATA = 5;
+  // VS-006: restored from the journal after a restart, not yet verified by a FullState.
+  QUALITY_UNCERTAIN_RECOVERED_UNVERIFIED = 6;
 }
 
 message TagState {
@@ -68,6 +70,8 @@ message SourceState {
   // VS-004: operation sequence of the last applied batch (0 = none or unsupervised).
   uint64 last_batch_operation = 7;
   bool freshness_supervised = 8;
+  // VS-006: restored after a restart and not yet verified by a FullState.
+  bool unverified = 9;
 }
 
 message RuntimeCounters {
@@ -130,6 +134,27 @@ message IntrospectResponse {
   uint32 state_digest_version = 10;
   // VS-005: alarm engine and outbox summary; absent without [alarms].
   AlarmSummary alarms = 11;
+  // VS-006: journal summary; absent without [persistence].
+  PersistenceSummary persistence = 12;
+}
+
+// VS-006 (ADR 0013): journal progress read at this introspection's position. The full
+// diagnostic API is scada.history.v1 (GetJournalStatus, GetRecoveryStatus).
+message PersistenceSummary {
+  bytes timeline_id = 1;
+  uint64 boot_generation = 2;
+  // Highest operation / event sequence covered by a committed (durable) transaction.
+  uint64 durable_operation_sequence = 3;
+  uint64 durable_event_sequence = 4;
+  // Operations admitted to the journal queue and not yet durable.
+  uint64 backlog_operations = 5;
+  // 1 ok, 2 backpressure, 3 disk full, 4 fault (scada.history.v1.JournalState values).
+  uint32 journal_state = 6;
+  uint64 refused_queue_full = 7;
+  uint64 refused_disk_full = 8;
+  uint64 refused_fault = 9;
+  uint64 recovered_operation_sequence = 10;
+  uint64 checkpoints_written = 11;
 }
 
 // VS-005 (ADR 0012): operational summary of the alarm engine. Sequences and occupancy are

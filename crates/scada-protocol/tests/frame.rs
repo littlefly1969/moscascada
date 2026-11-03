@@ -20,6 +20,7 @@ fn hello() -> DriverMessage {
             source_epoch: 0xDEAD_BEEF,
             supported_protocol_majors: vec![1],
             protocol_minor: 0,
+            ..Default::default()
         })),
     }
 }
@@ -83,6 +84,7 @@ fn encode_refuses_messages_above_limit() {
             observations: (0..1000)
                 .map(|c| Observation { channel_id: c, value: Some(observation::Value::I64Value(i64::MAX)) })
                 .collect(),
+            ..Default::default()
         })),
     };
     let mut out = Vec::new();
@@ -100,6 +102,7 @@ fn wire_format_anchor() {
                 Observation { channel_id: 1, value: Some(observation::Value::BoolValue(true)) },
                 Observation { channel_id: 3, value: Some(observation::Value::I64Value(-2)) },
             ],
+            ..Default::default()
         })),
     };
     let hex: String = m.encode_to_vec().iter().map(|b| format!("{b:02x}")).collect();
@@ -130,8 +133,8 @@ proptest! {
                 source_sequence: seq,
                 observations: vals.iter().map(|&(c, v, is_bool)| Observation {
                     channel_id: c,
-                    value: Some(if is_bool { observation::Value::BoolValue(v % 2 == 0) } else { observation::Value::I64Value(v) }),
-                }).collect(),
+                    value: Some(if is_bool { observation::Value::BoolValue(v % 2 == 0) } else { observation::Value::I64Value(v) }) }).collect(),
+                ..Default::default()
             })),
         };
         let mut out = Vec::new();

@@ -57,7 +57,8 @@ fn base() -> &'static Kernel {
 
 fuzz_target!(|data: &[u8]| {
     let Ok(wire) = WireBatch::decode(data) else { return };
-    let Ok(batch) = scada_runtime::convert::batch_from_wire(SourceId(1001), 1, &wire, 128) else { return };
+    // VS-006: the source-time sidecar never reaches the core (ADR 0014 §6).
+    let Ok((batch, _times)) = scada_runtime::convert::batch_from_wire(SourceId(1001), 1, &wire, 128) else { return };
     let mut k = base().clone();
     let before = (k.logical_snapshot(), k.state_digest());
     let r = k.apply(SequencedInput { operation_sequence: 3, operation: Operation::ObservationBatch(batch) });

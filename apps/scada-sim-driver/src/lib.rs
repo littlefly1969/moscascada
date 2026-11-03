@@ -86,8 +86,18 @@ pub fn hello_minor(driver_id: &str, source_id: u32, source_epoch: u64, protocol_
             source_epoch,
             supported_protocol_majors: vec![PROTOCOL_MAJOR],
             protocol_minor,
+            request_durable_receipts: false,
         })),
     }
+}
+
+/// VS-006: `Hello` of a 1.2 driver that asks for durable receipts.
+pub fn hello_durable(driver_id: &str, source_id: u32, source_epoch: u64) -> DriverMessage {
+    let mut m = hello_minor(driver_id, source_id, source_epoch, PROTOCOL_MINOR);
+    if let Some(driver_message::Body::Hello(h)) = &mut m.body {
+        h.request_durable_receipts = true;
+    }
+    m
 }
 
 /// VS-004 heartbeat message (minor 1.1).
@@ -110,6 +120,43 @@ pub fn batch(mode: BatchMode, source_sequence: u64, obs: &[(u32, Val)]) -> Drive
                     }),
                 })
                 .collect(),
+            ..Default::default()
+        })),
+    }
+}
+
+/// VS-006 (minor 1.2): a batch whose observations carry source timestamps (`None` = not
+/// available for that observation) and an optional driver acquisition time.
+pub fn batch_with_times(
+    mode: BatchMode,
+    source_sequence: u64,
+    obs: &[(u32, Val, Option<i64>)],
+    acquired_at: Option<i64>,
+    clock_quality: scada_protocol::driver_v1::ClockQuality,
+) -> DriverMessage {
+    DriverMessage {
+        body: Some(driver_message::Body::Batch(ObservationBatch {
+            mode: mode as i32,
+            source_sequence,
+            observations: obs
+                .iter()
+                .map(|&(channel_id, v, _)| Observation {
+                    channel_id,
+                    value: Some(match v {
+                        Val::B(b) => observation::Value::BoolValue(b),
+                        Val::I(i) => observation::Value::I64Value(i),
+                    }),
+                })
+                .collect(),
+            // Aligned with the observations; INT64_MIN = not available.
+            source_timestamps_utc_ns: if obs.iter().any(|o| o.2.is_some()) {
+                obs.iter().map(|o| o.2.unwrap_or(i64::MIN)).collect()
+            } else {
+                Vec::new()
+            },
+            acquired_at_utc_ns: acquired_at,
+            source_clock_quality: clock_quality as i32,
+            source_clock_id: "sim-clock".into(),
         })),
     }
 }
@@ -382,7 +429,30 @@ impl AlarmClient {
     }
 
     pub fn ack(&mut self, alarm_id: u32, activation_token: u64) -> Result<alarm_v1::AlarmResponse, ClientError> {
-        self.call(alarm_v1::alarm_request::Body::Acknowledge(alarm_v1::AcknowledgeAlarm { alarm_id, activation_token }))
+        self.call(alarm_v1::alarm_request::Body::Acknowledge(alarm_v1::AcknowledgeAlarm {
+            alarm_id,
+            activation_token,
+            ..Default::default()
+        }))
+    }
+
+    /// VS-006: acknowledgement with an idempotency key, an operator note and, optionally,
+    /// a durable answer (sent only after the journal commit).
+    pub fn ack_action(
+        &mut self,
+        alarm_id: u32,
+        activation_token: u64,
+        action_id: [u8; 16],
+        note: &str,
+        require_durable: bool,
+    ) -> Result<alarm_v1::AlarmResponse, ClientError> {
+        self.call(alarm_v1::alarm_request::Body::Acknowledge(alarm_v1::AcknowledgeAlarm {
+            alarm_id,
+            activation_token,
+            action_id: action_id.to_vec(),
+            note: note.to_owned(),
+            require_durable,
+        }))
     }
 
     pub fn capacity(&mut self) -> Result<alarm_v1::CapacityStatus, ClientError> {
@@ -397,5 +467,86 @@ impl AlarmClient {
         self.call(alarm_v1::alarm_request::Body::SimulatedDurableCommit(alarm_v1::SimulatedDurableCommit {
             up_to_event_seq: up_to,
         }))
+    }
+}
+
+// ------------------------------------------------------------------ VS-006 history client
+
+/// Blocking client of the historian socket (`scada.history.v1`, ADR 0013 D12).
+#[derive(Debug)]
+pub struct HistoryClient {
+    stream: UnixStream,
+    wbuf: Vec<u8>,
+    rbuf: Vec<u8>,
+}
+
+impl HistoryClient {
+    pub fn connect(socket: &Path) -> Result<HistoryClient, ClientError> {
+        let stream = UnixStream::connect(socket)?;
+        stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+        Ok(HistoryClient { stream, wbuf: Vec::new(), rbuf: Vec::new() })
+    }
+
+    pub fn call(
+        &mut self,
+        body: scada_protocol::history_v1::history_request::Body,
+    ) -> Result<scada_protocol::history_v1::HistoryResponse, ClientError> {
+        let req = scada_protocol::history_v1::HistoryRequest { history_api_version: 1, body: Some(body) };
+        frame::encode_frame(&req, frame::MAX_FRAME_BYTES_CEILING, &mut self.wbuf)?;
+        self.stream.write_all(&self.wbuf)?;
+        frame::read_message(&mut self.stream, frame::MAX_FRAME_BYTES_CEILING, &mut self.rbuf)?
+            .ok_or(ClientError::Closed)
+    }
+
+    /// One page of alarm history after `after` (keyset), optionally for one alarm.
+    pub fn history(
+        &mut self,
+        after: u64,
+        limit: u32,
+        alarm_id: u32,
+    ) -> Result<scada_protocol::history_v1::HistoryPage, ClientError> {
+        use scada_protocol::history_v1 as h;
+        let q = h::QueryAlarmHistory { after_event_seq: after, limit, alarm_id, ..Default::default() };
+        match self.call(h::history_request::Body::Query(q))?.body {
+            Some(h::history_response::Body::History(p)) => Ok(p),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
+    pub fn journal(&mut self) -> Result<scada_protocol::history_v1::JournalStatus, ClientError> {
+        use scada_protocol::history_v1 as h;
+        match self.call(h::history_request::Body::Journal(h::GetJournalStatus {}))?.body {
+            Some(h::history_response::Body::Journal(j)) => Ok(j),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
+    pub fn recovery(&mut self) -> Result<scada_protocol::history_v1::RecoveryStatus, ClientError> {
+        use scada_protocol::history_v1 as h;
+        match self.call(h::history_request::Body::Recovery(h::GetRecoveryStatus {}))?.body {
+            Some(h::history_response::Body::Recovery(r)) => Ok(r),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
+    pub fn time(&mut self) -> Result<scada_protocol::history_v1::TimeStatus, ClientError> {
+        use scada_protocol::history_v1 as h;
+        match self.call(h::history_request::Body::Time(h::GetTimeStatus {}))?.body {
+            Some(h::history_response::Body::Time(t)) => Ok(t),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
+    }
+
+    pub fn projection(
+        &mut self,
+        after: u32,
+        limit: u32,
+    ) -> Result<scada_protocol::history_v1::ActiveAlarmProjection, ClientError> {
+        use scada_protocol::history_v1 as h;
+        let q = h::GetActiveAlarmProjection { after_alarm_id: after, limit };
+        match self.call(h::history_request::Body::Projection(q))?.body {
+            Some(h::history_response::Body::Projection(p)) => Ok(p),
+            other => Err(ClientError::Unexpected(format!("{other:?}"))),
+        }
     }
 }

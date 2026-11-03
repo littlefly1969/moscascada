@@ -13,6 +13,12 @@
 //! scada-bench alarms-core [--ops N]                    VS-005 in-memory alarm engine suite
 //! scada-bench alarm-storm --alarms R:CAP:storm [--clients N] [--size S] [--secs S]
 //!       [--sink drain|stopped] [--sink-page P]   VS-005 process storm, PASS/FAIL line
+//!       VS-006: with --persistence the journal is the sink (released = durable watermark);
+//!       [--stall-at S --stall-for S] stalls the journal writer in the window (catch-up)
+//! scada-bench journal --store DIR --ops N [--events-per-op E] ...   VS-006 in-process
+//!       journal/historian: durable μ, fsync/s, bytes/event, queries, recovery
+//! VS-006 process options: --persistence LINES (`full` or `key = v;key = v`),
+//!       --store-dir DIR (tmpfs vs disk), --durable-receipts (clients ask for 1.2 receipts)
 //! ```
 //! VS-005 `--alarms R:CAP[:storm]` (cell, mixed, alarm-storm): R `high` rules on every tag
 //! of the generated config, outbox CAP events, control socket for the current uid.
@@ -49,6 +55,7 @@
 
 mod alarms;
 mod alloc;
+mod journal;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -84,12 +91,12 @@ const MAX_LOAD_SOURCES: u32 = 32;
 /// VS-001 table used 8 sources; kept for `core`.
 const SOURCES: u32 = 8;
 
-fn arg(name: &str, default: u64) -> u64 {
+pub(crate) fn arg(name: &str, default: u64) -> u64 {
     let a: Vec<String> = std::env::args().collect();
     a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn arg_str(name: &str) -> Option<String> {
+pub(crate) fn arg_str(name: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
     a.iter().position(|x| x == name).and_then(|i| a.get(i + 1)).cloned()
 }
@@ -119,6 +126,11 @@ struct KernelSpec {
     /// outbox of CAP events, control socket `<dir>/alarm.sock` for the current uid.
     /// Thresholds never crossed by the `cell` values unless `storm` (trip 1, reset 0).
     alarms: Option<AlarmGen>,
+    /// VS-006 `--persistence LINES`: a `[persistence]` section (store under `--store-dir`,
+    /// default the bench directory; historian socket `<dir>/history.sock`). LINES are extra
+    /// `key = value` lines separated by `;` (e.g. `durability = "normal"`), or `full`.
+    persistence: Option<String>,
+    store_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,11 +163,17 @@ impl KernelSpec {
                     storm: p.get(2) == Some(&"storm"),
                 }
             }),
+            persistence: arg_str("--persistence")
+                .map(|v| if v == "full" { String::new() } else { v.split(';').collect::<Vec<_>>().join("\n") }),
+            store_dir: arg_str("--store-dir").map(PathBuf::from),
         }
     }
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--durable-receipts") {
+        DURABLE_RECEIPTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mode = std::env::args().nth(1).unwrap_or_default();
     match mode.as_str() {
         "core" => core_bench(arg("--ops", 1_000_000), std::env::args().any(|a| a == "--supervised")),
@@ -167,6 +185,7 @@ fn main() {
             arg("--reps", 7) as u32,
         ),
         "alarm-storm" => alarms::alarm_storm(&KernelSpec::from_args()),
+        "journal" => journal::journal_bench(),
         "e2e" => e2e_bench(&KernelSpec::from_args(), arg("--secs", 10), arg("--warmup-secs", 2)),
         "saturation" => saturation(&KernelSpec::from_args(), arg("--secs", 60), arg("--clients", 8) as u32),
         "cell" => {
@@ -433,6 +452,7 @@ fn kernel_bin() -> PathBuf {
 
 /// `load` sources x 128 i64 channels (16 -> 2048 tags) + the rare and control-probe
 /// sources 900..=908 (1 i64 channel each).
+#[allow(clippy::too_many_arguments)]
 fn write_config(
     dir: &Path,
     queue: u32,
@@ -441,6 +461,7 @@ fn write_config(
     ipc_lines: &[String],
     supervise: Option<(u64, u64, u64)>,
     alarms: Option<AlarmGen>,
+    persistence: Option<(&str, Option<&Path>)>,
 ) -> PathBuf {
     let mut s = format!(
         "[ipc]\nsocket_path = \"{}\"\nmax_frame_bytes = 65536\nmax_driver_connections = {max_conn}\ninput_queue_capacity = {queue}\nmax_inflight_per_connection = 32\nhandshake_timeout_ms = 2000\nframe_timeout_ms = 2000\n",
@@ -503,9 +524,57 @@ fn write_config(
             }
         }
     }
+    if let Some((lines, store)) = persistence {
+        // VS-006: the store lives under --store-dir (tmpfs vs disk) in a private directory.
+        let jdir = match store {
+            Some(d) => d.join(dir.file_name().expect("bench dir name")),
+            None => dir.join("journal"),
+        };
+        let _ = std::fs::remove_dir_all(&jdir);
+        let uid = proc_status(std::process::id(), "Uid:");
+        s.push_str(&format!(
+            "\n[persistence]\npath = \"{}\"\nhistory_socket_path = \"{}\"\nhistory_authorized_uids = [{uid}]\n{lines}\n",
+            jdir.join("kernel.db").display(),
+            dir.join("history.sock").display()
+        ));
+    }
     let p = dir.join("bench.toml");
     std::fs::write(&p, s).expect("write config");
     p
+}
+
+/// VS-006: journal counters of the kernel (absent without `[persistence]`): commits and
+/// their latency (fsync with synchronous=FULL), durable lag, sizes, refusals.
+pub(crate) fn journal_kv(dir: &Path) -> String {
+    let sock = dir.join("history.sock");
+    if !sock.exists() {
+        return String::new();
+    }
+    let Ok(mut h) = scada_sim_driver::HistoryClient::connect(&sock) else { return String::new() };
+    let Ok(j) = h.journal() else { return String::new() };
+    let lat = |l: &Option<scada_protocol::history_v1::LatencySummary>| {
+        l.as_ref().map_or((0, 0, 0), |l| (l.p50_ns / 1000, l.p99_ns / 1000, l.max_ns / 1000))
+    };
+    let (c50, c99, cmax) = lat(&j.commit_latency);
+    let (d50, d99, dmax) = lat(&j.durable_lag);
+    format!(
+        " j_state={} j_durable_op={} j_durable_ev={} j_commits={} j_ops={} j_events={} j_commit_us_p50={c50} j_commit_us_p99={c99} j_commit_us_max={cmax} \
+         j_lag_us_p50={d50} j_lag_us_p99={d99} j_lag_us_max={dmax} j_wal_bytes={} j_db_bytes={} j_backlog={} j_ref_q={} j_ref_disk={} j_ref_fault={} j_ckpt={} j_uptime_ms={}",
+        j.state,
+        j.durable_operation_seq,
+        j.durable_event_seq,
+        j.commits,
+        j.committed_operations,
+        j.committed_events,
+        j.wal_bytes,
+        j.db_bytes,
+        j.backlog_operations,
+        j.refused_queue_full,
+        j.refused_disk_full,
+        j.refused_fault,
+        j.checkpoints_written,
+        j.uptime_ms
+    )
 }
 
 struct KernelProc {
@@ -544,6 +613,7 @@ impl KernelProc {
                 &spec.ipc_lines,
                 spec.supervise,
                 spec.alarms,
+                spec.persistence.as_deref().map(|l| (l, spec.store_dir.as_deref())),
             ),
         };
         let mut child = Command::new(&spec.bin)
@@ -649,12 +719,24 @@ fn delta(seq: u64, size: u32, v: i64) -> scada_protocol::driver_v1::DriverMessag
     batch(WireMode::Delta, seq, &obs)
 }
 
+/// VS-006 `--durable-receipts`: clients ask for durable receipts (protocol 1.2) and every
+/// latency is then send -> APPLIED_DURABLE (after the journal commit).
+pub(crate) static DURABLE_RECEIPTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn applied_ok(status: i32) -> bool {
+    status == AckStatus::AppliedVolatile as i32 || status == AckStatus::AppliedDurable as i32
+}
+
 fn open(socket: &Path, source: u32, epoch: u64, channels: u32) -> (Session, u64) {
-    let mut s = Session::connect(socket, "bench", source, epoch).expect("connect");
+    let mut s = if DURABLE_RECEIPTS.load(std::sync::atomic::Ordering::Relaxed) {
+        Session::connect_with(socket, &scada_sim_driver::hello_durable("bench", source, epoch)).expect("connect")
+    } else {
+        Session::connect(socket, "bench", source, epoch).expect("connect")
+    };
     let obs: Vec<(u32, Val)> = (1..=channels).map(|c| (c, Val::I(0))).collect();
     let next = s.welcome.last_accepted_source_sequence.map_or(1, |l| l + 1);
     let a = s.request(&batch(WireMode::FullState, next, &obs)).expect("full state");
-    assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
+    assert!(applied_ok(a.status), "{a:?}");
     (s, next + 1)
 }
 
@@ -668,12 +750,27 @@ fn epoch_for(source: u32) -> u64 {
 struct ClientResult {
     lat: Vec<u64>,
     batches: u64,
+    /// VS-006: explicit journal backpressure refusals (`JOURNAL_QUEUE_FULL`) seen in the
+    /// measured window; the refused batches are resent and are not counted as applied.
+    refused: u64,
+}
+
+/// VS-006: a refusal the bench treats as backpressure (resend after a pause); anything
+/// else is a harness or kernel error.
+fn backpressure(a: &scada_protocol::driver_v1::InputAck) -> bool {
+    use scada_protocol::driver_v1::ErrorCode;
+    a.status == AckStatus::Rejected as i32
+        && (a.error_code == ErrorCode::JournalQueueFull as i32 || a.error_code == ErrorCode::SequenceGap as i32)
 }
 
 /// One client: `pipeline` = 1 is stop-and-wait, > 1 keeps that many batches in flight.
-/// Latency = send of a batch -> its `AppliedVolatile` ACK, in both modes (pipelined
-/// latency therefore includes waiting behind the client's own earlier batches).
+/// Latency = send of a batch -> its applied ACK (`AppliedVolatile`, or with
+/// `--durable-receipts` `AppliedDurable`), in both modes (pipelined latency therefore
+/// includes waiting behind the client's own earlier batches).
 /// `interval`: stop-and-wait only, sleep between batches (low-traffic source).
+/// VS-006: a `JOURNAL_QUEUE_FULL` refusal is explicit backpressure: the client drains
+/// what is in flight, pauses 200 µs and resends from the kernel's
+/// `last_accepted_source_sequence` (refusals are counted, never hidden).
 #[allow(clippy::too_many_arguments)]
 fn run_client(
     socket: PathBuf,
@@ -697,8 +794,10 @@ fn run_client(
             *at += h;
         }
     };
+    let pause = Duration::from_micros(200);
     let mut lat = Vec::new();
     let mut batches = 0u64;
+    let mut refused = 0u64;
     let start = Instant::now();
     let mut v = 1i64;
     if pipeline <= 1 {
@@ -712,7 +811,15 @@ fn run_client(
             let t0 = Instant::now();
             let a = s.request(&msg).expect("request");
             let dt = t0.elapsed().as_nanos() as u64;
-            assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
+            if backpressure(&a) {
+                if el >= warmup {
+                    refused += 1;
+                }
+                seq = a.last_accepted_source_sequence.map_or(seq, |l| l + 1);
+                std::thread::sleep(pause);
+                continue;
+            }
+            assert!(applied_ok(a.status), "{a:?}");
             assert_eq!(a.source_sequence, seq, "ACK out of order");
             if el >= warmup {
                 lat.push(dt);
@@ -725,38 +832,60 @@ fn run_client(
             }
         }
     } else {
-        let (mut sent, mut acked, mut counted) = (0u64, 0u64, 0u64);
+        // `next` = next source sequence to send; `in_flight` = sent, not yet answered.
+        let mut next = seq;
+        let mut counted = 0u64;
         let mut measuring = false;
-        let mut sent_at: std::collections::VecDeque<Instant> = std::collections::VecDeque::with_capacity(64);
+        let mut sent_at: std::collections::VecDeque<(u64, Instant)> = std::collections::VecDeque::with_capacity(64);
+        let mut rewind: Option<u64> = None;
         loop {
             let el = start.elapsed();
             if !measuring && el >= warmup {
                 measuring = true;
                 counted = 0;
+                refused = 0;
             }
             let done = el >= warmup + dur;
-            if !done {
+            if !done && rewind.is_none() {
                 beat(&mut s);
             }
+            if sent_at.is_empty()
+                && let Some(r) = rewind.take()
+            {
+                next = r;
+                if !done {
+                    std::thread::sleep(pause);
+                }
+            }
             let mut queued = false;
-            while !done && sent - acked < pipeline {
-                s.send(&delta(seq + sent, size, v)).expect("send");
-                sent_at.push_back(Instant::now());
-                sent += 1;
+            while !done && rewind.is_none() && (sent_at.len() as u64) < pipeline {
+                s.send(&delta(next, size, v)).expect("send");
+                sent_at.push_back((next, Instant::now()));
+                next += 1;
                 v += 1;
                 queued = true;
             }
             if queued {
                 s.flush().expect("flush");
             }
-            if acked == sent {
-                break;
-            }
+            let Some(&(want, t)) = sent_at.front() else {
+                if done {
+                    break;
+                }
+                continue;
+            };
             let a = s.recv_ack().expect("ack");
-            let t = sent_at.pop_front().expect("in flight");
-            assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
-            assert_eq!(a.source_sequence, seq + acked, "ACK out of order");
-            acked += 1;
+            sent_at.pop_front();
+            assert_eq!(a.source_sequence, want, "ACK out of order");
+            if backpressure(&a) {
+                if measuring && !done {
+                    refused += 1;
+                }
+                let resume = a.last_accepted_source_sequence.map_or(want, |l| l + 1);
+                rewind = Some(rewind.map_or(resume, |r: u64| r.min(resume)));
+                continue;
+            }
+            assert!(applied_ok(a.status), "{a:?}");
             if measuring && !done {
                 counted += 1;
                 lat.push(t.elapsed().as_nanos() as u64);
@@ -764,7 +893,7 @@ fn run_client(
         }
         batches = counted;
     }
-    ClientResult { lat, batches }
+    ClientResult { lat, batches, refused }
 }
 
 /// Kernel-side resource usage over a measured window.
@@ -926,6 +1055,7 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
     let intro = k.introspect();
     let results: Vec<ClientResult> = handles.into_iter().map(|h| h.join().expect("client")).collect();
     let batches: u64 = results.iter().map(|r| r.batches).sum();
+    let refused: u64 = results.iter().map(|r| r.refused).sum();
     let applied = intro.counters.as_ref().map_or(0, |c| c.batches_applied);
     assert!(applied >= batches);
     let lat: Vec<u64> = results.into_iter().flat_map(|r| r.lat).collect();
@@ -937,7 +1067,11 @@ fn cell(spec: &KernelSpec, clients: u32, size: u32, secs: u64, warmup_secs: u64,
         lat: (!lat.is_empty()).then(|| stats(lat)),
         usage,
         scheduler: scheduler_of(&k.ready),
-        diag: stages_kv(&intro) + &supervision_kv(&intro) + &alarm_kv(&intro),
+        diag: stages_kv(&intro)
+            + &supervision_kv(&intro)
+            + &alarm_kv(&intro)
+            + &journal_kv(&k.dir)
+            + &if spec.persistence.is_some() { format!(" bp_refused={refused}") } else { String::new() },
     }
 }
 
@@ -1060,7 +1194,7 @@ fn run_open_rare(
             let Some(scada_protocol::driver_v1::kernel_message::Body::Ack(a)) = m.body else {
                 panic!("unexpected {m:?}")
             };
-            assert_eq!(a.status, AckStatus::AppliedVolatile as i32, "{a:?}");
+            assert!(applied_ok(a.status), "{a:?}");
             assert_eq!(a.source_sequence, seq, "ACK out of order");
             if sched.duration_since(start) >= warmup {
                 sched_lat.push(now.duration_since(sched).as_nanos() as u64);

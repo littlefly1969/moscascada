@@ -3,7 +3,12 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = "../../proto";
-    let files = ["scada/driver/v1/driver.proto", "scada/introspect/v1/introspect.proto", "scada/alarm/v1/alarm.proto"];
+    let files = [
+        "scada/driver/v1/driver.proto",
+        "scada/introspect/v1/introspect.proto",
+        "scada/alarm/v1/alarm.proto",
+        "scada/history/v1/history.proto",
+    ];
     for f in &files {
         println!("cargo:rerun-if-changed={root}/{f}");
     }

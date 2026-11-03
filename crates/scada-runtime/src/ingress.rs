@@ -74,7 +74,7 @@ impl SourceSemaphores {
         let id = match req {
             Request::Connect { source_id, .. } | Request::Disconnect { source_id, .. } => *source_id,
             Request::Batch { batch, .. } => batch.source_id,
-            Request::Introspect { .. } | Request::Tick | Request::Alarm { .. } => return None,
+            Request::Introspect { .. } | Request::Tick | Request::JournalWake | Request::Alarm { .. } => return None,
         };
         self.cfg.core.source_index(id)
     }
@@ -112,6 +112,8 @@ pub fn channel(cfg: &Arc<RuntimeConfig>) -> (Ingress, Inbox) {
                 .max_driver_connections
                 .saturating_add(INTROSPECTION_SESSIONS)
                 .saturating_add(1)
+                // VS-006: one more for the journal writer's wake-up.
+                .saturating_add(u32::from(cfg.persistence.is_some()))
                 .saturating_add(cfg.alarms.as_ref().map_or(0, |a| a.max_control_connections));
             let queue = FairQueue::new(Params {
                 lanes: n + 1, // + introspection lane
@@ -196,7 +198,7 @@ impl FairSender {
         let (lane, kind) = match &req {
             // VS-005: alarm control requests share the introspection control lane (one per
             // control session at a time, stop-and-wait).
-            Request::Introspect { .. } | Request::Tick | Request::Alarm { .. } => {
+            Request::Introspect { .. } | Request::Tick | Request::JournalWake | Request::Alarm { .. } => {
                 (sh.introspection_lane, Kind::Control)
             }
             Request::Connect { .. } | Request::Disconnect { .. } => {
@@ -325,10 +327,16 @@ impl Ingress {
 impl TickWaker {
     /// Try to queue one `Request::Tick` without waiting.
     pub fn try_wake(&self) -> Wake {
+        self.try_wake_with(Request::Tick)
+    }
+
+    /// Try to queue one wake-up request (`Tick`, or VS-006 `JournalWake`) without waiting.
+    /// Each kind has at most one entry queued (its own flag) and a reserved control slot.
+    pub fn try_wake_with(&self, req: Request) -> Wake {
         match self {
             TickWaker::Fifo(w) => match w.upgrade() {
                 None => Wake::Closed,
-                Some(tx) => match tx.try_send(Request::Tick) {
+                Some(tx) => match tx.try_send(req) {
                     Ok(()) => Wake::Queued,
                     Err(mpsc::error::TrySendError::Full(_)) => Wake::Full,
                     Err(mpsc::error::TrySendError::Closed(_)) => Wake::Closed,
@@ -342,7 +350,7 @@ impl TickWaker {
                 }
                 let was_empty = st.queue.is_empty();
                 // The control capacity reserves one entry for the (single) queued tick.
-                if st.queue.push(sh.introspection_lane, Kind::Control, 1, Request::Tick).is_err() {
+                if st.queue.push(sh.introspection_lane, Kind::Control, 1, req).is_err() {
                     return Wake::Full;
                 }
                 drop(st);

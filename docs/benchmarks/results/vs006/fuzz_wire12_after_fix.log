@@ -1,0 +1,6 @@
+Done 13652437 runs in 601 second(s)
+#5750701	DONE   cov: 427 ft: 1542 corp: 506/87Kb lim: 4096 exec/s: 47526 rss: 500Mb
+Done 5750701 runs in 121 second(s)
+#6239956	DONE   cov: 1129 ft: 2671 corp: 506/103Kb lim: 4096 exec/s: 51569 rss: 533Mb
+Done 6239956 runs in 121 second(s)
+EXIT

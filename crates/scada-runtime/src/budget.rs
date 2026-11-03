@@ -59,7 +59,72 @@ pub struct Budget {
     pub alarms: u128,
     /// VS-005: part of `kernel` held by the alarm engine (informational, already in `kernel`).
     pub alarm_core: u128,
+    /// VS-006: journal side (sum of the items below); 0 without `[persistence]`.
+    pub persistence: u128,
+    pub persistence_items: PersistenceBudget,
     pub total: u128,
+}
+
+/// VS-006 (brief §8): RAM of the persistence path, itemized for `--check-config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PersistenceBudget {
+    /// Journal queue: `journal_queue_bytes` of records + per-record box/channel overhead.
+    pub journal_queue: u128,
+    /// One record being built on the sequencer (worst fan-out of a source, largest batch).
+    pub staging: u128,
+    /// Checkpoint export + encoded blob, at most two alive (sequencer → writer).
+    pub checkpoint: u128,
+    /// Historian sessions (pages, encoded responses).
+    pub history_sessions: u128,
+    /// SQLite page caches (writer + read-only pool) and statement caches (estimate).
+    pub sqlite_cache: u128,
+    /// Operator action dedup cache.
+    pub action_cache: u128,
+}
+
+impl PersistenceBudget {
+    pub fn total(&self) -> u128 {
+        self.journal_queue
+            .saturating_add(self.staging)
+            .saturating_add(self.checkpoint)
+            .saturating_add(self.history_sessions)
+            .saturating_add(self.sqlite_cache)
+            .saturating_add(self.action_cache)
+    }
+}
+
+/// Estimated per-connection SQLite overhead besides the page cache (schema, statements).
+pub const SQLITE_CONNECTION_ESTIMATE_BYTES: u128 = 1 << 20;
+
+/// VS-006: persistence items for `cfg` (all 0 without `[persistence]`).
+pub fn persistence_bytes(cfg: &RuntimeConfig) -> PersistenceBudget {
+    let Some(p) = &cfg.persistence else { return PersistenceBudget::default() };
+    let core = &cfg.core;
+    let ops = u128::from(p.journal_queue_operations);
+    let rec = size_of::<scada_journal::OpRecord>() as u128 + 64;
+    let journal_queue = u128::from(p.journal_queue_bytes).saturating_add(m(ops, rec));
+    let fan = core.alarm_table().map_or(0, |t| u128::from(t.worst_fanout().0));
+    let max_obs = u128::from(core.limits().max_observations_per_batch);
+    let staging =
+        m(fan, u128::from(scada_journal::EVENT_RECORD_BYTES)).saturating_add(m(max_obs, 32)).saturating_add(rec);
+    let tags = core.tags().len() as u128;
+    let sources = core.sources().len() as u128;
+    let rules = core.alarm_table().map_or(0, |t| t.len() as u128);
+    let channels: u128 = core.sources().iter().map(|s| s.channels().len() as u128).sum();
+    let one_cp = m(tags, size_of::<scada_core::CheckpointTag>() as u128 + 34)
+        .saturating_add(m(sources, size_of::<scada_core::CheckpointSource>() as u128 + 64))
+        .saturating_add(m(channels, 32))
+        .saturating_add(m(rules, size_of::<scada_core::AlarmStateRecord>() as u128 + 25))
+        .saturating_add(4096);
+    let checkpoint = m(one_cp, 2);
+    let history_sessions = crate::history::history_bound_bytes(p);
+    let readers = if p.history_socket_path.is_some() { u128::from(p.max_history_connections) } else { 0 };
+    let reader_cache = u128::from((p.sqlite_cache_kib / 4).max(256)) * 1024;
+    let sqlite_cache = (u128::from(p.sqlite_cache_kib) * 1024)
+        .saturating_add(SQLITE_CONNECTION_ESTIMATE_BYTES)
+        .saturating_add(m(readers, reader_cache.saturating_add(SQLITE_CONNECTION_ESTIMATE_BYTES)));
+    let action_cache = m(u128::from(p.operator_actions_cache), 16 + 32 + 48);
+    PersistenceBudget { journal_queue, staging, checkpoint, history_sessions, sqlite_cache, action_cache }
 }
 
 impl fmt::Display for Budget {
@@ -79,7 +144,22 @@ impl fmt::Display for Budget {
             self.supervision,
             self.alarms,
             self.alarm_core
-        )
+        )?;
+        if self.persistence > 0 {
+            let p = &self.persistence_items;
+            write!(
+                f,
+                " persistence={} (journal_queue={}, staging={}, checkpoint={}, history_sessions={}, sqlite_cache={}, action_cache={})",
+                self.persistence,
+                p.journal_queue,
+                p.staging,
+                p.checkpoint,
+                p.history_sessions,
+                p.sqlite_cache,
+                p.action_cache
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -144,7 +224,10 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
     let supervision = supervision_bytes(cfg);
     let alarms = alarm_runtime_bytes(cfg);
     let alarm_core = Kernel::alarm_storage_bytes(&cfg.core);
+    let persistence_items = persistence_bytes(cfg);
+    let persistence = persistence_items.total();
     let total = connections
+        .saturating_add(persistence)
         .saturating_add(supervision)
         .saturating_add(alarms)
         .saturating_add(ingress)
@@ -165,6 +248,8 @@ pub fn compute(cfg: &RuntimeConfig, introspection: bool, diag: bool) -> Budget {
         supervision,
         alarms,
         alarm_core,
+        persistence,
+        persistence_items,
         total,
     }
 }
